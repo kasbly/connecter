@@ -1,0 +1,79 @@
+version: 1
+
+server:
+  port: 4000
+  host: "0.0.0.0"
+
+auth:
+  apiKeys:
+    - key: "${CONNECTOR_API_KEY}"
+      label: "kasbly-production"
+
+database:
+  type: postgres
+  host: "${DB_HOST}"
+  port: 5432
+  database: "${DB_NAME}"
+  user: "${DB_USER}"
+  password: "${DB_PASSWORD}"
+  ssl: false
+  pool: { min: 2, max: 10 }
+
+rateLimit:
+  maxRequests: 100
+  windowSeconds: 60
+
+audit:
+  enabled: true
+  filePath: "./logs/audit.log"
+  maxFileSizeMB: 50
+  retentionDays: 90
+
+resources:
+  inventory:
+    table: "Car"
+    baseFilter: 'published = true AND "deletedAt" IS NULL'
+    idColumn: "id"
+    updatedAtColumn: "updatedAt"
+
+    fields:
+      externalId: "id"
+      title: "title"
+      price: "price"
+      currency: "'KRW'"
+      category: "'car'"
+
+    attributes:
+      makeEn: '"makeEn"'
+      makeAr: '"makeAr"'
+      modelEn: '"modelEn"'
+      modelAr: '"modelAr"'
+      year: "year"
+      fuelType: '"fuelType"'
+      transmission: "transmission"
+      kilometers: "kilometers"
+      color: "color"
+
+    searchableColumns: ["title", '"makeEn"', '"modelEn"']
+
+    filterableColumns:
+      year: { column: "year", type: "number" }
+      make: { column: '"makeEn"', type: "string" }
+      fuelType: { column: '"fuelType"', type: "string" }
+      minPrice: { column: "price", type: "gte" }
+      maxPrice: { column: "price", type: "lte" }
+
+    relations:
+      images:
+        table: "Image"
+        foreignKey: '"carId"'
+        referenceKey: "id"
+        fields: { url: "url", type: "type" }
+        imageUrlField: "url"
+        filter: "type = 'gallery' OR type = 'featured'"
+      features:
+        table: "CarFeatures"
+        foreignKey: '"carId"'
+        referenceKey: "id"
+        fields: { name: '"featureName"' }
+        flatten: "name"
