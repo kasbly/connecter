@@ -30,6 +30,14 @@ describe('interpolateEnvVars', () => {
   it('leaves text without variables unchanged', () => {
     expect(interpolateEnvVars('no variables here')).toBe('no variables here');
   });
+
+  it('leaves variables in YAML comments unresolved', () => {
+    vi.stubEnv('HOST', 'localhost');
+
+    expect(interpolateEnvVars('# tls certificate: ${DB_SSL_CA}\nhost: ${HOST}')).toBe(
+      '# tls certificate: ${DB_SSL_CA}\nhost: localhost',
+    );
+  });
 });
 
 describe('loadConfig', () => {

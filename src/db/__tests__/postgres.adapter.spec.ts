@@ -143,6 +143,24 @@ describe('PostgresAdapter statement timeout', () => {
   });
 });
 
+describe('PostgresAdapter pool configuration', () => {
+  beforeEach(() => {
+    knexMock.mockClear();
+    rawMock.mockClear();
+  });
+
+  it('honors configured pool bounds without raising them', async () => {
+    await new PostgresAdapter(createDatabaseConfig({ pool: { min: 1, max: 2 } })).connect();
+
+    expect(knexMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pool: expect.objectContaining({ min: 1, max: 2 }),
+      }),
+    );
+    expect(rawMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('isSafeOrderByColumn', () => {
   it('accepts bare identifiers', () => {
     expect(isSafeOrderByColumn('price')).toBe(true);
