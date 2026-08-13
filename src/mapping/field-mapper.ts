@@ -17,7 +17,7 @@ export function mapRowToInventoryItem(
   config: InventoryResourceConfig,
   relationData: Map<string, Map<string | number, Record<string, unknown>[]>>,
 ): ConnectorInventoryItem {
-  const idValue = row[config.idColumn];
+  const idValue = resolveColumnValue(row, config.idColumn);
   const externalId = String(idValue ?? '');
 
   // Map fixed fields
@@ -39,7 +39,8 @@ export function mapRowToInventoryItem(
   if (config.relations) {
     for (const [relationName, relationConfig] of Object.entries(config.relations)) {
       const relData = relationData.get(relationName);
-      const relRows = relData?.get(idValue as string | number) ?? [];
+      const referenceValue = resolveColumnValue(row, relationConfig.referenceKey);
+      const relRows = relData?.get(referenceValue as string | number) ?? [];
 
       if (relationConfig.imageUrlField) {
         images = relRows
@@ -57,9 +58,11 @@ export function mapRowToInventoryItem(
 
   // Determine updatedAt
   let updatedAt: string | null = null;
-  if (config.updatedAtColumn && row[config.updatedAtColumn]) {
-    const rawDate = row[config.updatedAtColumn];
-    updatedAt = rawDate instanceof Date ? rawDate.toISOString() : String(rawDate);
+  if (config.updatedAtColumn) {
+    const rawDate = resolveColumnValue(row, config.updatedAtColumn);
+    if (rawDate) {
+      updatedAt = rawDate instanceof Date ? rawDate.toISOString() : String(rawDate);
+    }
   }
 
   return {
@@ -75,10 +78,7 @@ export function mapRowToInventoryItem(
   };
 }
 
-function resolveColumnValue(
-  row: Record<string, unknown>,
-  columnExpr: string,
-): unknown {
+export function resolveColumnValue(row: Record<string, unknown>, columnExpr: string): unknown {
   // Handle literal string values wrapped in single quotes, e.g. "'KRW'"
   const literalMatch = /^'(.+)'$/.exec(columnExpr.trim());
   if (literalMatch) {
@@ -95,9 +95,7 @@ function resolveColumnValue(
   return row[columnExpr.trim()];
 }
 
-export function getRelationConfigs(
-  config: InventoryResourceConfig,
-): [string, RelationConfig][] {
+export function getRelationConfigs(config: InventoryResourceConfig): [string, RelationConfig][] {
   if (!config.relations) return [];
   return Object.entries(config.relations);
 }
@@ -129,6 +127,13 @@ export function getRequiredColumns(config: InventoryResourceConfig): string[] {
     for (const columnExpr of Object.values(config.attributes)) {
       if (/^'.*'$/.test(columnExpr.trim())) continue;
       columns.add(columnExpr);
+    }
+  }
+
+  // Parent columns referenced by relation foreign keys
+  if (config.relations) {
+    for (const relationConfig of Object.values(config.relations)) {
+      columns.add(relationConfig.referenceKey);
     }
   }
 

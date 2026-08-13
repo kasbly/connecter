@@ -157,12 +157,11 @@ describe('suggestRelations', () => {
     const suggestions = suggestRelations('Car', tables, fks);
     expect(suggestions).toHaveLength(1);
     expect(suggestions[0]!.relationType).toBe('features');
+    expect(suggestions[0]!.confidence).toBe('low');
   });
 
   it('returns empty when no foreign keys point to table', () => {
-    const tables: IntrospectedTable[] = [
-      { name: 'Car', rowCount: 100, columns: [col('id')] },
-    ];
+    const tables: IntrospectedTable[] = [{ name: 'Car', rowCount: 100, columns: [col('id')] }];
     const suggestions = suggestRelations('Car', tables, []);
     expect(suggestions).toEqual([]);
   });
@@ -191,11 +190,7 @@ describe('suggestSearchableColumns', () => {
   });
 
   it('returns empty for table with no text columns', () => {
-    const columns = [
-      col('id', 'integer', true),
-      col('price', 'numeric'),
-      col('year', 'integer'),
-    ];
+    const columns = [col('id', 'integer', true), col('price', 'numeric'), col('year', 'integer')];
     expect(suggestSearchableColumns(columns)).toEqual([]);
   });
 
@@ -209,12 +204,14 @@ describe('suggestSearchableColumns', () => {
 
 describe('suggestFilterableColumns', () => {
   it('suggests price as gte/lte pair', () => {
-    const columns = [
-      col('id', 'integer', true),
-      col('price', 'numeric'),
-    ];
+    const columns = [col('id', 'integer', true), col('price', 'numeric')];
     const fieldMappings = [
-      { columnName: 'price', suggestedMapping: 'price', confidence: 'high' as const, mappingType: 'field' as const },
+      {
+        columnName: 'price',
+        suggestedMapping: 'price',
+        confidence: 'high' as const,
+        mappingType: 'field' as const,
+      },
     ];
 
     const suggestions = suggestFilterableColumns(columns, fieldMappings, []);
@@ -227,46 +224,60 @@ describe('suggestFilterableColumns', () => {
   });
 
   it('suggests numeric columns as number filters', () => {
-    const columns = [
-      col('id', 'integer', true),
-      col('year', 'integer'),
-    ];
+    const columns = [col('id', 'integer', true), col('year', 'integer')];
     const fieldMappings = [
-      { columnName: 'year', suggestedMapping: 'year', confidence: 'medium' as const, mappingType: 'attribute' as const },
+      {
+        columnName: 'year',
+        suggestedMapping: 'year',
+        confidence: 'medium' as const,
+        mappingType: 'attribute' as const,
+      },
     ];
 
     const suggestions = suggestFilterableColumns(columns, fieldMappings, []);
-    expect(suggestions).toContainEqual(expect.objectContaining({
-      filterName: 'year',
-      filterType: 'number',
-    }));
+    expect(suggestions).toContainEqual(
+      expect.objectContaining({
+        filterName: 'year',
+        filterType: 'number',
+      }),
+    );
   });
 
   it('suggests text attribute columns as string filters', () => {
-    const columns = [
-      col('id', 'integer', true),
-      col('fuelType', 'character varying'),
-    ];
+    const columns = [col('id', 'integer', true), col('fuelType', 'character varying')];
     const fieldMappings = [
-      { columnName: 'fuelType', suggestedMapping: 'fuelType', confidence: 'medium' as const, mappingType: 'attribute' as const },
+      {
+        columnName: 'fuelType',
+        suggestedMapping: 'fuelType',
+        confidence: 'medium' as const,
+        mappingType: 'attribute' as const,
+      },
     ];
 
     const suggestions = suggestFilterableColumns(columns, fieldMappings, []);
-    expect(suggestions).toContainEqual(expect.objectContaining({
-      filterName: 'fuelType',
-      filterType: 'string',
-    }));
+    expect(suggestions).toContainEqual(
+      expect.objectContaining({
+        filterName: 'fuelType',
+        filterType: 'string',
+      }),
+    );
   });
 
   it('skips free-text columns like title and description', () => {
-    const columns = [
-      col('id', 'integer', true),
-      col('title', 'text'),
-      col('description', 'text'),
-    ];
+    const columns = [col('id', 'integer', true), col('title', 'text'), col('description', 'text')];
     const fieldMappings = [
-      { columnName: 'title', suggestedMapping: 'title', confidence: 'high' as const, mappingType: 'field' as const },
-      { columnName: 'description', suggestedMapping: 'description', confidence: 'high' as const, mappingType: 'field' as const },
+      {
+        columnName: 'title',
+        suggestedMapping: 'title',
+        confidence: 'high' as const,
+        mappingType: 'field' as const,
+      },
+      {
+        columnName: 'description',
+        suggestedMapping: 'description',
+        confidence: 'high' as const,
+        mappingType: 'field' as const,
+      },
     ];
 
     const suggestions = suggestFilterableColumns(columns, fieldMappings, []);
@@ -276,24 +287,19 @@ describe('suggestFilterableColumns', () => {
   });
 
   it('includes additional attributes', () => {
-    const columns = [
-      col('id', 'integer', true),
-      col('color', 'character varying'),
-    ];
+    const columns = [col('id', 'integer', true), col('color', 'character varying')];
 
     const suggestions = suggestFilterableColumns(columns, [], ['color']);
-    expect(suggestions).toContainEqual(expect.objectContaining({
-      filterName: 'color',
-      filterType: 'string',
-    }));
+    expect(suggestions).toContainEqual(
+      expect.objectContaining({
+        filterName: 'color',
+        filterType: 'string',
+      }),
+    );
   });
 
   it('skips FK and timestamp columns', () => {
-    const columns = [
-      col('id', 'integer', true),
-      col('tenantId', 'text'),
-      col('createdAt', 'text'),
-    ];
+    const columns = [col('id', 'integer', true), col('tenantId', 'text'), col('createdAt', 'text')];
 
     const suggestions = suggestFilterableColumns(columns, [], []);
     expect(suggestions).toEqual([]);

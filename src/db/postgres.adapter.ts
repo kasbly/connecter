@@ -11,6 +11,75 @@ import type {
   ColumnInfo,
 } from './adapter.interface.js';
 
+/**
+ * Matches a bare SQL identifier (`price`, `updatedAt`) or a single double-quoted
+ * identifier (`"makeEn"`) — the only two column-expression shapes
+ * `InventoryResourceConfig` produces (see connector.config.example.yml). The quote
+ * marks must be balanced (both present or both absent) — an unterminated quote is
+ * refused rather than silently accepted. Anything else — whitespace, parentheses,
+ * semicolons, quoted content, SQL keywords used as expressions — is refused too.
+ */
+export const SAFE_ORDER_BY_COLUMN_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*|"[A-Za-z_][A-Za-z0-9_]*")$/;
+
+export function isSafeOrderByColumn(column: string): boolean {
+  return SAFE_ORDER_BY_COLUMN_PATTERN.test(column);
+}
+
+/**
+ * Builds the raw `ORDER BY` fragment for {@link PostgresAdapter.query}.
+ *
+ * Defense in depth for #14461: `query-builder.ts` already restricts `sort.column`
+ * to the resource's configured columns before it ever reaches this adapter, but
+ * this adapter must never interpolate an arbitrary string into raw SQL regardless
+ * of what a caller passes in. `sort.direction` is a TS union type narrowed to
+ * exactly 'asc' | 'desc' by every caller, so it never needs the same treatment.
+ */
+export function buildOrderByClause(sort: SortOptions): string {
+  if (!isSafeOrderByColumn(sort.column)) {
+    throw new Error(`Refusing to sort by unsafe column expression: ${JSON.stringify(sort.column)}`);
+  }
+  const direction = sort.direction === 'asc' ? 'ASC' : 'DESC';
+  return `${sort.column} ${direction} NULLS LAST`;
+}
+
+/**
+ * Default ceiling for the row count that backs `total`/`totalPages` on
+ * `GET /inventory`.
+ *
+ * The list COUNT carries the same predicates as the data query, but — unlike
+ * the data query — it cannot be short-circuited by the page's `LIMIT`, so an
+ * exact `COUNT(*)` scans *every* matching row. With the search predicates
+ * arriving as unindexable `ILIKE '%term%'` (see `query-builder.ts`), that made
+ * every searched request pay two full scans of the merchant's production table
+ * instead of one (#17420).
+ *
+ * Counting through a `LIMIT`ed subquery instead bounds that second scan: the
+ * total stays exact for result sets up to the cap (the overwhelming majority of
+ * real requests) and degrades to "at least this many" beyond it, flagged by
+ * {@link QueryResult.totalIsCapped}.
+ */
+export const DEFAULT_COUNT_LIMIT = 1000;
+
+function escapeLikePattern(value: unknown): string {
+  return String(value).replace(/[\\%_]/g, '\\$&');
+}
+
+/**
+ * How many matching rows the count for `pagination` may examine.
+ *
+ * Never below `offset + pageSize + 1`, so the cap can never hide the page being
+ * served, and a caller paging past the cap still sees one more page's worth of
+ * total than it has consumed — i.e. `totalPages` keeps advertising a next page
+ * while one exists.
+ */
+export function resolveCountLimit(
+  pagination: PaginationOptions,
+  countLimit: number = DEFAULT_COUNT_LIMIT,
+): number {
+  const offset = (pagination.page - 1) * pagination.pageSize;
+  return Math.max(countLimit, offset + pagination.pageSize + 1);
+}
+
 export class PostgresAdapter implements DatabaseAdapter {
   private db: Knex | null = null;
   private readonly config: DatabaseConfig;
@@ -20,10 +89,6 @@ export class PostgresAdapter implements DatabaseAdapter {
   }
 
   async connect(): Promise<void> {
-    // Ensure pool min is high enough for parallel queries (data + count + relations)
-    const poolMin = Math.max(this.config.pool.min, 5);
-    const poolMax = Math.max(this.config.pool.max, poolMin);
-
     this.db = knex({
       client: 'pg',
       connection: {
@@ -32,14 +97,26 @@ export class PostgresAdapter implements DatabaseAdapter {
         database: this.config.database,
         user: this.config.user,
         password: this.config.password,
-        ssl: this.config.ssl ? { rejectUnauthorized: false } : false,
+        ssl: this.config.ssl
+          ? {
+              rejectUnauthorized: this.config.sslRejectUnauthorized !== false,
+              ...(this.config.sslCa ? { ca: this.config.sslCa } : {}),
+            }
+          : false,
       },
       pool: {
-        min: poolMin,
-        max: poolMax,
-        afterCreate: (conn: { query: (sql: string, cb: (err: unknown) => void) => void }, done: (err: unknown) => void) => {
+        min: this.config.pool.min,
+        max: this.config.pool.max,
+        afterCreate: (
+          conn: { query: (sql: string, cb: (err: unknown) => void) => void },
+          done: (err: unknown) => void,
+        ) => {
           conn.query('SET default_transaction_read_only = ON', (err) => {
-            done(err);
+            if (err) {
+              done(err);
+              return;
+            }
+            conn.query(`SET statement_timeout = ${this.config.statementTimeoutMs}`, done);
           });
         },
       },
@@ -47,9 +124,7 @@ export class PostgresAdapter implements DatabaseAdapter {
 
     // Warm up the connection pool — create all min connections in parallel
     // so they're ready for the first request
-    await Promise.all(
-      Array.from({ length: poolMin }, () => this.db!.raw('SELECT 1')),
-    );
+    await Promise.all(Array.from({ length: this.config.pool.min }, () => this.db!.raw('SELECT 1')));
   }
 
   async disconnect(): Promise<void> {
@@ -73,10 +148,10 @@ export class PostgresAdapter implements DatabaseAdapter {
     baseFilter?: string,
   ): Knex.QueryBuilder {
     if (baseFilter) {
-      queryBuilder = queryBuilder.whereRaw(baseFilter);
+      queryBuilder = queryBuilder.whereRaw(`(${baseFilter})`);
     }
 
-    // Split conditions: ILIKE conditions use OR logic, everything else uses AND
+    // Split conditions: ILIKE conditions use OR logic within groups, AND between groups
     const searchConditions = conditions.filter((c) => c.operator === 'ILIKE');
     const filterConditions = conditions.filter((c) => c.operator !== 'ILIKE');
 
@@ -89,13 +164,27 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
 
     if (searchConditions.length > 0) {
-      queryBuilder = queryBuilder.where(function (this: Knex.QueryBuilder) {
-        for (let i = 0; i < searchConditions.length; i++) {
-          const sc = searchConditions[i]!;
-          const method = i === 0 ? 'whereRaw' : 'orWhereRaw';
-          this[method](`${sc.column} ILIKE ?`, [`%${String(sc.value)}%`]);
+      // Group search conditions by their _group key (each group is OR'd internally, AND'd between groups)
+      const groups = new Map<string, QueryCondition[]>();
+      for (const sc of searchConditions) {
+        const groupKey = sc._group ?? '__default';
+        const existing = groups.get(groupKey);
+        if (existing) {
+          existing.push(sc);
+        } else {
+          groups.set(groupKey, [sc]);
         }
-      });
+      }
+
+      for (const groupConditions of groups.values()) {
+        queryBuilder = queryBuilder.where(function (this: Knex.QueryBuilder) {
+          for (let i = 0; i < groupConditions.length; i++) {
+            const sc = groupConditions[i]!;
+            const method = i === 0 ? 'whereRaw' : 'orWhereRaw';
+            this[method](`${sc.column} ILIKE ? ESCAPE '\\'`, [`%${escapeLikePattern(sc.value)}%`]);
+          }
+        });
+      }
     }
 
     return queryBuilder;
@@ -113,27 +202,32 @@ export class PostgresAdapter implements DatabaseAdapter {
     const offset = (pagination.page - 1) * pagination.pageSize;
 
     // Build data query with specific columns
-    let dataQuery = selectColumns?.length
-      ? db(table).select(selectColumns.map((col) => db.raw(col)))
-      : db(table);
+    let dataQuery: Knex.QueryBuilder = db(table);
+    if (selectColumns?.length) {
+      dataQuery = dataQuery.select(selectColumns.map((col) => db.raw(col)));
+    }
 
     dataQuery = this.applyBaseFilterAndConditions(dataQuery, db, conditions, baseFilter);
 
-    // Build count query separately
-    let countQuery = db(table).count('* as count');
-    countQuery = this.applyBaseFilterAndConditions(countQuery, db, conditions, baseFilter);
+    // Build the count query separately, over a LIMITed subquery so Postgres can
+    // stop scanning once the cap is reached instead of walking every matching
+    // row on the merchant's table (#17420).
+    const countLimit = resolveCountLimit(pagination);
+    let countRows: Knex.QueryBuilder = db(table).select(db.raw('1'));
+    countRows = this.applyBaseFilterAndConditions(countRows, db, conditions, baseFilter);
+    const countQuery = db.count('* as count').from(countRows.limit(countLimit).as('bounded_count'));
 
     // Run count and data queries in parallel
     const [countResult, rows] = await Promise.all([
       countQuery.first(),
       dataQuery
-        .orderByRaw(`${sort.column} ${sort.direction === 'asc' ? 'ASC' : 'DESC'} NULLS LAST`)
+        .orderByRaw(buildOrderByClause(sort))
         .limit(pagination.pageSize)
         .offset(offset) as Promise<Record<string, unknown>[]>,
     ]);
 
     const total = Number((countResult as Record<string, unknown>)?.count ?? 0);
-    return { rows, total };
+    return { rows, total, totalIsCapped: total >= countLimit };
   }
 
   async queryById(
@@ -144,15 +238,19 @@ export class PostgresAdapter implements DatabaseAdapter {
     selectColumns?: string[],
   ): Promise<Record<string, unknown> | null> {
     const db = this.getDb();
-    let queryBuilder = selectColumns?.length
-      ? db(table).select(selectColumns.map((col) => db.raw(col))).whereRaw(`${idColumn} = ?`, [id])
-      : db(table).whereRaw(`${idColumn} = ?`, [id]);
+    let queryBuilder: Knex.QueryBuilder = db(table);
 
-    if (baseFilter) {
-      queryBuilder = queryBuilder.whereRaw(baseFilter);
+    if (selectColumns?.length) {
+      queryBuilder = queryBuilder.select(selectColumns.map((col) => db.raw(col)));
     }
 
-    const row = await queryBuilder.first() as Record<string, unknown> | undefined;
+    queryBuilder = queryBuilder.whereRaw(`${idColumn} = ?`, [id]);
+
+    if (baseFilter) {
+      queryBuilder = queryBuilder.andWhereRaw(`(${baseFilter})`);
+    }
+
+    const row = (await queryBuilder.first()) as Record<string, unknown> | undefined;
     return row ?? null;
   }
 
@@ -167,9 +265,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
 
     // Use a single raw query for maximum performance — avoids Knex builder overhead
-    const selectParts = Object.entries(query.fields).map(
-      ([alias, col]) => `${col} as "${alias}"`,
-    );
+    const selectParts = Object.entries(query.fields).map(([alias, col]) => `${col} as "${alias}"`);
     selectParts.push(`${query.foreignKey} as "__fk"`);
 
     const placeholders = query.parentIds.map(() => '?').join(', ');

@@ -1,5 +1,6 @@
+import Fastify from 'fastify';
 import { describe, it, expect } from 'vitest';
-import { findMatchingKey } from '../api-key.guard.js';
+import { createApiKeyGuard, findMatchingKey } from '../api-key.guard.js';
 
 describe('findMatchingKey', () => {
   const keys = [
@@ -30,5 +31,19 @@ describe('findMatchingKey', () => {
   it('does not match partial keys', () => {
     const result = findMatchingKey('test-key', keys);
     expect(result).toBeUndefined();
+  });
+});
+
+describe('createApiKeyGuard', () => {
+  it('skips authentication for health checks with query parameters', async () => {
+    const app = Fastify();
+    app.addHook('onRequest', createApiKeyGuard({ apiKeys: [{ key: 'test-key', label: 'test' }] }));
+    app.get('/health', () => ({ status: 'ok' }));
+
+    const response = await app.inject({ method: 'GET', url: '/health?cachebust=1' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ status: 'ok' });
+    await app.close();
   });
 });

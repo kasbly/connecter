@@ -3,6 +3,14 @@ import { z } from 'zod';
 const serverSchema = z.object({
   port: z.number().int().min(1).max(65535).default(4000),
   host: z.string().default('0.0.0.0'),
+  // SECURITY: comma-separated list of trusted reverse-proxy IPs/CIDRs (e.g.
+  // '10.0.0.0/8,203.0.113.5'). Left unset by default because the connector is
+  // merchant-self-hosted with no guaranteed proxy in front of it — the
+  // deployment ships listening on 0.0.0.0 with no bundled reverse proxy
+  // (see docker-compose.yml). Forwarded headers (X-Forwarded-For, X-Real-IP)
+  // are only trusted when the direct socket peer matches this allowlist;
+  // otherwise the raw socket peer IP is used, fail-closed against spoofing.
+  trustedProxies: z.string().min(1).optional(),
 });
 
 const authKeySchema = z.object({
@@ -27,6 +35,9 @@ const databaseSchema = z.object({
   user: z.string().min(1),
   password: z.string(),
   ssl: z.boolean().default(false),
+  sslCa: z.string().min(1).optional(),
+  sslRejectUnauthorized: z.boolean().default(true),
+  statementTimeoutMs: z.number().int().min(100).max(120_000).default(10_000),
   pool: databasePoolSchema.default({ min: 2, max: 10 }),
 });
 
@@ -38,7 +49,7 @@ const rateLimitSchema = z.object({
 const auditSchema = z.object({
   enabled: z.boolean().default(true),
   filePath: z.string().default('./logs/audit.log'),
-  maxFileSizeMB: z.number().min(1).default(50),
+  maxFileSizeMB: z.number().min(1).max(500).default(50),
   retentionDays: z.number().int().min(1).default(90),
 });
 

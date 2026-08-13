@@ -1,8 +1,12 @@
 import type { InventoryResourceConfig } from '../config/config.types.js';
 import type { QueryCondition, PaginationOptions, SortOptions } from '../db/adapter.interface.js';
+import { getRequiredColumns } from './field-mapper.js';
 
 const MAX_PAGE_SIZE = 100;
+const MAX_PAGE_OFFSET = 100_000;
 const DEFAULT_PAGE_SIZE = 20;
+const MAX_SEARCH_LENGTH = 200;
+const MAX_SEARCH_TERMS = 10;
 
 export interface ParsedQuery {
   conditions: QueryCondition[];
@@ -11,48 +15,113 @@ export interface ParsedQuery {
 }
 
 export interface RawQueryParams {
-  page?: string;
-  pageSize?: string;
-  search?: string;
-  updatedSince?: string;
-  sortBy?: string;
-  sortDirection?: string;
-  [key: string]: string | undefined;
+  page?: string | string[];
+  pageSize?: string | string[];
+  search?: string | string[];
+  updatedSince?: string | string[];
+  sortBy?: string | string[];
+  sortDirection?: string | string[];
+  [key: string]: string | string[] | undefined;
 }
 
-export function buildQuery(
-  params: RawQueryParams,
-  config: InventoryResourceConfig,
-): ParsedQuery {
+export class QueryValidationError extends Error {
+  readonly statusCode = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'QueryValidationError';
+  }
+}
+
+function getSingleQueryValue(params: RawQueryParams, key: string): string | undefined {
+  const value = params[key];
+  if (Array.isArray(value)) {
+    throw new QueryValidationError(`Query parameter "${key}" must be provided only once`);
+  }
+  return value;
+}
+
+function parseNumericFilter(value: string, key: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new QueryValidationError(`Query parameter "${key}" must be a finite number`);
+  }
+  return parsed;
+}
+
+export function buildQuery(params: RawQueryParams, config: InventoryResourceConfig): ParsedQuery {
   const conditions: QueryCondition[] = [];
+  const pageParam = getSingleQueryValue(params, 'page');
+  const pageSizeParam = getSingleQueryValue(params, 'pageSize');
+  const search = getSingleQueryValue(params, 'search');
+  const updatedSince = getSingleQueryValue(params, 'updatedSince');
+  const requestedSortBy = getSingleQueryValue(params, 'sortBy');
+  const requestedSortDirection = getSingleQueryValue(params, 'sortDirection');
+
+  if (search && search.length > MAX_SEARCH_LENGTH) {
+    throw new QueryValidationError(
+      `Query parameter "search" must not exceed ${MAX_SEARCH_LENGTH} characters`,
+    );
+  }
 
   // Pagination
-  const page = Math.max(1, parseInt(params.page ?? '1', 10) || 1);
-  const rawPageSize = parseInt(params.pageSize ?? String(DEFAULT_PAGE_SIZE), 10) || DEFAULT_PAGE_SIZE;
+  const page = Math.max(1, parseInt(pageParam ?? '1', 10) || 1);
+  const rawPageSize = parseInt(pageSizeParam ?? String(DEFAULT_PAGE_SIZE), 10) || DEFAULT_PAGE_SIZE;
   const pageSize = Math.min(Math.max(1, rawPageSize), MAX_PAGE_SIZE);
+  const offset = (page - 1) * pageSize;
+  if (offset > MAX_PAGE_OFFSET) {
+    throw new QueryValidationError(
+      `Query parameter "page" must not exceed an offset of ${MAX_PAGE_OFFSET} rows`,
+    );
+  }
 
-  // Sort
+  // Sort — sortBy is client-controlled (query string) and ends up interpolated into a raw
+  // ORDER BY clause in postgres.adapter.ts, so it must never be trusted as-is (#14461).
+  // Restrict it to columns the resource config actually knows about — reusing
+  // getRequiredColumns() (the same set already used to build the SELECT clause) as the
+  // allowlist, rather than maintaining a second list that could drift from the config.
+  // Anything else — including SQL injection payloads — silently falls back to the default
+  // sort column instead of ever reaching raw SQL.
   const defaultSortColumn = config.updatedAtColumn ?? config.idColumn;
-  const sortBy = params.sortBy ?? defaultSortColumn;
-  const sortDirection = params.sortDirection === 'asc' ? 'asc' as const : 'desc' as const;
+  const allowedSortColumns = new Set(getRequiredColumns(config));
+  const sortBy =
+    requestedSortBy !== undefined && allowedSortColumns.has(requestedSortBy)
+      ? requestedSortBy
+      : defaultSortColumn;
+  const sortDirection = requestedSortDirection === 'asc' ? ('asc' as const) : ('desc' as const);
 
   // Search across searchable columns
-  if (params.search && config.searchableColumns && config.searchableColumns.length > 0) {
-    for (const col of config.searchableColumns) {
-      conditions.push({
-        column: col,
-        operator: 'ILIKE',
-        value: params.search,
-      });
+  // Split search into individual terms — each term must match at least one searchable column (AND between terms, OR between columns per term)
+  if (search && config.searchableColumns && config.searchableColumns.length > 0) {
+    const searchTerms = search
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0)
+      .slice(0, MAX_SEARCH_TERMS);
+
+    for (const term of searchTerms) {
+      for (const col of config.searchableColumns) {
+        conditions.push({
+          column: col,
+          operator: 'ILIKE',
+          value: term,
+          _group: term,
+        });
+      }
     }
   }
 
   // Updated since filter
-  if (params.updatedSince && config.updatedAtColumn) {
+  if (updatedSince && Number.isNaN(Date.parse(updatedSince))) {
+    throw new QueryValidationError(
+      'Query parameter "updatedSince" must be a valid date or timestamp',
+    );
+  }
+  if (updatedSince && config.updatedAtColumn) {
     conditions.push({
       column: config.updatedAtColumn,
       operator: '>=',
-      value: params.updatedSince,
+      value: new Date(updatedSince).toISOString(),
     });
   }
 
@@ -60,7 +129,7 @@ export function buildQuery(
   if (config.filterableColumns) {
     for (const [filterKey, filterConfig] of Object.entries(config.filterableColumns)) {
       const paramKey = `filter.${filterKey}`;
-      const paramValue = params[paramKey];
+      const paramValue = getSingleQueryValue(params, paramKey);
       if (paramValue === undefined || paramValue === '') continue;
 
       switch (filterConfig.type) {
@@ -75,21 +144,21 @@ export function buildQuery(
           conditions.push({
             column: filterConfig.column,
             operator: '=',
-            value: Number(paramValue),
+            value: parseNumericFilter(paramValue, paramKey),
           });
           break;
         case 'gte':
           conditions.push({
             column: filterConfig.column,
             operator: '>=',
-            value: Number(paramValue),
+            value: parseNumericFilter(paramValue, paramKey),
           });
           break;
         case 'lte':
           conditions.push({
             column: filterConfig.column,
             operator: '<=',
-            value: Number(paramValue),
+            value: parseNumericFilter(paramValue, paramKey),
           });
           break;
       }

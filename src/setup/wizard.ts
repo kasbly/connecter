@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { chmodSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { input, select, confirm, checkbox } from '@inquirer/prompts';
-import yaml from 'js-yaml';
-import { introspectDatabase, type IntrospectedTable } from './introspect.js';
+import { input, select, confirm, checkbox, password } from '@inquirer/prompts';
+import * as yaml from 'js-yaml';
+import { introspectDatabase } from './introspect.js';
 import {
   suggestFieldMappings,
   suggestIdColumn,
@@ -23,15 +23,13 @@ export async function runWizard(): Promise<void> {
   console.log('Step 1: Database Connection');
   const dbType = await select({
     message: 'Database type:',
-    choices: [
-      { name: 'PostgreSQL', value: 'postgres' as const },
-    ],
+    choices: [{ name: 'PostgreSQL', value: 'postgres' as const }],
   });
   const dbHost = await input({ message: 'Host:', default: 'localhost' });
   const dbPort = await input({ message: 'Port:', default: '5432' });
   const dbName = await input({ message: 'Database name:' });
   const dbUser = await input({ message: 'Username:' });
-  const dbPassword = await input({ message: 'Password:', transformer: () => '****' });
+  const dbPassword = await password({ message: 'Password:', mask: true });
 
   console.log('\nConnecting...');
   const { db, result } = await introspectDatabase({
@@ -170,7 +168,11 @@ export async function runWizard(): Promise<void> {
 
   // Step 5: Relations
   console.log('\nStep 5: Related Tables');
-  const relationSuggestions = suggestRelations(selectedTableName, result.tables, result.foreignKeys);
+  const relationSuggestions = suggestRelations(
+    selectedTableName,
+    result.tables,
+    result.foreignKeys,
+  );
   const relations: Record<string, unknown> = {};
 
   for (const suggestion of relationSuggestions) {
@@ -183,34 +185,52 @@ export async function runWizard(): Promise<void> {
     });
 
     if (addRelation) {
+      const selectableColumns = relTable.columns.filter(
+        (col) => col.name !== suggestion.foreignKeyColumn && !col.isPrimaryKey,
+      );
+      const defaultColumn =
+        suggestion.relationType === 'images'
+          ? selectableColumns.find((col) => /url$/i.test(col.name) || /^src$/i.test(col.name))
+          : suggestion.relationType === 'features'
+            ? selectableColumns.find(
+                (col) =>
+                  /name/i.test(col.name) || /value/i.test(col.name) || /label/i.test(col.name),
+              )
+            : undefined;
+      const selectedColumns = await checkbox({
+        message: `Select columns from ${suggestion.table} to expose:`,
+        choices: selectableColumns.map((col) => ({
+          name: col.name,
+          value: col.name,
+          checked: col.name === defaultColumn?.name,
+        })),
+      });
+      const selectedColumnNames = new Set(selectedColumns);
       const fieldsMap: Record<string, string> = {};
-      for (const col of relTable.columns) {
-        if (col.name === suggestion.foreignKeyColumn) continue;
-        if (col.isPrimaryKey) continue;
+      for (const col of selectableColumns) {
+        if (!selectedColumnNames.has(col.name)) continue;
         fieldsMap[col.name] = quoteIfNeeded(col.name);
       }
 
       const relation: Record<string, unknown> = {
         table: suggestion.table,
         foreignKey: quoteIfNeeded(suggestion.foreignKeyColumn),
-        referenceKey: idColumn,
+        referenceKey: quoteIfNeeded(idColumn),
         fields: fieldsMap,
       };
 
       if (suggestion.relationType === 'images') {
         // Find the URL column
-        const urlCol = relTable.columns.find((c) =>
-          /url$/i.test(c.name) || /^src$/i.test(c.name),
-        );
-        if (urlCol) {
+        const urlCol = relTable.columns.find((c) => /url$/i.test(c.name) || /^src$/i.test(c.name));
+        if (urlCol && selectedColumnNames.has(urlCol.name)) {
           relation['imageUrlField'] = urlCol.name;
         }
       } else if (suggestion.relationType === 'features') {
         // Find the name/value column to flatten
-        const nameCol = relTable.columns.find((c) =>
-          /name/i.test(c.name) || /value/i.test(c.name) || /label/i.test(c.name),
+        const nameCol = relTable.columns.find(
+          (c) => /name/i.test(c.name) || /value/i.test(c.name) || /label/i.test(c.name),
         );
-        if (nameCol) {
+        if (nameCol && selectedColumnNames.has(nameCol.name)) {
           relation['flatten'] = nameCol.name;
         }
       }
@@ -237,7 +257,7 @@ export async function runWizard(): Promise<void> {
   const fields: Record<string, string> = {};
   const attributes: Record<string, string> = {};
 
-  fields['externalId'] = idColumn;
+  fields['externalId'] = quoteIfNeeded(idColumn);
   for (const s of suggestions) {
     if (s.mappingType === 'field') {
       fields[s.suggestedMapping] = quoteIfNeeded(s.columnName);
@@ -263,6 +283,7 @@ export async function runWizard(): Promise<void> {
       user: '${DB_USER}',
       password: '${DB_PASSWORD}',
       ssl: false,
+      statementTimeoutMs: 10000,
       pool: { min: 2, max: 10 },
     },
     rateLimit: { maxRequests: 100, windowSeconds: 60 },
@@ -275,11 +296,9 @@ export async function runWizard(): Promise<void> {
     resources: {
       inventory: {
         table: selectedTableName,
-        ...(baseFilterParts.length > 0
-          ? { baseFilter: baseFilterParts.join(' AND ') }
-          : {}),
-        idColumn,
-        ...(updatedAtColumn ? { updatedAtColumn } : {}),
+        ...(baseFilterParts.length > 0 ? { baseFilter: baseFilterParts.join(' AND ') } : {}),
+        idColumn: quoteIfNeeded(idColumn),
+        ...(updatedAtColumn ? { updatedAtColumn: quoteIfNeeded(updatedAtColumn) } : {}),
         fields,
         ...(Object.keys(attributes).length > 0 ? { attributes } : {}),
         ...(searchableColumns.length > 0
@@ -300,22 +319,36 @@ export async function runWizard(): Promise<void> {
     },
   };
 
+  const configuredRelations = Object.entries(relations);
+  if (configuredRelations.length > 0) {
+    console.log('\nRelation columns to expose:');
+    for (const [relationName, relationConfig] of configuredRelations) {
+      const relationFields = (relationConfig as { fields: Record<string, string> }).fields;
+      const columnNames = Object.keys(relationFields);
+      console.log(
+        `  ${relationName}: ${columnNames.length > 0 ? columnNames.join(', ') : '(none)'}`,
+      );
+    }
+  }
+
   // Write config file
   const configPath = resolve('connector.config.yml');
-  const yamlContent = yaml.dump(config, { lineWidth: 120, quotingType: '"' });
-  writeFileSync(configPath, yamlContent, 'utf-8');
+  // js-yaml v5 replaced `quotingType: '"'` with `quoteStyle: 'double'`.
+  const yamlContent = yaml.dump(config, { lineWidth: 120, quoteStyle: 'double' });
+  writePrivateFile(configPath, yamlContent);
   console.log(`✅ Configuration saved to ${configPath}`);
 
   // Write .env file
   const envPath = resolve('.env');
-  const envContent = [
-    `DB_HOST=${dbHost}`,
-    `DB_NAME=${dbName}`,
-    `DB_USER=${dbUser}`,
-    `DB_PASSWORD=${dbPassword}`,
-    `CONNECTOR_API_KEY=${apiKey}`,
-  ].join('\n') + '\n';
-  writeFileSync(envPath, envContent, 'utf-8');
+  const envContent =
+    [
+      `DB_HOST=${dbHost}`,
+      `DB_NAME=${dbName}`,
+      `DB_USER=${dbUser}`,
+      `DB_PASSWORD=${dbPassword}`,
+      `CONNECTOR_API_KEY=${apiKey}`,
+    ].join('\n') + '\n';
+  writePrivateFile(envPath, envContent);
   console.log(`✅ Environment saved to ${envPath}`);
 
   console.log('\n   Start the connector: docker compose up -d\n');
@@ -323,10 +356,14 @@ export async function runWizard(): Promise<void> {
   await db.destroy();
 }
 
-function quoteIfNeeded(name: string): string {
-  // Quote if the name has uppercase letters or is a reserved word
-  if (/[A-Z]/.test(name)) {
-    return `"${name}"`;
-  }
-  return name;
+/** Write generated credentials/config owner-only, repairing existing files on reruns. */
+export function writePrivateFile(path: string, content: string): void {
+  writeFileSync(path, content, { encoding: 'utf-8', mode: 0o600 });
+  chmodSync(path, 0o600);
+}
+
+export function quoteIfNeeded(name: string): string {
+  // Always quote generated PostgreSQL identifiers so reserved words and
+  // case-sensitive or otherwise unusual column names remain valid SQL.
+  return `"${name.replaceAll('"', '""')}"`;
 }

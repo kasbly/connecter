@@ -1,4 +1,8 @@
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { ZodError } from 'zod';
 import { interpolateEnvVars, loadConfig } from '../config.loader.js';
 
 describe('interpolateEnvVars', () => {
@@ -31,5 +35,19 @@ describe('interpolateEnvVars', () => {
 describe('loadConfig', () => {
   it('throws when file does not exist', () => {
     expect(() => loadConfig('/nonexistent/path.yml')).toThrow();
+  });
+
+  it('surfaces a schema error (not a raw YAML parser throw) for an empty file', () => {
+    // js-yaml v5 throws YAMLException on empty/whitespace-only input where v4
+    // returned undefined. The loader normalises this so empty configs fail
+    // validation with a meaningful ZodError instead.
+    const dir = mkdtempSync(join(tmpdir(), 'connector-cfg-'));
+    const emptyPath = join(dir, 'empty.yml');
+    writeFileSync(emptyPath, '   \n  ', 'utf-8');
+    try {
+      expect(() => loadConfig(emptyPath)).toThrow(ZodError);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

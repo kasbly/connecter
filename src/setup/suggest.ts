@@ -16,12 +16,24 @@ export interface RelationSuggestion {
 
 // Standard field mappings — ordered by priority
 const FIELD_PATTERNS: { target: string; patterns: RegExp[]; type: 'field' | 'attribute' }[] = [
-  { target: 'title', patterns: [/^title$/i, /^name$/i, /^product_?name$/i, /^listing_?name$/i], type: 'field' },
-  { target: 'price', patterns: [/^price$/i, /^cost$/i, /^amount$/i, /^sale_?price$/i], type: 'field' },
+  {
+    target: 'title',
+    patterns: [/^title$/i, /^name$/i, /^product_?name$/i, /^listing_?name$/i],
+    type: 'field',
+  },
+  {
+    target: 'price',
+    patterns: [/^price$/i, /^cost$/i, /^amount$/i, /^sale_?price$/i],
+    type: 'field',
+  },
   { target: 'currency', patterns: [/^currency$/i, /^currency_?code$/i], type: 'field' },
   { target: 'category', patterns: [/^category$/i, /^type$/i, /^product_?type$/i], type: 'field' },
   { target: 'status', patterns: [/^status$/i, /^state$/i, /^listing_?status$/i], type: 'field' },
-  { target: 'description', patterns: [/^description$/i, /^desc$/i, /^details$/i, /^body$/i], type: 'field' },
+  {
+    target: 'description',
+    patterns: [/^description$/i, /^desc$/i, /^details$/i, /^body$/i],
+    type: 'field',
+  },
 ];
 
 // Attribute patterns — more relaxed matching
@@ -38,7 +50,13 @@ const ATTRIBUTE_PATTERNS: { target: string; patterns: RegExp[] }[] = [
 ];
 
 // Columns to suggest as published filter
-const PUBLISHED_PATTERNS = [/^published$/i, /^is_?active$/i, /^active$/i, /^is_?published$/i, /^visible$/i];
+const PUBLISHED_PATTERNS = [
+  /^published$/i,
+  /^is_?active$/i,
+  /^active$/i,
+  /^is_?published$/i,
+  /^visible$/i,
+];
 
 // Columns to suggest as soft-delete filter
 const SOFT_DELETE_PATTERNS = [/^deleted_?at$/i, /^removed_?at$/i, /^archived_?at$/i];
@@ -46,9 +64,7 @@ const SOFT_DELETE_PATTERNS = [/^deleted_?at$/i, /^removed_?at$/i, /^archived_?at
 // Image table indicators
 const IMAGE_COLUMN_PATTERNS = [/url$/i, /^image/i, /^photo/i, /^picture/i, /^thumbnail/i, /^src$/i];
 
-export function suggestFieldMappings(
-  columns: IntrospectedColumn[],
-): FieldSuggestion[] {
+export function suggestFieldMappings(columns: IntrospectedColumn[]): FieldSuggestion[] {
   const suggestions: FieldSuggestion[] = [];
   const usedColumns = new Set<string>();
 
@@ -149,7 +165,7 @@ export function suggestRelations(
         table: fk.fromTable,
         foreignKeyColumn: fk.fromColumn,
         relationType: 'features',
-        confidence: 'medium',
+        confidence: 'low',
       });
     } else {
       suggestions.push({
@@ -182,21 +198,44 @@ export interface FilterableColumnSuggestion {
 
 // Text-like DB types that make sense for ILIKE search
 const TEXT_TYPES = new Set([
-  'text', 'character varying', 'varchar', 'char', 'character',
-  'name', 'citext',
+  'text',
+  'character varying',
+  'varchar',
+  'char',
+  'character',
+  'name',
+  'citext',
 ]);
 
 // Columns likely useful for text search
 const SEARCHABLE_PATTERNS: RegExp[] = [
-  /^title$/i, /^name$/i, /^product_?name$/i, /^listing_?name$/i,
-  /^description$/i, /^desc$/i, /^details$/i, /^body$/i,
-  /make/i, /model/i, /brand/i, /manufacturer/i,
+  /^title$/i,
+  /^name$/i,
+  /^product_?name$/i,
+  /^listing_?name$/i,
+  /^description$/i,
+  /^desc$/i,
+  /^details$/i,
+  /^body$/i,
+  /make/i,
+  /model/i,
+  /brand/i,
+  /manufacturer/i,
 ];
 
 // Numeric DB types
 const NUMERIC_TYPES = new Set([
-  'integer', 'bigint', 'smallint', 'numeric', 'decimal',
-  'real', 'double precision', 'float', 'int', 'int4', 'int8',
+  'integer',
+  'bigint',
+  'smallint',
+  'numeric',
+  'decimal',
+  'real',
+  'double precision',
+  'float',
+  'int',
+  'int4',
+  'int8',
 ]);
 
 /**

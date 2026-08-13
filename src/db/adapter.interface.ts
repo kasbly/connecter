@@ -2,6 +2,8 @@ export interface QueryCondition {
   column: string;
   operator: '=' | '>' | '<' | '>=' | '<=' | 'ILIKE';
   value: string | number;
+  /** Optional group key — search conditions with the same group are OR'd, different groups are AND'd */
+  _group?: string;
 }
 
 export interface PaginationOptions {
@@ -16,7 +18,14 @@ export interface SortOptions {
 
 export interface QueryResult {
   rows: Record<string, unknown>[];
+  /**
+   * Number of matching rows. Exact unless `totalIsCapped` is true, in which
+   * case it is a lower bound — the adapter stopped counting at its cap instead
+   * of scanning the whole merchant table (#17420).
+   */
   total: number;
+  /** True when `total` is a lower bound rather than an exact count. */
+  totalIsCapped?: boolean;
 }
 
 export interface RelationQuery {

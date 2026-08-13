@@ -1,6 +1,11 @@
-import { appendFileSync, existsSync, mkdirSync, statSync, renameSync, readdirSync, unlinkSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { appendFile, open, readdir, rename, stat, unlink } from 'node:fs/promises';
 import { dirname, join, basename } from 'node:path';
+import type { FastifyBaseLogger } from 'fastify';
 import type { AuditConfig } from '../config/config.types.js';
+
+const AUDIT_READ_CHUNK_SIZE = 64 * 1024;
+export const AUDIT_QUERY_COUNT_LIMIT = 1_000;
 
 export interface AuditEntry {
   ts: string;
@@ -22,9 +27,13 @@ export interface AuditQueryOptions {
 
 export class AuditService {
   private readonly config: AuditConfig;
+  private readonly logger?: Pick<FastifyBaseLogger, 'warn'>;
+  private writeQueue: Promise<void> = Promise.resolve();
+  private lastPruneMs = 0;
 
-  constructor(config: AuditConfig) {
+  constructor(config: AuditConfig, logger?: Pick<FastifyBaseLogger, 'warn'>) {
     this.config = config;
+    this.logger = logger;
     if (config.enabled) {
       const dir = dirname(config.filePath);
       if (!existsSync(dir)) {
@@ -36,44 +45,108 @@ export class AuditService {
   log(entry: AuditEntry): void {
     if (!this.config.enabled) return;
 
-    this.rotateIfNeeded();
-    const line = JSON.stringify(entry) + '\n';
-    appendFileSync(this.config.filePath, line, 'utf-8');
+    this.writeQueue = this.writeQueue
+      .then(async () => {
+        await this.rotateIfNeeded();
+        const line = JSON.stringify(entry) + '\n';
+        await appendFile(this.config.filePath, line, 'utf-8');
+      })
+      .catch((error: unknown) => {
+        this.logger?.warn(
+          { err: error, filePath: this.config.filePath },
+          'Failed to append audit log',
+        );
+      });
   }
 
-  query(options: AuditQueryOptions): { entries: AuditEntry[]; total: number } {
-    if (!this.config.enabled || !existsSync(this.config.filePath)) {
-      return { entries: [], total: 0 };
+  async flush(): Promise<void> {
+    await this.writeQueue;
+  }
+
+  async query(
+    options: AuditQueryOptions,
+  ): Promise<{ entries: AuditEntry[]; total: number; totalIsCapped: boolean }> {
+    if (!this.config.enabled) {
+      return { entries: [], total: 0, totalIsCapped: false };
     }
 
-    const content = readFileSync(this.config.filePath, 'utf-8');
-    const lines = content.trim().split('\n').filter((l) => l.length > 0);
+    await this.flush();
+    if (!existsSync(this.config.filePath)) {
+      return { entries: [], total: 0, totalIsCapped: false };
+    }
 
-    let entries: AuditEntry[] = [];
-    for (const line of lines) {
+    const offset = (options.page - 1) * options.pageSize;
+    const entries: AuditEntry[] = [];
+    let total = 0;
+    let scanned = 0;
+    let totalIsCapped = false;
+
+    const collect = (line: Buffer): void => {
+      if (line.length === 0) return;
+      scanned++;
+      if (scanned >= AUDIT_QUERY_COUNT_LIMIT) totalIsCapped = true;
       try {
-        const entry = JSON.parse(line) as AuditEntry;
-        if (options.since && entry.ts < options.since) continue;
-        entries.push(entry);
+        const entry = JSON.parse(line.toString('utf8')) as AuditEntry;
+        if (options.since && entry.ts < options.since) return;
+
+        if (total >= offset && entries.length < options.pageSize) {
+          entries.push(entry);
+        }
+        total++;
       } catch {
         // Skip malformed lines
       }
+    };
+
+    const file = await open(this.config.filePath, 'r');
+    try {
+      const { size } = await file.stat();
+      let position = size;
+      let remainder = Buffer.alloc(0);
+
+      while (position > 0) {
+        const bytesToRead = Math.min(AUDIT_READ_CHUNK_SIZE, position);
+        position -= bytesToRead;
+
+        const chunk = Buffer.allocUnsafe(bytesToRead);
+        let bytesRead = 0;
+        while (bytesRead < bytesToRead) {
+          const result = await file.read(
+            chunk,
+            bytesRead,
+            bytesToRead - bytesRead,
+            position + bytesRead,
+          );
+          if (result.bytesRead === 0) break;
+          bytesRead += result.bytesRead;
+        }
+        const data =
+          remainder.length === 0
+            ? chunk.subarray(0, bytesRead)
+            : Buffer.concat([chunk.subarray(0, bytesRead), remainder]);
+
+        let lineEnd = data.length;
+        for (let index = data.length - 1; index >= 0; index--) {
+          if (data[index] !== 0x0a) continue;
+          collect(data.subarray(index + 1, lineEnd));
+          lineEnd = index;
+          if (totalIsCapped) break;
+        }
+        if (totalIsCapped) break;
+        remainder = Buffer.from(data.subarray(0, lineEnd));
+      }
+
+      if (!totalIsCapped) collect(remainder);
+    } finally {
+      await file.close();
     }
 
-    // Reverse to show newest first
-    entries.reverse();
-    const total = entries.length;
-    const offset = (options.page - 1) * options.pageSize;
-    entries = entries.slice(offset, offset + options.pageSize);
-
-    return { entries, total };
+    return { entries, total, totalIsCapped };
   }
 
-  private rotateIfNeeded(): void {
-    if (!existsSync(this.config.filePath)) return;
-
+  private async rotateIfNeeded(): Promise<void> {
     try {
-      const stats = statSync(this.config.filePath);
+      const stats = await stat(this.config.filePath);
       const sizeMB = stats.size / (1024 * 1024);
 
       if (sizeMB >= this.config.maxFileSizeMB) {
@@ -84,33 +157,41 @@ export class AuditService {
         for (let i = 9; i >= 1; i--) {
           const from = join(dir, `${base}.${i}`);
           const to = join(dir, `${base}.${i + 1}`);
-          if (existsSync(from)) {
-            renameSync(from, to);
+          try {
+            await rename(from, to);
+          } catch (error) {
+            if (!isMissingFileError(error)) throw error;
           }
         }
 
-        renameSync(this.config.filePath, join(dir, `${base}.1`));
-        this.pruneOldFiles();
+        await rename(this.config.filePath, join(dir, `${base}.1`));
       }
     } catch {
-      // Silently ignore rotation errors
+      // Rotation failures must not prevent audit appends.
+    }
+
+    // Retention is time-based, so it must not depend on a size-triggered rotation.
+    const now = Date.now();
+    if (now - this.lastPruneMs > 60 * 60 * 1000) {
+      this.lastPruneMs = now;
+      await this.pruneOldFiles();
     }
   }
 
-  private pruneOldFiles(): void {
+  private async pruneOldFiles(): Promise<void> {
     const dir = dirname(this.config.filePath);
     const base = basename(this.config.filePath);
     const maxAgeMs = this.config.retentionDays * 24 * 60 * 60 * 1000;
     const now = Date.now();
 
     try {
-      const files = readdirSync(dir);
+      const files = await readdir(dir);
       for (const file of files) {
         if (file.startsWith(base + '.') && file !== base) {
           const filePath = join(dir, file);
-          const stats = statSync(filePath);
+          const stats = await stat(filePath);
           if (now - stats.mtimeMs > maxAgeMs) {
-            unlinkSync(filePath);
+            await unlink(filePath);
           }
         }
       }
@@ -118,4 +199,8 @@ export class AuditService {
       // Silently ignore prune errors
     }
   }
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }

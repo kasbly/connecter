@@ -1,6 +1,7 @@
 export interface ServerConfig {
   port: number;
   host: string;
+  trustedProxies?: string;
 }
 
 export interface AuthKeyConfig {
@@ -25,6 +26,9 @@ export interface DatabaseConfig {
   user: string;
   password: string;
   ssl: boolean;
+  sslCa?: string;
+  sslRejectUnauthorized?: boolean;
+  statementTimeoutMs: number;
   pool: DatabasePoolConfig;
 }
 

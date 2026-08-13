@@ -48,6 +48,20 @@ docker compose up -d
 npm run build && npm start
 ```
 
+## Scripts
+
+Use the workspace scripts from the monorepo root:
+
+```bash
+pnpm --filter @kasbly/connector dev        # Start the dev server
+pnpm --filter @kasbly/connector build      # Compile TypeScript
+pnpm --filter @kasbly/connector start      # Start the built server
+pnpm --filter @kasbly/connector setup      # Launch the interactive setup wizard
+pnpm --filter @kasbly/connector typecheck  # Run `tsc --noEmit`
+pnpm --filter @kasbly/connector lint       # Run ESLint
+pnpm --filter @kasbly/connector test       # Run the Vitest suite
+```
+
 ## API Endpoints
 
 All endpoints (except `/health`) require an `X-API-Key` header.
@@ -64,15 +78,15 @@ Returns service status and database connectivity.
 
 Paginated inventory search with filters.
 
-| Parameter | Type | Description |
-|---|---|---|
-| `pageSize` | number | Items per page (1-100, default 20) |
-| `page` | number | Page number (default 1) |
-| `search` | string | Full-text search across searchable columns |
-| `sortBy` | string | Column to sort by (default: updatedAt or id) |
-| `sortDirection` | `asc` \| `desc` | Sort direction (default: desc) |
-| `updatedSince` | ISO 8601 | Only items updated after this timestamp |
-| `filter.<name>` | string/number | Dynamic filters defined in config |
+| Parameter       | Type            | Description                                  |
+| --------------- | --------------- | -------------------------------------------- |
+| `pageSize`      | number          | Items per page (1-100, default 20)           |
+| `page`          | number          | Page number (default 1)                      |
+| `search`        | string          | Full-text search across searchable columns   |
+| `sortBy`        | string          | Column to sort by (default: updatedAt or id) |
+| `sortDirection` | `asc` \| `desc` | Sort direction (default: desc)               |
+| `updatedSince`  | ISO 8601        | Only items updated after this timestamp      |
+| `filter.<name>` | string/number   | Dynamic filters defined in config            |
 
 Example:
 
@@ -85,23 +99,33 @@ Response:
 
 ```json
 {
-  "items": [{
-    "externalId": "12345",
-    "title": "2024 Hyundai Sonata",
-    "price": 3500,
-    "currency": "KRW",
-    "category": "car",
-    "status": "ACTIVE",
-    "images": ["https://..."],
-    "attributes": { "makeEn": "Hyundai", "year": 2024, "features": ["ABS", "Airbag"] },
-    "updatedAt": "2026-02-28T10:00:00.000Z"
-  }],
-  "total": 2190,
+  "items": [
+    {
+      "externalId": "12345",
+      "title": "2024 Hyundai Sonata",
+      "price": 3500,
+      "currency": "KRW",
+      "category": "car",
+      "status": "ACTIVE",
+      "images": ["https://..."],
+      "attributes": { "makeEn": "Hyundai", "year": 2024, "features": ["ABS", "Airbag"] },
+      "updatedAt": "2026-02-28T10:00:00.000Z"
+    }
+  ],
+  "total": 1000,
+  "totalIsCapped": true,
   "page": 1,
   "pageSize": 10,
-  "totalPages": 219
+  "totalPages": 100
 }
 ```
+
+`total` is counted through a `LIMIT`ed subquery so a list request never pays a
+full extra scan of your table just to produce a page count. It is exact for
+result sets up to 1000 rows (`"totalIsCapped": false`); past that it stops at
+the cap and reports `"totalIsCapped": true`, meaning "at least this many" —
+render it as `1000+` rather than as an exact figure. The cap is always lifted
+far enough to cover the page being requested, so deep pagination still works.
 
 ### `GET /inventory/:id`
 
@@ -120,21 +144,25 @@ version: 1
 
 server:
   port: 4000
-  host: "0.0.0.0"
+  host: '0.0.0.0'
+  # trustedProxies: '10.0.0.0/8' # Optional — only if run behind your own reverse proxy
 
 auth:
   apiKeys:
-    - key: "${CONNECTOR_API_KEY}"    # Interpolated from .env
-      label: "kasbly-production"
+    - key: '${CONNECTOR_API_KEY}' # Interpolated from .env
+      label: 'kasbly-production'
 
 database:
   type: postgres
-  host: "${DB_HOST}"
+  host: '${DB_HOST}'
   port: 5432
-  database: "${DB_NAME}"
-  user: "${DB_USER}"
-  password: "${DB_PASSWORD}"
-  ssl: false
+  database: '${DB_NAME}'
+  user: '${DB_USER}'
+  password: '${DB_PASSWORD}'
+  ssl: false # Set true to enable TLS with certificate verification
+  # sslCa: '${DB_SSL_CA}' # Optional PEM CA certificate/bundle for a private CA
+  # sslRejectUnauthorized: true # Default; false disables server authentication
+  statementTimeoutMs: 10000 # Cancels merchant DB queries that exceed 10 seconds
   pool: { min: 2, max: 10 }
 
 rateLimit:
@@ -143,89 +171,101 @@ rateLimit:
 
 audit:
   enabled: true
-  filePath: "./logs/audit.log"
+  filePath: './logs/audit.log'
   maxFileSizeMB: 50
   retentionDays: 90
 
 resources:
   inventory:
-    table: "Car"
+    table: 'Car'
     baseFilter: 'published = true AND "deletedAt" IS NULL'
-    idColumn: "id"
+    idColumn: 'id'
     updatedAtColumn: '"updatedAt"'
 
     # Standard fields mapped to the Kasbly inventory schema
     fields:
-      externalId: "id"
-      title: "title"
-      price: "price"
-      currency: "'KRW'"          # Literal value (single quotes)
+      externalId: 'id'
+      title: 'title'
+      price: 'price'
+      currency: "'KRW'" # Literal value (single quotes)
       category: "'car'"
 
     # Additional columns exposed as key-value attributes
     attributes:
-      makeEn: '"makeEn"'         # Quoted = case-sensitive column
-      year: "year"               # Unquoted = lowercase column
+      makeEn: '"makeEn"' # Quoted = case-sensitive column
+      year: 'year' # Unquoted = lowercase column
       fuelType: '"fuelType"'
 
     # Text columns for ILIKE search (OR logic across columns)
     searchableColumns:
-      - "title"
+      - 'title'
       - '"makeEn"'
       - '"modelEn"'
 
     # Filters available via ?filter.<name>=<value>
     filterableColumns:
-      year: { column: "year", type: "number" }
-      make: { column: '"makeEn"', type: "string" }
-      fuelType: { column: '"fuelType"', type: "string" }
-      minPrice: { column: "price", type: "gte" }
-      maxPrice: { column: "price", type: "lte" }
+      year: { column: 'year', type: 'number' }
+      make: { column: '"makeEn"', type: 'string' }
+      fuelType: { column: '"fuelType"', type: 'string' }
+      minPrice: { column: 'price', type: 'gte' }
+      maxPrice: { column: 'price', type: 'lte' }
 
     # Related tables fetched per item
     relations:
       images:
-        table: "Image"
+        table: 'Image'
         foreignKey: '"carId"'
-        referenceKey: "id"
-        fields: { url: "url", type: "type" }
-        imageUrlField: "url"                      # Extracts URLs into images[]
+        referenceKey: 'id'
+        fields: { url: 'url', type: 'type' }
+        imageUrlField: 'url' # Extracts URLs into images[]
         filter: "type = 'gallery' OR type = 'featured'"
       features:
-        table: "CarFeatures"
+        table: 'CarFeatures'
         foreignKey: '"carId"'
-        referenceKey: "id"
+        referenceKey: 'id'
         fields: { name: '"featureName"' }
-        flatten: "name"                           # Flattens to string[]
+        flatten: 'name' # Flattens to string[]
 ```
+
+### Database TLS
+
+When `database.ssl` is `true`, the connector verifies the Postgres server certificate and
+hostname by default. Publicly trusted certificates need no additional configuration. For a
+private CA or self-signed deployment, provide its PEM certificate or bundle through
+`database.sslCa` (for example, `${DB_SSL_CA}`).
+
+`database.sslRejectUnauthorized: false` is an explicit compatibility escape hatch that disables
+server authentication. It makes the connection vulnerable to interception and should only be used
+temporarily while a valid CA bundle is configured.
 
 ### Column Name Quoting
 
-| Syntax | Meaning | Example |
-|---|---|---|
-| `year` | Lowercase column | `SELECT year ...` |
-| `'"makeEn"'` | Case-sensitive column | `SELECT "makeEn" ...` |
-| `"'KRW'"` | Literal string value | Returns `"KRW"` for every row |
+| Syntax       | Meaning               | Example                       |
+| ------------ | --------------------- | ----------------------------- |
+| `year`       | Lowercase column      | `SELECT year ...`             |
+| `'"makeEn"'` | Case-sensitive column | `SELECT "makeEn" ...`         |
+| `"'KRW'"`    | Literal string value  | Returns `"KRW"` for every row |
 
 ### Filter Types
 
-| Type | Operator | Use case |
-|---|---|---|
-| `string` | `=` | Exact match (make, color, fuelType) |
-| `number` | `=` | Exact numeric match (year) |
-| `gte` | `>=` | Range lower bound (minPrice, minYear) |
-| `lte` | `<=` | Range upper bound (maxPrice, maxYear) |
+| Type     | Operator | Use case                              |
+| -------- | -------- | ------------------------------------- |
+| `string` | `=`      | Exact match (make, color, fuelType)   |
+| `number` | `=`      | Exact numeric match (year)            |
+| `gte`    | `>=`     | Range lower bound (minPrice, minYear) |
+| `lte`    | `<=`     | Range upper bound (maxPrice, maxYear) |
 
 ## Environment Variables
 
-| Variable | Required | Description |
-|---|---|---|
-| `DB_HOST` | Yes | Database hostname |
-| `DB_NAME` | Yes | Database name |
-| `DB_USER` | Yes | Database username |
-| `DB_PASSWORD` | Yes | Database password |
-| `CONNECTOR_API_KEY` | Yes | API key shared with Kasbly |
-| `CONFIG_PATH` | No | Config file path (default: `./connector.config.yml`) |
+| Variable            | Required | Description                                                   |
+| ------------------- | -------- | ------------------------------------------------------------- |
+| `DB_HOST`           | Yes      | Database hostname                                             |
+| `DB_NAME`           | Yes      | Database name                                                 |
+| `DB_USER`           | Yes      | Database username                                             |
+| `DB_PASSWORD`       | Yes      | Database password                                             |
+| `DB_SSL_CA`         | No       | PEM CA bundle referenced by `database.sslCa` for a private CA |
+| `CONNECTOR_API_KEY` | Yes      | API key shared with Kasbly                                    |
+| `CONFIG_PATH`       | No       | Config file path (default: `./connector.config.yml`)          |
 
 ## Docker Deployment
 
@@ -237,11 +277,21 @@ The `docker-compose.yml` mounts `connector.config.yml` as read-only and persists
 
 ## Security
 
-- **Read-only database access** — enforced at the connection pool level
+- **Bounded read-only database access** — read-only mode and a configurable query timeout are enforced at the connection pool level
 - **API key authentication** — timing-safe comparison on every request (except `/health`)
-- **Rate limiting** — configurable per-IP request limits
+- **Rate limiting** — configurable per-IP request limits, keyed on the real client IP (see below)
 - **No SQL/stack trace exposure** — errors return generic messages to clients
 - **Audit trail** — every API request logged with timestamp, method, query, response time, and client IP
+
+### Client IP and trusted proxies
+
+The connector does not trust `X-Forwarded-For`/`X-Real-IP` headers by default. Since it is
+merchant-self-hosted and typically reachable directly (no bundled reverse proxy), honoring
+forwarded headers unconditionally would let a caller spoof its IP on every request — defeating the
+rate limiter (a fresh header value lands in a fresh bucket) and forging the IP written to the audit
+log. Rate limiting and audit logging both key on the real socket peer IP unless `server.trustedProxies`
+is set to a comma-separated list of trusted proxy IPs/CIDRs, in which case forwarded headers are
+honored only when the direct connection actually comes from one of those addresses.
 
 ## Development
 

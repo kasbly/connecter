@@ -10,9 +10,9 @@ function getVersion(): string {
   if (cachedVersion) return cachedVersion;
   try {
     const __dirname = dirname(fileURLToPath(import.meta.url));
-    const pkg = JSON.parse(
-      readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf-8'),
-    ) as { version: string };
+    const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf-8')) as {
+      version: string;
+    };
     cachedVersion = pkg.version;
   } catch {
     cachedVersion = 'unknown';
@@ -22,13 +22,11 @@ function getVersion(): string {
 
 const startTime = Date.now();
 
-export function registerHealthRoute(
-  app: FastifyInstance,
-  dbAdapter: DatabaseAdapter,
-): void {
-  app.get('/health', async (_request, _reply) => {
+export function registerHealthRoute(app: FastifyInstance, dbAdapter: DatabaseAdapter): void {
+  app.get('/health', async (_request, reply) => {
     const dbHealthy = await dbAdapter.healthCheck();
     const uptimeSeconds = Math.floor((Date.now() - startTime) / 1000);
+    if (!dbHealthy) reply.code(503);
 
     return {
       status: dbHealthy ? 'ok' : 'degraded',

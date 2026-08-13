@@ -55,6 +55,25 @@ describe('mapRowToInventoryItem', () => {
     expect(result.attributes.makeEn).toBe('Toyota');
   });
 
+  it('unwraps quoted ID and updated-at columns when reading database row keys', () => {
+    const config = {
+      ...baseConfig,
+      idColumn: '"externalId"',
+      updatedAtColumn: '"updatedAt"',
+    };
+    const row = {
+      externalId: 'quoted-123',
+      title: 'Test',
+      price: 100,
+      updatedAt: new Date('2026-03-01T12:00:00Z'),
+    };
+
+    const result = mapRowToInventoryItem(row, config, new Map());
+
+    expect(result.externalId).toBe('quoted-123');
+    expect(result.updatedAt).toBe('2026-03-01T12:00:00.000Z');
+  });
+
   it('handles missing updatedAt', () => {
     const configNoUpdate = { ...baseConfig, updatedAtColumn: undefined };
     const row = { id: '1', title: 'Test', price: 100 };
@@ -77,16 +96,40 @@ describe('mapRowToInventoryItem', () => {
     };
 
     const imageData = new Map<string | number, Record<string, unknown>[]>();
-    imageData.set('123', [
-      { url: 'http://img1.jpg' },
-      { url: 'http://img2.jpg' },
-    ]);
+    imageData.set('123', [{ url: 'http://img1.jpg' }, { url: 'http://img2.jpg' }]);
     const relationData = new Map<string, Map<string | number, Record<string, unknown>[]>>();
     relationData.set('images', imageData);
 
     const row = { id: '123', title: 'Test', price: 100 };
     const result = mapRowToInventoryItem(row, configWithRelations, relationData);
     expect(result.images).toEqual(['http://img1.jpg', 'http://img2.jpg']);
+  });
+
+  it('groups relation rows by the configured parent reference key', () => {
+    const configWithRelations: InventoryResourceConfig = {
+      ...baseConfig,
+      relations: {
+        images: {
+          table: 'Image',
+          foreignKey: 'carSlug',
+          referenceKey: '"slug"',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+        },
+      },
+    };
+    const imageData = new Map<string | number, Record<string, unknown>[]>([
+      ['sonata-2024', [{ url: 'http://img.jpg' }]],
+    ]);
+    const relationData = new Map([['images', imageData]]);
+
+    const result = mapRowToInventoryItem(
+      { id: '123', slug: 'sonata-2024', title: 'Test', price: 100 },
+      configWithRelations,
+      relationData,
+    );
+
+    expect(result.images).toEqual(['http://img.jpg']);
   });
 
   it('processes flatten relations', () => {
@@ -153,5 +196,21 @@ describe('getRequiredColumns', () => {
     // "'KRW'" and "'car'" are literals, should not appear
     expect(cols).not.toContain("'KRW'");
     expect(cols).not.toContain("'car'");
+  });
+
+  it('includes parent columns referenced by relations', () => {
+    const configWithRelations: InventoryResourceConfig = {
+      ...baseConfig,
+      relations: {
+        images: {
+          table: 'Image',
+          foreignKey: 'carSlug',
+          referenceKey: '"slug"',
+          fields: { url: 'url' },
+        },
+      },
+    };
+
+    expect(getRequiredColumns(configWithRelations)).toContain('"slug"');
   });
 });

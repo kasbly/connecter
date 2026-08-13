@@ -2,21 +2,32 @@ version: 1
 
 server:
   port: 4000
-  host: "0.0.0.0"
+  host: '0.0.0.0'
+  # Optional: comma-separated trusted reverse-proxy IPs/CIDRs (e.g.
+  # '10.0.0.0/8,203.0.113.5'). Only set this if you run the connector behind
+  # your own reverse proxy — X-Forwarded-For/X-Real-IP headers are trusted
+  # for rate limiting and audit logging ONLY when the direct connection comes
+  # from an IP in this list. Leave unset if the connector is reachable
+  # directly (the default), otherwise rate limiting and audit IPs are
+  # spoofable via forged headers.
+  # trustedProxies: '10.0.0.0/8'
 
 auth:
   apiKeys:
-    - key: "${CONNECTOR_API_KEY}"
-      label: "kasbly-production"
+    - key: '${CONNECTOR_API_KEY}'
+      label: 'kasbly-production'
 
 database:
   type: postgres
-  host: "${DB_HOST}"
+  host: '${DB_HOST}'
   port: 5432
-  database: "${DB_NAME}"
-  user: "${DB_USER}"
-  password: "${DB_PASSWORD}"
-  ssl: false
+  database: '${DB_NAME}'
+  user: '${DB_USER}'
+  password: '${DB_PASSWORD}'
+  ssl: false # Set true to enable TLS with certificate verification
+  # sslCa: '${DB_SSL_CA}' # Optional PEM CA certificate/bundle for a private CA
+  # sslRejectUnauthorized: true # Default; false disables server authentication
+  statementTimeoutMs: 10000 # Cancels merchant DB queries that exceed 10 seconds
   pool: { min: 2, max: 10 }
 
 rateLimit:
@@ -25,21 +36,21 @@ rateLimit:
 
 audit:
   enabled: true
-  filePath: "./logs/audit.log"
+  filePath: './logs/audit.log'
   maxFileSizeMB: 50
   retentionDays: 90
 
 resources:
   inventory:
-    table: "Car"
+    table: 'Car'
     baseFilter: 'published = true AND "deletedAt" IS NULL'
-    idColumn: "id"
-    updatedAtColumn: "updatedAt"
+    idColumn: 'id'
+    updatedAtColumn: '"updatedAt"'
 
     fields:
-      externalId: "id"
-      title: "title"
-      price: "price"
+      externalId: 'id'
+      title: 'title'
+      price: 'price'
       currency: "'KRW'"
       category: "'car'"
 
@@ -48,32 +59,32 @@ resources:
       makeAr: '"makeAr"'
       modelEn: '"modelEn"'
       modelAr: '"modelAr"'
-      year: "year"
+      year: 'year'
       fuelType: '"fuelType"'
-      transmission: "transmission"
-      kilometers: "kilometers"
-      color: "color"
+      transmission: 'transmission'
+      kilometers: 'kilometers'
+      color: 'color'
 
-    searchableColumns: ["title", '"makeEn"', '"modelEn"']
+    searchableColumns: ['title', '"makeEn"', '"modelEn"']
 
     filterableColumns:
-      year: { column: "year", type: "number" }
-      make: { column: '"makeEn"', type: "string" }
-      fuelType: { column: '"fuelType"', type: "string" }
-      minPrice: { column: "price", type: "gte" }
-      maxPrice: { column: "price", type: "lte" }
+      year: { column: 'year', type: 'number' }
+      make: { column: '"makeEn"', type: 'string' }
+      fuelType: { column: '"fuelType"', type: 'string' }
+      minPrice: { column: 'price', type: 'gte' }
+      maxPrice: { column: 'price', type: 'lte' }
 
     relations:
       images:
-        table: "Image"
+        table: 'Image'
         foreignKey: '"carId"'
-        referenceKey: "id"
-        fields: { url: "url", type: "type" }
-        imageUrlField: "url"
+        referenceKey: 'id'
+        fields: { url: 'url', type: 'type' }
+        imageUrlField: 'url'
         filter: "type = 'gallery' OR type = 'featured'"
       features:
-        table: "CarFeatures"
+        table: 'CarFeatures'
         foreignKey: '"carId"'
-        referenceKey: "id"
+        referenceKey: 'id'
         fields: { name: '"featureName"' }
-        flatten: "name"
+        flatten: 'name'

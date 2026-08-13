@@ -9,10 +9,7 @@ function safeCompare(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
-export function findMatchingKey(
-  apiKey: string,
-  keys: AuthKeyConfig[],
-): AuthKeyConfig | undefined {
+export function findMatchingKey(apiKey: string, keys: AuthKeyConfig[]): AuthKeyConfig | undefined {
   for (const keyConfig of keys) {
     if (safeCompare(apiKey, keyConfig.key)) {
       return keyConfig;
@@ -28,7 +25,7 @@ export function createApiKeyGuard(authConfig: AuthConfig) {
     done: HookHandlerDoneFunction,
   ): void {
     // Skip auth for health endpoint
-    if (request.url === '/health') {
+    if (request.url.split('?')[0] === '/health') {
       done();
       return;
     }
