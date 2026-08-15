@@ -3,6 +3,7 @@ import type { InventoryResourceConfig, RelationConfig } from '../config/config.t
 export interface ConnectorInventoryItem {
   externalId: string;
   title: string;
+  description: string | null;
   price: number;
   currency: string;
   category: string;
@@ -68,6 +69,7 @@ export function mapRowToInventoryItem(
   return {
     externalId,
     title: String(fields['title'] ?? ''),
+    description: typeof fields['description'] === 'string' ? fields['description'] : null,
     price: Number(fields['price'] ?? 0),
     currency: String(fields['currency'] ?? 'USD'),
     category: String(fields['category'] ?? ''),

@@ -25,37 +25,87 @@ export interface IntrospectionResult {
   foreignKeys: ForeignKeyInfo[];
 }
 
-interface DbConnectOptions {
+export interface DbConnectOptions {
   type: 'postgres' | 'mysql';
   host: string;
   port: number;
   database: string;
   user: string;
   password: string;
+  ssl: boolean;
+  sslCa?: string;
+  sslRejectUnauthorized?: boolean;
+}
+
+export interface DatabaseConnectionOptions {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+  ssl: false | { rejectUnauthorized: boolean; ca?: string };
+}
+
+/** Build the knex connection options used by both the setup probe and the connector at runtime. */
+export function createDatabaseConnectionOptions(
+  options: DbConnectOptions,
+): DatabaseConnectionOptions {
+  return {
+    host: options.host,
+    port: options.port,
+    database: options.database,
+    user: options.user,
+    password: options.password,
+    ssl: options.ssl
+      ? {
+          rejectUnauthorized: options.sslRejectUnauthorized !== false,
+          ...(options.sslCa ? { ca: options.sslCa } : {}),
+        }
+      : false,
+  };
+}
+
+/** PostgreSQL errors emitted when a server rejects a plaintext connection. */
+export function isTlsRequiredError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+
+  return /no pg_hba\.conf entry.*no encryption|connection is insecure.*sslmode=require|ssl is required/i.test(
+    error.message,
+  );
 }
 
 export async function introspectDatabase(options: DbConnectOptions): Promise<{
   db: Knex;
   result: IntrospectionResult;
+  retriedWithTls: boolean;
 }> {
-  const db = knex({
-    client: options.type === 'postgres' ? 'pg' : 'mysql2',
-    connection: {
-      host: options.host,
-      port: options.port,
-      database: options.database,
-      user: options.user,
-      password: options.password,
-    },
-  });
+  let connectionOptions = options;
+  let db = createDatabaseClient(connectionOptions);
+  let retriedWithTls = false;
 
-  // Verify connection
-  await db.raw('SELECT 1');
+  try {
+    await db.raw('SELECT 1');
+  } catch (error) {
+    if (options.ssl || !isTlsRequiredError(error)) throw error;
+
+    await db.destroy();
+    connectionOptions = { ...options, ssl: true, sslRejectUnauthorized: true };
+    db = createDatabaseClient(connectionOptions);
+    await db.raw('SELECT 1');
+    retriedWithTls = true;
+  }
 
   const tables = await introspectTables(db);
   const foreignKeys = await introspectForeignKeys(db);
 
-  return { db, result: { tables, foreignKeys } };
+  return { db, result: { tables, foreignKeys }, retriedWithTls };
+}
+
+function createDatabaseClient(options: DbConnectOptions): Knex {
+  return knex({
+    client: options.type === 'postgres' ? 'pg' : 'mysql2',
+    connection: createDatabaseConnectionOptions(options),
+  });
 }
 
 async function introspectTables(db: Knex): Promise<IntrospectedTable[]> {

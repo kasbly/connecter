@@ -9,6 +9,7 @@ const baseConfig: InventoryResourceConfig = {
   fields: {
     externalId: 'id',
     title: 'title',
+    description: 'description',
     price: 'price',
     currency: "'KRW'",
     category: "'car'",
@@ -24,6 +25,7 @@ describe('mapRowToInventoryItem', () => {
     const row = {
       id: '123',
       title: '2024 Hyundai Sonata',
+      description: 'Comfortable, low-mileage sedan',
       price: 15000000,
       makeEn: 'Hyundai',
       year: 2024,
@@ -34,6 +36,7 @@ describe('mapRowToInventoryItem', () => {
 
     expect(result.externalId).toBe('123');
     expect(result.title).toBe('2024 Hyundai Sonata');
+    expect(result.description).toBe('Comfortable, low-mileage sedan');
     expect(result.price).toBe(15000000);
     expect(result.currency).toBe('KRW');
     expect(result.category).toBe('car');
@@ -79,6 +82,17 @@ describe('mapRowToInventoryItem', () => {
     const row = { id: '1', title: 'Test', price: 100 };
     const result = mapRowToInventoryItem(row, configNoUpdate, new Map());
     expect(result.updatedAt).toBeNull();
+  });
+
+  it('returns null when no description field is configured', () => {
+    const { description: _description, ...fields } = baseConfig.fields;
+    const result = mapRowToInventoryItem(
+      { id: '1', title: 'Test', price: 100 },
+      { ...baseConfig, fields },
+      new Map(),
+    );
+
+    expect(result.description).toBeNull();
   });
 
   it('processes image relations', () => {

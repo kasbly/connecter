@@ -3,9 +3,9 @@ import type { FastifyRequest, FastifyReply, HookHandlerDoneFunction } from 'fast
 import type { AuthConfig, AuthKeyConfig } from '../config/config.types.js';
 
 function safeCompare(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
   const bufA = Buffer.from(a, 'utf-8');
   const bufB = Buffer.from(b, 'utf-8');
+  if (bufA.length !== bufB.length) return false;
   return timingSafeEqual(bufA, bufB);
 }
 

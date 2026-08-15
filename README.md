@@ -19,10 +19,13 @@ Client Infrastructure                    Kasbly Cloud
 
 ## Quick Start
 
-### 1. Interactive Setup (recommended)
+### 1. Clone and run the interactive setup (recommended)
 
 ```bash
-npx @kasbly/connector setup
+git clone https://github.com/kasbly/connecter.git
+cd connecter
+npm ci
+npm run setup
 ```
 
 The wizard connects to your database, introspects tables/columns/foreign keys, and auto-generates `connector.config.yml` + `.env` with sensible defaults.
@@ -50,16 +53,16 @@ npm run build && npm start
 
 ## Scripts
 
-Use the workspace scripts from the monorepo root:
+Run these commands from the connector directory:
 
 ```bash
-pnpm --filter @kasbly/connector dev        # Start the dev server
-pnpm --filter @kasbly/connector build      # Compile TypeScript
-pnpm --filter @kasbly/connector start      # Start the built server
-pnpm --filter @kasbly/connector setup      # Launch the interactive setup wizard
-pnpm --filter @kasbly/connector typecheck  # Run `tsc --noEmit`
-pnpm --filter @kasbly/connector lint       # Run ESLint
-pnpm --filter @kasbly/connector test       # Run the Vitest suite
+npm run dev        # Start the dev server
+npm run build      # Compile TypeScript
+npm start          # Start the built server
+npm run setup      # Launch the interactive setup wizard
+npm run typecheck  # Run `tsc --noEmit`
+npm run lint       # Run ESLint
+npm test           # Run the Vitest suite
 ```
 
 ## API Endpoints
@@ -103,6 +106,7 @@ Response:
     {
       "externalId": "12345",
       "title": "2024 Hyundai Sonata",
+      "description": "Low-mileage sedan with a full service history",
       "price": 3500,
       "currency": "KRW",
       "category": "car",
@@ -186,6 +190,7 @@ resources:
     fields:
       externalId: 'id'
       title: 'title'
+      description: 'description'
       price: 'price'
       currency: "'KRW'" # Literal value (single quotes)
       category: "'car'"
@@ -296,14 +301,14 @@ honored only when the direct connection actually comes from one of those address
 ## Development
 
 ```bash
-# Install dependencies (from monorepo root)
-pnpm install
+# Install dependencies
+npm ci
 
 # Run tests
-pnpm --filter @kasbly/connector test
+npm test
 
 # Dev server with hot reload
-pnpm --filter @kasbly/connector dev
+npm run dev
 ```
 
 ## Project Structure

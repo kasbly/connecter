@@ -58,4 +58,38 @@ describe('loadConfig', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('interpolates dotenv values after parsing YAML', () => {
+    vi.stubEnv('DB_PASSWORD', 'a"b#c: value');
+    const dir = mkdtempSync(join(tmpdir(), 'connector-cfg-'));
+    const configPath = join(dir, 'config.yml');
+    writeFileSync(
+      configPath,
+      `version: 1
+auth:
+  apiKeys:
+    - key: connector-key
+      label: production
+database:
+  type: postgres
+  host: localhost
+  database: inventory
+  user: merchant
+  password: "\${DB_PASSWORD}"
+resources:
+  inventory:
+    table: products
+    idColumn: id
+    fields:
+      externalId: id
+`,
+      'utf-8',
+    );
+
+    try {
+      expect(loadConfig(configPath).database.password).toBe('a"b#c: value');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

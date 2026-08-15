@@ -16,6 +16,16 @@ import {
   type FilterableColumnSuggestion,
 } from './suggest.js';
 
+interface DatabaseTlsSettings {
+  enabled: boolean;
+  ca?: string;
+  rejectUnauthorized: boolean;
+}
+
+export function shouldDefaultToTls(host: string): boolean {
+  return !['localhost', '127.0.0.1', '::1'].includes(host.trim().toLowerCase());
+}
+
 export async function runWizard(): Promise<void> {
   console.log('\n🔧 Kasbly Connector Setup\n');
 
@@ -30,16 +40,30 @@ export async function runWizard(): Promise<void> {
   const dbName = await input({ message: 'Database name:' });
   const dbUser = await input({ message: 'Username:' });
   const dbPassword = await password({ message: 'Password:', mask: true });
+  const requiresTls = await confirm({
+    message: 'Does this database require TLS?',
+    default: shouldDefaultToTls(dbHost),
+  });
+  const tls = await collectTlsSettings(requiresTls);
 
   console.log('\nConnecting...');
-  const { db, result } = await introspectDatabase({
+  const connection = await introspectDatabase({
     type: dbType,
     host: dbHost,
     port: parseInt(dbPort, 10),
     database: dbName,
     user: dbUser,
     password: dbPassword,
+    ssl: tls.enabled,
+    sslCa: tls.ca,
+    sslRejectUnauthorized: tls.rejectUnauthorized,
   });
+  const { db, result } = connection;
+  if (connection.retriedWithTls) {
+    tls.enabled = true;
+    tls.rejectUnauthorized = true;
+    console.log('Plaintext connection was rejected; retried with verified TLS.');
+  }
   console.log(`✓ Connected! Found ${result.tables.length} tables.\n`);
 
   // Step 2: Select Inventory Table
@@ -282,7 +306,9 @@ export async function runWizard(): Promise<void> {
       database: '${DB_NAME}',
       user: '${DB_USER}',
       password: '${DB_PASSWORD}',
-      ssl: false,
+      ssl: tls.enabled,
+      ...(tls.ca ? { sslCa: '${DB_SSL_CA}' } : {}),
+      ...(tls.enabled && !tls.rejectUnauthorized ? { sslRejectUnauthorized: false } : {}),
       statementTimeoutMs: 10000,
       pool: { min: 2, max: 10 },
     },
@@ -342,11 +368,12 @@ export async function runWizard(): Promise<void> {
   const envPath = resolve('.env');
   const envContent =
     [
-      `DB_HOST=${dbHost}`,
-      `DB_NAME=${dbName}`,
-      `DB_USER=${dbUser}`,
-      `DB_PASSWORD=${dbPassword}`,
-      `CONNECTOR_API_KEY=${apiKey}`,
+      `DB_HOST=${serializeEnvValue(dbHost)}`,
+      `DB_NAME=${serializeEnvValue(dbName)}`,
+      `DB_USER=${serializeEnvValue(dbUser)}`,
+      `DB_PASSWORD=${serializeEnvValue(dbPassword)}`,
+      ...(tls.ca ? [`DB_SSL_CA=${serializeEnvValue(tls.ca)}`] : []),
+      `CONNECTOR_API_KEY=${serializeEnvValue(apiKey)}`,
     ].join('\n') + '\n';
   writePrivateFile(envPath, envContent);
   console.log(`✅ Environment saved to ${envPath}`);
@@ -366,4 +393,52 @@ export function quoteIfNeeded(name: string): string {
   // Always quote generated PostgreSQL identifiers so reserved words and
   // case-sensitive or otherwise unusual column names remain valid SQL.
   return `"${name.replaceAll('"', '""')}"`;
+}
+
+async function collectTlsSettings(requiresTls: boolean): Promise<DatabaseTlsSettings> {
+  if (!requiresTls) return { enabled: false, rejectUnauthorized: true };
+
+  const tlsMode = await select({
+    message: 'TLS certificate verification:',
+    choices: [
+      {
+        name: 'Verify with the system CA store (recommended)',
+        value: 'system-ca',
+      },
+      {
+        name: 'Supply a PEM CA certificate/bundle',
+        value: 'custom-ca',
+      },
+      {
+        name: 'Disable verification (temporary escape hatch)',
+        value: 'insecure',
+      },
+    ],
+  });
+
+  if (tlsMode === 'custom-ca') {
+    const ca = await input({
+      message: 'PEM CA certificate or bundle:',
+      validate: (value) => (value.trim() ? true : 'A PEM CA certificate or bundle is required.'),
+    });
+    return { enabled: true, ca, rejectUnauthorized: true };
+  }
+
+  return { enabled: true, rejectUnauthorized: tlsMode !== 'insecure' };
+}
+
+export function serializeEnvValue(value: string): string {
+  if (!value.includes("'")) {
+    return `'${value}'`;
+  }
+
+  if (!value.includes('`')) {
+    return `\`${value}\``;
+  }
+
+  if (!value.includes('"')) {
+    return `"${value}"`;
+  }
+
+  throw new Error('Environment value contains every supported dotenv quote delimiter');
 }

@@ -46,4 +46,25 @@ describe('createApiKeyGuard', () => {
     expect(response.json()).toEqual({ status: 'ok' });
     await app.close();
   });
+
+  it('returns 401 for a same-code-unit-length key with a different UTF-8 byte length', async () => {
+    const app = Fastify();
+    const configuredKey = `kc_${'a'.repeat(48)}`;
+    const nonAsciiKey = `kc_é${'a'.repeat(47)}`;
+    app.addHook(
+      'onRequest',
+      createApiKeyGuard({ apiKeys: [{ key: configuredKey, label: 'test' }] }),
+    );
+    app.get('/protected', () => ({ status: 'ok' }));
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/protected',
+      headers: { 'x-api-key': nonAsciiKey },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: 'Invalid API key' });
+    await app.close();
+  });
 });
