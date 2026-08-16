@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
 import type { DatabaseAdapter, QueryResult } from '../../db/adapter.interface.js';
 import type { InventoryResourceConfig } from '../../config/config.types.js';
@@ -35,7 +37,71 @@ const testConfig: InventoryResourceConfig = {
   },
 };
 
+const connectorInventoryFixturePath = fileURLToPath(
+  new URL('../../../../../contracts/connector-inventory-response.json', import.meta.url),
+);
+const connectorInventoryFixture = JSON.parse(readFileSync(connectorInventoryFixturePath, 'utf8'));
+
 describe('inventory routes', () => {
+  it('GET /inventory matches the shared standalone connector wire contract', async () => {
+    const mockAdapter = createMockDbAdapter({
+      query: vi.fn().mockResolvedValue({
+        rows: [
+          {
+            id: '123',
+            name: '2024 Hyundai Sonata',
+            description: 'Low-mileage sedan with a full service history',
+            price: 15_000_000,
+            makeEn: 'Hyundai',
+            year: 2024,
+            updatedAt: new Date('2026-01-15T10:00:00Z'),
+          },
+        ],
+        total: 1,
+        totalIsCapped: false,
+      }),
+      queryRelation: vi.fn().mockImplementation(({ table }: { table: string }) => {
+        if (table === 'Image')
+          return Promise.resolve(new Map([['123', [{ url: 'http://img1.jpg' }]]]));
+        return Promise.resolve(new Map([['123', [{ name: 'ABS' }, { name: 'Airbag' }]]]));
+      }),
+    });
+    const config: InventoryResourceConfig = {
+      ...testConfig,
+      fields: {
+        ...testConfig.fields,
+        description: 'description',
+        currency: "'KRW'",
+        category: "'car'",
+      },
+      attributes: { makeEn: 'makeEn', year: 'year' },
+      relations: {
+        images: {
+          table: 'Image',
+          foreignKey: 'carId',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+        },
+        features: {
+          table: 'Feature',
+          foreignKey: 'carId',
+          referenceKey: 'id',
+          fields: { name: 'name' },
+          flatten: 'name',
+        },
+      },
+    };
+    const app = Fastify();
+    registerInventoryRoutes(app, { dbAdapter: mockAdapter, resourceConfig: config });
+
+    const response = await app.inject({ method: 'GET', url: '/inventory?pageSize=20' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(connectorInventoryFixture);
+    await app.close();
+  });
+
   it('GET /inventory returns paginated response', async () => {
     const mockAdapter = createMockDbAdapter({
       query: vi.fn().mockResolvedValue({
