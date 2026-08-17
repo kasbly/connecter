@@ -5,6 +5,14 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { AuditConfig } from '../config/config.types.js';
 
 const AUDIT_READ_CHUNK_SIZE = 64 * 1024;
+export const AUDIT_QUERY_COUNT_LIMIT = 1_000;
+
+function resolveAuditQueryCountLimit(options: AuditQueryOptions): number {
+  const offset = (options.page - 1) * options.pageSize;
+  // Do not let the count cap hide the requested page, and retain one more entry
+  // so a capped total still advertises that there may be a following page.
+  return Math.max(AUDIT_QUERY_COUNT_LIMIT, offset + options.pageSize + 1);
+}
 
 export interface AuditEntry {
   ts: string;
@@ -71,11 +79,15 @@ export class AuditService {
 
     await this.flush();
     const offset = (options.page - 1) * options.pageSize;
+    const countLimit = resolveAuditQueryCountLimit(options);
     const entries: AuditEntry[] = [];
     let total = 0;
+    let scanned = 0;
+    let totalIsCapped = false;
 
     const collect = (line: Buffer): boolean => {
       if (line.length === 0) return false;
+      scanned++;
       try {
         const entry = JSON.parse(line.toString('utf8')) as AuditEntry;
         if (options.since && entry.ts < options.since) return true;
@@ -87,7 +99,8 @@ export class AuditService {
       } catch {
         // Skip malformed lines
       }
-      return false;
+      if (scanned >= countLimit) totalIsCapped = true;
+      return totalIsCapped;
     };
 
     const dir = dirname(this.config.filePath);
@@ -101,7 +114,7 @@ export class AuditService {
       .sort((left, right) => left.index - right.index)
       .map(({ file }) => join(dir, file));
     const files = [this.config.filePath, ...rotatedFiles];
-    let reachedSince = false;
+    let shouldStop = false;
 
     for (const filePath of files) {
       let file;
@@ -117,7 +130,7 @@ export class AuditService {
         let position = size;
         let remainder = Buffer.alloc(0);
 
-        while (position > 0 && !reachedSince) {
+        while (position > 0 && !shouldStop) {
           const bytesToRead = Math.min(AUDIT_READ_CHUNK_SIZE, position);
           position -= bytesToRead;
 
@@ -141,22 +154,22 @@ export class AuditService {
           let lineEnd = data.length;
           for (let index = data.length - 1; index >= 0; index--) {
             if (data[index] !== 0x0a) continue;
-            reachedSince = collect(data.subarray(index + 1, lineEnd));
+            shouldStop = collect(data.subarray(index + 1, lineEnd));
             lineEnd = index;
-            if (reachedSince) break;
+            if (shouldStop) break;
           }
           remainder = Buffer.from(data.subarray(0, lineEnd));
         }
 
-        if (!reachedSince) reachedSince = collect(remainder);
+        if (!shouldStop) shouldStop = collect(remainder);
       } finally {
         await file.close();
       }
 
-      if (reachedSince) break;
+      if (shouldStop) break;
     }
 
-    return { entries, total, totalIsCapped: false };
+    return { entries, total, totalIsCapped };
   }
 
   private async rotateIfNeeded(): Promise<void> {

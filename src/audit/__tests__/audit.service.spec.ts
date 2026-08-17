@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
-import { AuditService, type AuditEntry } from '../audit.service.js';
+import { AUDIT_QUERY_COUNT_LIMIT, AuditService, type AuditEntry } from '../audit.service.js';
 
 const TEST_DIR = join(process.cwd(), '.test-audit-logs');
 const TEST_FILE = join(TEST_DIR, 'test-audit.log');
@@ -225,7 +225,7 @@ describe('AuditService', () => {
     expect(result).toEqual({ entries: [], total: 0, totalIsCapped: false });
   });
 
-  it('reads pages across chunks without a line-count cap', async () => {
+  it('caps scans across chunks and rotated logs without hiding the requested page', async () => {
     const svc = new AuditService({
       enabled: true,
       filePath: TEST_FILE,
@@ -235,13 +235,13 @@ describe('AuditService', () => {
     const entries = Array.from({ length: 2_000 }, (_, items) =>
       JSON.stringify(makeEntry({ items, path: `/inventory/${items}/مرحبا` })),
     );
-    entries.splice(1_750, 0, '{malformed');
-    writeFileSync(TEST_FILE, `${entries.join('\n')}\n`, 'utf8');
+    writeFileSync(TEST_FILE, `${entries.slice(1_500).join('\n')}\n`, 'utf8');
+    writeFileSync(`${TEST_FILE}.1`, `${entries.slice(0, 1_500).join('\n')}\n`, 'utf8');
 
     const result = await svc.query({ page: 10, pageSize: 25 });
 
-    expect(result.total).toBe(2_000);
-    expect(result.totalIsCapped).toBe(false);
+    expect(result.total).toBe(AUDIT_QUERY_COUNT_LIMIT);
+    expect(result.totalIsCapped).toBe(true);
     expect(result.entries.map((entry) => entry.items)).toEqual(
       Array.from({ length: 25 }, (_, index) => 1_774 - index),
     );
