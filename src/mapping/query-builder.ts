@@ -58,6 +58,18 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   const requestedSortBy = getSingleQueryValue(params, 'sortBy');
   const requestedSortDirection = getSingleQueryValue(params, 'sortDirection');
 
+  const configuredFilterKeys = new Set(Object.keys(config.filterableColumns ?? {}));
+  const unknownFilterParams = Object.keys(params).filter(
+    (key) => key.startsWith('filter.') && !configuredFilterKeys.has(key.slice('filter.'.length)),
+  );
+  if (unknownFilterParams.length > 0) {
+    throw new QueryValidationError(
+      `Unknown filter parameter${unknownFilterParams.length === 1 ? '' : 's'}: ${unknownFilterParams
+        .map((key) => `"${key}"`)
+        .join(', ')}`,
+    );
+  }
+
   if (search && search.length > MAX_SEARCH_LENGTH) {
     throw new QueryValidationError(
       `Query parameter "search" must not exceed ${MAX_SEARCH_LENGTH} characters`,
@@ -125,43 +137,42 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     });
   }
 
-  // Dynamic filters from filterableColumns config
-  if (config.filterableColumns) {
-    for (const [filterKey, filterConfig] of Object.entries(config.filterableColumns)) {
-      const paramKey = `filter.${filterKey}`;
-      const paramValue = getSingleQueryValue(params, paramKey);
-      if (paramValue === undefined || paramValue === '') continue;
+  // Dynamic filters from filterableColumns config. Unknown filter keys are
+  // rejected above before they can be silently ignored.
+  for (const [filterKey, filterConfig] of Object.entries(config.filterableColumns ?? {})) {
+    const paramKey = `filter.${filterKey}`;
+    const paramValue = getSingleQueryValue(params, paramKey);
+    if (paramValue === undefined || paramValue === '') continue;
 
-      switch (filterConfig.type) {
-        case 'string':
-          conditions.push({
-            column: filterConfig.column,
-            operator: '=',
-            value: paramValue,
-          });
-          break;
-        case 'number':
-          conditions.push({
-            column: filterConfig.column,
-            operator: '=',
-            value: parseNumericFilter(paramValue, paramKey),
-          });
-          break;
-        case 'gte':
-          conditions.push({
-            column: filterConfig.column,
-            operator: '>=',
-            value: parseNumericFilter(paramValue, paramKey),
-          });
-          break;
-        case 'lte':
-          conditions.push({
-            column: filterConfig.column,
-            operator: '<=',
-            value: parseNumericFilter(paramValue, paramKey),
-          });
-          break;
-      }
+    switch (filterConfig.type) {
+      case 'string':
+        conditions.push({
+          column: filterConfig.column,
+          operator: '=',
+          value: paramValue,
+        });
+        break;
+      case 'number':
+        conditions.push({
+          column: filterConfig.column,
+          operator: '=',
+          value: parseNumericFilter(paramValue, paramKey),
+        });
+        break;
+      case 'gte':
+        conditions.push({
+          column: filterConfig.column,
+          operator: '>=',
+          value: parseNumericFilter(paramValue, paramKey),
+        });
+        break;
+      case 'lte':
+        conditions.push({
+          column: filterConfig.column,
+          operator: '<=',
+          value: parseNumericFilter(paramValue, paramKey),
+        });
+        break;
     }
   }
 

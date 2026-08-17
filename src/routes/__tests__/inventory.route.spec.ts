@@ -166,6 +166,7 @@ describe('inventory routes', () => {
   it.each([
     ['/inventory?search=first&search=second', 'Query parameter "search"'],
     ['/inventory?filter.year=not-a-number', 'Query parameter "filter.year"'],
+    ['/inventory?filter.minYear=2020', 'Unknown filter parameter: "filter.minYear"'],
     ['/inventory?updatedSince=not-a-date', 'Query parameter "updatedSince"'],
   ])('GET %s returns 400 without querying the database', async (url, expectedMessage) => {
     const mockAdapter = createMockDbAdapter();

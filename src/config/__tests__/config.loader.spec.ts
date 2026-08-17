@@ -82,6 +82,9 @@ resources:
     idColumn: id
     fields:
       externalId: id
+      title: product_title
+      price: unit_price
+      currency: "'SAR'"
 `,
       'utf-8',
     );

@@ -4,11 +4,55 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  FIELD_MAPPING_TARGETS,
+  getFieldMappingPrompt,
   quoteIfNeeded,
   serializeEnvValue,
   shouldDefaultToTls,
+  toConfigLiteral,
   writePrivateFile,
 } from '../wizard.js';
+
+describe('getFieldMappingPrompt', () => {
+  it('offers every column and preselects the matching suggestion', () => {
+    const prompt = getFieldMappingPrompt(
+      'title',
+      ['id', 'product_title', 'unit_price'],
+      'product_title',
+    );
+
+    expect(prompt.default).toBe('product_title');
+    expect(prompt.choices).toContainEqual({
+      name: 'product_title (suggested)',
+      value: 'product_title',
+    });
+    expect(prompt.choices).toContainEqual({ name: 'unit_price', value: 'unit_price' });
+  });
+
+  it.each(['currency', 'category'] as const)('offers a fixed value for %s', (field) => {
+    const prompt = getFieldMappingPrompt(field, ['id'], undefined);
+
+    expect(prompt.choices).toContainEqual({
+      name: 'Use a fixed value for every row',
+      value: '\0fixed-value',
+    });
+  });
+
+  it.each(FIELD_MAPPING_TARGETS.filter((field) => field !== 'currency' && field !== 'category'))(
+    'does not offer a fixed value for %s',
+    (field) => {
+      expect(
+        getFieldMappingPrompt(field, ['id']).choices.map((choice) => choice.name),
+      ).not.toContain('Use a fixed value for every row');
+    },
+  );
+});
+
+describe('toConfigLiteral', () => {
+  it('produces the connector config literal form', () => {
+    expect(toConfigLiteral('SAR')).toBe("'SAR'");
+  });
+});
 
 describe('quoteIfNeeded', () => {
   it.each(['desc', 'order', 'user', 'limit', 'group'])(

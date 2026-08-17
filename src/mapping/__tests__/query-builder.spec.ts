@@ -13,6 +13,8 @@ const baseConfig: InventoryResourceConfig = {
     make: { column: '"makeEn"', type: 'string' },
     minPrice: { column: 'price', type: 'gte' },
     maxPrice: { column: 'price', type: 'lte' },
+    minYear: { column: 'year', type: 'gte' },
+    maxYear: { column: 'year', type: 'lte' },
   },
 };
 
@@ -127,6 +129,23 @@ describe('buildQuery', () => {
       operator: '<=',
       value: 50000,
     });
+  });
+
+  it('generates year range conditions', () => {
+    const result = buildQuery({ 'filter.minYear': '2020', 'filter.maxYear': '2022' }, baseConfig);
+    expect(result.conditions).toContainEqual({ column: 'year', operator: '>=', value: 2020 });
+    expect(result.conditions).toContainEqual({ column: 'year', operator: '<=', value: 2022 });
+  });
+
+  it('rejects filter parameters that are not declared in the config', () => {
+    expect(() =>
+      buildQuery({ 'filter.minMileage': '10000', 'filter.color': 'blue' }, baseConfig),
+    ).toThrow(
+      expect.objectContaining({
+        statusCode: 400,
+        message: 'Unknown filter parameters: "filter.minMileage", "filter.color"',
+      }),
+    );
   });
 
   it.each(['filter.year', 'filter.minPrice', 'filter.maxPrice'])(

@@ -20,7 +20,7 @@ async function validateConfigPath(path: string): Promise<void> {
   } catch {
     throw new Error(
       `CONFIG_PATH "${path}" does not exist. ` +
-        'Set the CONFIG_PATH environment variable to point to a valid connector.config.yml file.',
+        'Run `npm run setup` to generate one, copy connector.config.example.yml, or set the CONFIG_PATH environment variable to point to a valid connector.config.yml file.',
     );
   }
 }

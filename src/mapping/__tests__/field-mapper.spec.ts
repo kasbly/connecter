@@ -95,6 +95,18 @@ describe('mapRowToInventoryItem', () => {
     expect(result.description).toBeNull();
   });
 
+  it('rejects configurations that omit currency instead of labelling prices as USD', () => {
+    const { currency: _currency, ...fields } = baseConfig.fields;
+
+    expect(() =>
+      mapRowToInventoryItem(
+        { id: '1', title: 'Test', price: 100 },
+        { ...baseConfig, fields },
+        new Map(),
+      ),
+    ).toThrow('Inventory field "currency" must be configured.');
+  });
+
   it('processes image relations', () => {
     const configWithRelations: InventoryResourceConfig = {
       ...baseConfig,

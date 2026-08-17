@@ -223,7 +223,7 @@ describe('suggestFilterableColumns', () => {
     expect(suggestions.find((s) => s.filterName === 'maxPrice')!.filterType).toBe('lte');
   });
 
-  it('suggests numeric columns as number filters', () => {
+  it('suggests numeric columns as min/max range filters', () => {
     const columns = [col('id', 'integer', true), col('year', 'integer')];
     const fieldMappings = [
       {
@@ -236,10 +236,10 @@ describe('suggestFilterableColumns', () => {
 
     const suggestions = suggestFilterableColumns(columns, fieldMappings, []);
     expect(suggestions).toContainEqual(
-      expect.objectContaining({
-        filterName: 'year',
-        filterType: 'number',
-      }),
+      expect.objectContaining({ filterName: 'minYear', filterType: 'gte' }),
+    );
+    expect(suggestions).toContainEqual(
+      expect.objectContaining({ filterName: 'maxYear', filterType: 'lte' }),
     );
   });
 

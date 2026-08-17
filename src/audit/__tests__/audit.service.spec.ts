@@ -184,7 +184,27 @@ describe('AuditService', () => {
     expect(result.total).toBe(2);
   });
 
-  it('bounds scanning when the since filter excludes every entry', async () => {
+  it('queries rotated logs in newest-first order', async () => {
+    const svc = new AuditService({
+      enabled: true,
+      filePath: TEST_FILE,
+      maxFileSizeMB: 50,
+      retentionDays: 90,
+    });
+    writeFileSync(TEST_FILE, `${JSON.stringify(makeEntry({ items: 3 }))}\n`, 'utf8');
+    writeFileSync(
+      `${TEST_FILE}.1`,
+      `${JSON.stringify(makeEntry({ items: 1 }))}\n${JSON.stringify(makeEntry({ items: 2 }))}\n`,
+      'utf8',
+    );
+
+    const result = await svc.query({ page: 2, pageSize: 2 });
+
+    expect(result).toMatchObject({ total: 3, totalIsCapped: false });
+    expect(result.entries.map((entry) => entry.items)).toEqual([1]);
+  });
+
+  it('stops at the since boundary without applying a line-count cap', async () => {
     const svc = new AuditService({
       enabled: true,
       filePath: TEST_FILE,
@@ -202,10 +222,10 @@ describe('AuditService', () => {
       since: '9999-01-01T00:00:00Z',
     });
 
-    expect(result).toEqual({ entries: [], total: 0, totalIsCapped: true });
+    expect(result).toEqual({ entries: [], total: 0, totalIsCapped: false });
   });
 
-  it('bounds reverse parsing while reading pages across chunks', async () => {
+  it('reads pages across chunks without a line-count cap', async () => {
     const svc = new AuditService({
       enabled: true,
       filePath: TEST_FILE,
@@ -220,8 +240,8 @@ describe('AuditService', () => {
 
     const result = await svc.query({ page: 10, pageSize: 25 });
 
-    expect(result.total).toBe(999);
-    expect(result.totalIsCapped).toBe(true);
+    expect(result.total).toBe(2_000);
+    expect(result.totalIsCapped).toBe(false);
     expect(result.entries.map((entry) => entry.items)).toEqual(
       Array.from({ length: 25 }, (_, index) => 1_774 - index),
     );

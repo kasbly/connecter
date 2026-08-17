@@ -26,7 +26,7 @@ describe('buildApp database timeout handling', () => {
         inventory: {
           table: 'cars',
           idColumn: 'id',
-          fields: { externalId: 'id' },
+          fields: { externalId: 'id', title: 'title', price: 'price', currency: "'SAR'" },
         },
       },
       audit: { enabled: true, filePath: auditFile, maxFileSizeMB: 50, retentionDays: 90 },
@@ -81,7 +81,13 @@ describe('buildApp database timeout handling', () => {
         user: 'connector',
         password: 'password',
       },
-      resources: { inventory: { table: 'cars', idColumn: 'id', fields: { externalId: 'id' } } },
+      resources: {
+        inventory: {
+          table: 'cars',
+          idColumn: 'id',
+          fields: { externalId: 'id', title: 'title', price: 'price', currency: "'SAR'" },
+        },
+      },
       audit: { enabled: true, filePath: auditFile, maxFileSizeMB: 50, retentionDays: 90 },
     });
     const dbAdapter: DatabaseAdapter = {

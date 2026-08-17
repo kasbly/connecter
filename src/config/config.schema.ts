@@ -73,7 +73,13 @@ const inventoryResourceSchema = z.object({
   baseFilter: z.string().optional(),
   idColumn: z.string().min(1),
   updatedAtColumn: z.string().optional(),
-  fields: z.record(z.string(), z.string()),
+  fields: z
+    .object({
+      title: z.string().min(1),
+      price: z.string().min(1),
+      currency: z.string().min(1),
+    })
+    .catchall(z.string()),
   attributes: z.record(z.string(), z.string()).optional(),
   searchableColumns: z.array(z.string()).optional(),
   filterableColumns: z.record(z.string(), filterableColumnSchema).optional(),

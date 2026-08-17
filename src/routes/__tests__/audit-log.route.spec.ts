@@ -43,4 +43,16 @@ describe('audit log route', () => {
     });
     await app.close();
   });
+
+  it('does not cap the requested page number', async () => {
+    const auditService = createAuditService();
+    const app = Fastify();
+    registerAuditLogRoute(app, auditService);
+
+    const response = await app.inject({ method: 'GET', url: '/audit-log?page=11' });
+
+    expect(response.statusCode).toBe(200);
+    expect(auditService.query).toHaveBeenCalledWith({ page: 11, pageSize: 50, since: undefined });
+    await app.close();
+  });
 });

@@ -22,6 +22,55 @@ interface DatabaseTlsSettings {
   rejectUnauthorized: boolean;
 }
 
+export const FIELD_MAPPING_TARGETS = [
+  'title',
+  'price',
+  'currency',
+  'category',
+  'status',
+  'description',
+] as const;
+
+type FieldMappingTarget = (typeof FIELD_MAPPING_TARGETS)[number];
+
+const UNMAPPED_FIELD_VALUE = '\0unmapped';
+const FIXED_VALUE_FIELD_VALUE = '\0fixed-value';
+const FIXED_VALUE_FIELDS = new Set<FieldMappingTarget>(['currency', 'category']);
+
+interface FieldMappingPrompt {
+  message: string;
+  choices: Array<{ name: string; value: string }>;
+  default: string;
+}
+
+/** Build the selectable mapping choices for one standard inventory field. */
+export function getFieldMappingPrompt(
+  field: FieldMappingTarget,
+  columnNames: string[],
+  suggestedColumn?: string,
+): FieldMappingPrompt {
+  const choices: FieldMappingPrompt['choices'] = [
+    { name: 'Do not map this field', value: UNMAPPED_FIELD_VALUE },
+    ...(FIXED_VALUE_FIELDS.has(field)
+      ? [{ name: 'Use a fixed value for every row', value: FIXED_VALUE_FIELD_VALUE }]
+      : []),
+    ...columnNames.map((columnName) => ({
+      name: columnName === suggestedColumn ? `${columnName} (suggested)` : columnName,
+      value: columnName,
+    })),
+  ];
+
+  return {
+    message: `Which column contains the ${field}?`,
+    choices,
+    default: suggestedColumn ?? UNMAPPED_FIELD_VALUE,
+  };
+}
+
+export function toConfigLiteral(value: string): string {
+  return `'${value}'`;
+}
+
 export function shouldDefaultToTls(host: string): boolean {
   return !['localhost', '127.0.0.1', '::1'].includes(host.trim().toLowerCase());
 }
@@ -87,19 +136,52 @@ export async function runWizard(): Promise<void> {
   const suggestions = suggestFieldMappings(selectedTable.columns);
   const idColumn = suggestIdColumn(selectedTable.columns) ?? 'id';
   const updatedAtColumn = suggestUpdatedAtColumn(selectedTable.columns);
+  const allColumnNames = selectedTable.columns.map((c) => c.name);
 
-  console.log('  Auto-detected field mappings:');
-  for (const s of suggestions) {
-    console.log(`    ${s.columnName} → ${s.suggestedMapping} (${s.mappingType}, ${s.confidence})`);
+  const fieldMappings: Partial<Record<FieldMappingTarget, string>> = {};
+  const mappedColumnNames = new Set<string>();
+  for (const field of FIELD_MAPPING_TARGETS) {
+    const suggestedColumn = suggestions.find(
+      (suggestion) => suggestion.mappingType === 'field' && suggestion.suggestedMapping === field,
+    )?.columnName;
+    const selectedValue = await select(
+      getFieldMappingPrompt(field, allColumnNames, suggestedColumn),
+    );
+
+    if (selectedValue === UNMAPPED_FIELD_VALUE) continue;
+    if (selectedValue === FIXED_VALUE_FIELD_VALUE) {
+      const fixedValue = await input({
+        message: `Fixed ${field} value for every row:`,
+        validate: (value) => {
+          const trimmed = value.trim();
+          if (!trimmed) return 'A fixed value is required.';
+          if (trimmed.includes("'")) return 'Fixed values cannot contain single quotes.';
+          return true;
+        },
+      });
+      fieldMappings[field] = toConfigLiteral(fixedValue.trim());
+      continue;
+    }
+
+    fieldMappings[field] = quoteIfNeeded(selectedValue);
+    mappedColumnNames.add(selectedValue);
   }
 
-  const allColumnNames = selectedTable.columns.map((c) => c.name);
-  const suggestedColumnNames = new Set(suggestions.map((s) => s.columnName));
+  const missingRequiredMappings = ['title', 'price', 'currency'].filter(
+    (field) => !fieldMappings[field as FieldMappingTarget],
+  );
+  if (missingRequiredMappings.length > 0) {
+    console.error(
+      `Cannot save configuration: map ${missingRequiredMappings.join(' and ')} before continuing.`,
+    );
+    await db.destroy();
+    return;
+  }
 
-  // Let user select which columns to include as attributes (for unmapped columns)
+  // Let user select which remaining columns to include as attributes.
   const unmappedColumns = allColumnNames.filter(
     (name) =>
-      !suggestedColumnNames.has(name) &&
+      !mappedColumnNames.has(name) &&
       name !== idColumn &&
       name !== updatedAtColumn &&
       !/Id$/.test(name) &&
@@ -145,7 +227,17 @@ export async function runWizard(): Promise<void> {
   console.log('\nStep 3c: Filter Configuration');
   const filterSuggestions = suggestFilterableColumns(
     selectedTable.columns,
-    suggestions,
+    [
+      ...suggestions.filter((suggestion) => suggestion.mappingType === 'attribute'),
+      ...Object.entries(fieldMappings)
+        .filter(([, columnExpr]) => !columnExpr.startsWith("'"))
+        .map(([suggestedMapping, columnExpr]) => ({
+          columnName: columnExpr.slice(1, -1).replaceAll('""', '"'),
+          suggestedMapping,
+          confidence: 'high' as const,
+          mappingType: 'field' as const,
+        })),
+    ],
     additionalAttributes,
   );
 
@@ -282,10 +374,9 @@ export async function runWizard(): Promise<void> {
   const attributes: Record<string, string> = {};
 
   fields['externalId'] = quoteIfNeeded(idColumn);
+  Object.assign(fields, fieldMappings);
   for (const s of suggestions) {
-    if (s.mappingType === 'field') {
-      fields[s.suggestedMapping] = quoteIfNeeded(s.columnName);
-    } else {
+    if (s.mappingType === 'attribute' && !mappedColumnNames.has(s.columnName)) {
       attributes[s.suggestedMapping] = quoteIfNeeded(s.columnName);
     }
   }

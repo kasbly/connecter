@@ -292,26 +292,19 @@ export function suggestFilterableColumns(
     const isNumeric = NUMERIC_TYPES.has(col.type.toLowerCase());
     const isText = TEXT_TYPES.has(col.type.toLowerCase());
 
-    if (mappedName === 'price' && isNumeric) {
-      // Price gets two filters: minPrice (gte) and maxPrice (lte)
+    if (isNumeric) {
+      const filterNameSuffix = mappedName.charAt(0).toUpperCase() + mappedName.slice(1);
       suggestions.push({
         columnName: col.name,
-        filterName: 'minPrice',
+        filterName: `min${filterNameSuffix}`,
         filterType: 'gte',
         confidence: 'high',
       });
       suggestions.push({
         columnName: col.name,
-        filterName: 'maxPrice',
+        filterName: `max${filterNameSuffix}`,
         filterType: 'lte',
         confidence: 'high',
-      });
-    } else if (isNumeric) {
-      suggestions.push({
-        columnName: col.name,
-        filterName: mappedName,
-        filterType: 'number',
-        confidence: 'medium',
       });
     } else if (isText) {
       // Only suggest text filters for columns with bounded domains (make, fuelType, etc.)

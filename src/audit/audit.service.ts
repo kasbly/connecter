@@ -5,7 +5,6 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { AuditConfig } from '../config/config.types.js';
 
 const AUDIT_READ_CHUNK_SIZE = 64 * 1024;
-export const AUDIT_QUERY_COUNT_LIMIT = 1_000;
 
 export interface AuditEntry {
   ts: string;
@@ -71,23 +70,15 @@ export class AuditService {
     }
 
     await this.flush();
-    if (!existsSync(this.config.filePath)) {
-      return { entries: [], total: 0, totalIsCapped: false };
-    }
-
     const offset = (options.page - 1) * options.pageSize;
     const entries: AuditEntry[] = [];
     let total = 0;
-    let scanned = 0;
-    let totalIsCapped = false;
 
-    const collect = (line: Buffer): void => {
-      if (line.length === 0) return;
-      scanned++;
-      if (scanned >= AUDIT_QUERY_COUNT_LIMIT) totalIsCapped = true;
+    const collect = (line: Buffer): boolean => {
+      if (line.length === 0) return false;
       try {
         const entry = JSON.parse(line.toString('utf8')) as AuditEntry;
-        if (options.since && entry.ts < options.since) return;
+        if (options.since && entry.ts < options.since) return true;
 
         if (total >= offset && entries.length < options.pageSize) {
           entries.push(entry);
@@ -96,52 +87,76 @@ export class AuditService {
       } catch {
         // Skip malformed lines
       }
+      return false;
     };
 
-    const file = await open(this.config.filePath, 'r');
-    try {
-      const { size } = await file.stat();
-      let position = size;
-      let remainder = Buffer.alloc(0);
+    const dir = dirname(this.config.filePath);
+    const base = basename(this.config.filePath);
+    const rotatedFiles = (await readdir(dir))
+      .map((file) => ({ file, index: Number(file.slice(base.length + 1)) }))
+      .filter(
+        ({ file, index }) =>
+          file.startsWith(`${base}.`) && Number.isSafeInteger(index) && index > 0,
+      )
+      .sort((left, right) => left.index - right.index)
+      .map(({ file }) => join(dir, file));
+    const files = [this.config.filePath, ...rotatedFiles];
+    let reachedSince = false;
 
-      while (position > 0) {
-        const bytesToRead = Math.min(AUDIT_READ_CHUNK_SIZE, position);
-        position -= bytesToRead;
-
-        const chunk = Buffer.allocUnsafe(bytesToRead);
-        let bytesRead = 0;
-        while (bytesRead < bytesToRead) {
-          const result = await file.read(
-            chunk,
-            bytesRead,
-            bytesToRead - bytesRead,
-            position + bytesRead,
-          );
-          if (result.bytesRead === 0) break;
-          bytesRead += result.bytesRead;
-        }
-        const data =
-          remainder.length === 0
-            ? chunk.subarray(0, bytesRead)
-            : Buffer.concat([chunk.subarray(0, bytesRead), remainder]);
-
-        let lineEnd = data.length;
-        for (let index = data.length - 1; index >= 0; index--) {
-          if (data[index] !== 0x0a) continue;
-          collect(data.subarray(index + 1, lineEnd));
-          lineEnd = index;
-          if (totalIsCapped) break;
-        }
-        if (totalIsCapped) break;
-        remainder = Buffer.from(data.subarray(0, lineEnd));
+    for (const filePath of files) {
+      let file;
+      try {
+        file = await open(filePath, 'r');
+      } catch (error) {
+        if (isMissingFileError(error)) continue;
+        throw error;
       }
 
-      if (!totalIsCapped) collect(remainder);
-    } finally {
-      await file.close();
+      try {
+        const { size } = await file.stat();
+        let position = size;
+        let remainder = Buffer.alloc(0);
+
+        while (position > 0 && !reachedSince) {
+          const bytesToRead = Math.min(AUDIT_READ_CHUNK_SIZE, position);
+          position -= bytesToRead;
+
+          const chunk = Buffer.allocUnsafe(bytesToRead);
+          let bytesRead = 0;
+          while (bytesRead < bytesToRead) {
+            const result = await file.read(
+              chunk,
+              bytesRead,
+              bytesToRead - bytesRead,
+              position + bytesRead,
+            );
+            if (result.bytesRead === 0) break;
+            bytesRead += result.bytesRead;
+          }
+          const data =
+            remainder.length === 0
+              ? chunk.subarray(0, bytesRead)
+              : Buffer.concat([chunk.subarray(0, bytesRead), remainder]);
+
+          let lineEnd = data.length;
+          for (let index = data.length - 1; index >= 0; index--) {
+            if (data[index] !== 0x0a) continue;
+            reachedSince = collect(data.subarray(index + 1, lineEnd));
+            lineEnd = index;
+            if (reachedSince) break;
+          }
+          remainder = Buffer.from(data.subarray(0, lineEnd));
+        }
+
+        if (!reachedSince) reachedSince = collect(remainder);
+      } finally {
+        await file.close();
+      }
+
+      if (reachedSince) break;
     }
 
-    return { entries, total, totalIsCapped };
+    return { entries, total, totalIsCapped: false };
   }
 
   private async rotateIfNeeded(): Promise<void> {

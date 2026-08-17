@@ -19,7 +19,7 @@ function createConfigInput(databaseOverrides: Record<string, unknown> = {}) {
       inventory: {
         table: 'cars',
         idColumn: 'id',
-        fields: { externalId: 'id' },
+        fields: { externalId: 'id', title: 'title', price: 'price', currency: "'SAR'" },
       },
     },
   };
@@ -54,6 +54,16 @@ describe('connectorConfigSchema database TLS options', () => {
     expect(() =>
       connectorConfigSchema.parse(createConfigInput({ ssl: true, sslCa: '' })),
     ).toThrow();
+  });
+});
+
+describe('connectorConfigSchema inventory fields', () => {
+  it.each(['title', 'price', 'currency'])('requires a %s mapping', (field) => {
+    const config = createConfigInput();
+    const fields = config.resources.inventory.fields as Record<string, string>;
+    delete fields[field];
+
+    expect(() => connectorConfigSchema.parse(config)).toThrow();
   });
 });
 

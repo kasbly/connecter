@@ -2,7 +2,6 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AuditService } from '../audit/audit.service.js';
 import { QueryValidationError } from '../mapping/query-builder.js';
 
-const MAX_AUDIT_PAGE = 10;
 const ISO_DATE_OR_TIMESTAMP =
   /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
 
@@ -17,7 +16,7 @@ export function registerAuditLogRoute(app: FastifyInstance, auditService: AuditS
         since?: string;
       };
 
-      const page = Math.min(MAX_AUDIT_PAGE, Math.max(1, parseInt(params.page ?? '1', 10) || 1));
+      const page = Math.max(1, parseInt(params.page ?? '1', 10) || 1);
       const pageSize = Math.min(100, Math.max(1, parseInt(params.pageSize ?? '50', 10) || 50));
       let since: string | undefined;
       if (params.since !== undefined && params.since !== '') {

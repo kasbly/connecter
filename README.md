@@ -210,6 +210,8 @@ resources:
     # Filters available via ?filter.<name>=<value>
     filterableColumns:
       year: { column: 'year', type: 'number' }
+      minYear: { column: 'year', type: 'gte' }
+      maxYear: { column: 'year', type: 'lte' }
       make: { column: '"makeEn"', type: 'string' }
       fuelType: { column: '"fuelType"', type: 'string' }
       minPrice: { column: 'price', type: 'gte' }
