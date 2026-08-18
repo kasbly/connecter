@@ -44,15 +44,49 @@ describe('audit log route', () => {
     await app.close();
   });
 
-  it('does not cap the requested page number', async () => {
+  it('accepts a page within the maximum offset', async () => {
     const auditService = createAuditService();
     const app = Fastify();
     registerAuditLogRoute(app, auditService);
 
-    const response = await app.inject({ method: 'GET', url: '/audit-log?page=11' });
+    const response = await app.inject({ method: 'GET', url: '/audit-log?page=1001&pageSize=100' });
 
     expect(response.statusCode).toBe(200);
-    expect(auditService.query).toHaveBeenCalledWith({ page: 11, pageSize: 50, since: undefined });
+    expect(auditService.query).toHaveBeenCalledWith({
+      page: 1001,
+      pageSize: 100,
+      since: undefined,
+    });
+    await app.close();
+  });
+
+  it('rejects a page that exceeds the maximum offset before querying the audit log', async () => {
+    const auditService = createAuditService();
+    const app = Fastify();
+    registerAuditLogRoute(app, auditService);
+
+    const response = await app.inject({ method: 'GET', url: '/audit-log?page=1002&pageSize=100' });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      message: 'Query parameter "page" must not exceed an offset of 100000 rows',
+    });
+    expect(auditService.query).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('rejects pages whose offset would exceed the audit scan limit', async () => {
+    const auditService = createAuditService();
+    const app = Fastify();
+    registerAuditLogRoute(app, auditService);
+
+    const response = await app.inject({ method: 'GET', url: '/audit-log?page=2002' });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      message: 'Query parameter "page" must not exceed an offset of 100000 rows',
+    });
+    expect(auditService.query).not.toHaveBeenCalled();
     await app.close();
   });
 });

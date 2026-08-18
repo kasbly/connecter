@@ -70,7 +70,9 @@ export function suggestFieldMappings(columns: IntrospectedColumn[]): FieldSugges
 
   // First pass: match standard fields (high-priority)
   for (const { target, patterns, type } of FIELD_PATTERNS) {
+    let matchedTarget = false;
     for (const col of columns) {
+      if (matchedTarget) break;
       if (usedColumns.has(col.name)) continue;
       for (const pattern of patterns) {
         if (pattern.test(col.name)) {
@@ -81,6 +83,7 @@ export function suggestFieldMappings(columns: IntrospectedColumn[]): FieldSugges
             mappingType: type,
           });
           usedColumns.add(col.name);
+          matchedTarget = true;
           break;
         }
       }
@@ -89,7 +92,9 @@ export function suggestFieldMappings(columns: IntrospectedColumn[]): FieldSugges
 
   // Second pass: match attributes
   for (const { target, patterns } of ATTRIBUTE_PATTERNS) {
+    let matchedTarget = false;
     for (const col of columns) {
+      if (matchedTarget) break;
       if (usedColumns.has(col.name)) continue;
       if (col.isPrimaryKey) continue;
       // Skip foreign keys (end with Id/id)
@@ -106,6 +111,7 @@ export function suggestFieldMappings(columns: IntrospectedColumn[]): FieldSugges
             mappingType: 'attribute',
           });
           usedColumns.add(col.name);
+          matchedTarget = true;
           break;
         }
       }
@@ -270,6 +276,7 @@ export function suggestFilterableColumns(
   additionalAttributes: string[],
 ): FilterableColumnSuggestion[] {
   const suggestions: FilterableColumnSuggestion[] = [];
+  const usedFilterNames = new Set<string>();
 
   // Build a lookup: columnName → mapped name (field or attribute target)
   const columnToName = new Map<string, string>();
@@ -294,30 +301,41 @@ export function suggestFilterableColumns(
 
     if (isNumeric) {
       const filterNameSuffix = mappedName.charAt(0).toUpperCase() + mappedName.slice(1);
-      suggestions.push({
-        columnName: col.name,
-        filterName: `min${filterNameSuffix}`,
-        filterType: 'gte',
-        confidence: 'high',
-      });
-      suggestions.push({
-        columnName: col.name,
-        filterName: `max${filterNameSuffix}`,
-        filterType: 'lte',
-        confidence: 'high',
-      });
+      const minFilterName = `min${filterNameSuffix}`;
+      const maxFilterName = `max${filterNameSuffix}`;
+      if (!usedFilterNames.has(minFilterName)) {
+        suggestions.push({
+          columnName: col.name,
+          filterName: minFilterName,
+          filterType: 'gte',
+          confidence: 'high',
+        });
+        usedFilterNames.add(minFilterName);
+      }
+      if (!usedFilterNames.has(maxFilterName)) {
+        suggestions.push({
+          columnName: col.name,
+          filterName: maxFilterName,
+          filterType: 'lte',
+          confidence: 'high',
+        });
+        usedFilterNames.add(maxFilterName);
+      }
     } else if (isText) {
       // Only suggest text filters for columns with bounded domains (make, fuelType, etc.)
       // Skip very free-text columns like title, description
       const FREE_TEXT = new Set(['title', 'description', 'desc', 'details', 'body']);
       if (FREE_TEXT.has(mappedName.toLowerCase())) continue;
 
-      suggestions.push({
-        columnName: col.name,
-        filterName: mappedName,
-        filterType: 'string',
-        confidence: 'medium',
-      });
+      if (!usedFilterNames.has(mappedName)) {
+        suggestions.push({
+          columnName: col.name,
+          filterName: mappedName,
+          filterType: 'string',
+          confidence: 'medium',
+        });
+        usedFilterNames.add(mappedName);
+      }
     }
   }
 

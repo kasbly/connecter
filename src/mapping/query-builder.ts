@@ -49,6 +49,12 @@ function parseNumericFilter(value: string, key: string): number {
   return parsed;
 }
 
+function normalizeSortColumn(columnExpr: string): string {
+  const trimmedColumnExpr = columnExpr.trim();
+  const quotedColumnMatch = /^"(.+)"$/.exec(trimmedColumnExpr);
+  return quotedColumnMatch ? quotedColumnMatch[1]! : trimmedColumnExpr;
+}
+
 export function buildQuery(params: RawQueryParams, config: InventoryResourceConfig): ParsedQuery {
   const conditions: QueryCondition[] = [];
   const pageParam = getSingleQueryValue(params, 'page');
@@ -95,10 +101,12 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   // Anything else — including SQL injection payloads — silently falls back to the default
   // sort column instead of ever reaching raw SQL.
   const defaultSortColumn = config.updatedAtColumn ?? config.idColumn;
-  const allowedSortColumns = new Set(getRequiredColumns(config));
+  const allowedSortColumns = new Map(
+    getRequiredColumns(config).map((column) => [normalizeSortColumn(column), column]),
+  );
   const sortBy =
-    requestedSortBy !== undefined && allowedSortColumns.has(requestedSortBy)
-      ? requestedSortBy
+    requestedSortBy !== undefined
+      ? (allowedSortColumns.get(normalizeSortColumn(requestedSortBy)) ?? defaultSortColumn)
       : defaultSortColumn;
   const sortDirection = requestedSortDirection === 'asc' ? ('asc' as const) : ('desc' as const);
 

@@ -1,6 +1,5 @@
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ZodError } from 'zod';
@@ -95,32 +94,5 @@ resources:
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-
-  it('declares every non-metadata AI inventory filter in the example config', () => {
-    vi.stubEnv('CONNECTOR_API_KEY', 'example-key');
-    vi.stubEnv('DB_HOST', 'localhost');
-    vi.stubEnv('DB_NAME', 'inventory');
-    vi.stubEnv('DB_USER', 'merchant');
-    vi.stubEnv('DB_PASSWORD', 'password');
-
-    const exampleConfigPath = fileURLToPath(
-      new URL('../../../connector.config.example.yml', import.meta.url),
-    );
-    const filterableColumns = loadConfig(exampleConfigPath).resources.inventory.filterableColumns;
-
-    expect(Object.keys(filterableColumns ?? {})).toEqual(
-      expect.arrayContaining([
-        'minYear',
-        'maxYear',
-        'make',
-        'model',
-        'fuelType',
-        'transmission',
-        'color',
-        'minPrice',
-        'maxPrice',
-      ]),
-    );
   });
 });

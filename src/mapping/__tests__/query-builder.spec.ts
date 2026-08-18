@@ -207,6 +207,19 @@ describe('buildQuery', () => {
       expect(result.sort).toEqual({ column: '"makeEn"', direction: 'desc' });
     });
 
+    it('accepts a bare sortBy for a quoted configured column', () => {
+      const wizardGeneratedConfig: InventoryResourceConfig = {
+        ...baseConfig,
+        idColumn: '"id"',
+        updatedAtColumn: '"updatedAt"',
+        fields: { title: '"title"', price: '"price"' },
+      };
+
+      const result = buildQuery({ sortBy: 'price', sortDirection: 'asc' }, wizardGeneratedConfig);
+
+      expect(result.sort).toEqual({ column: '"price"', direction: 'asc' });
+    });
+
     it('falls back to the default sort column when sortBy is not a known column', () => {
       const result = buildQuery({ sortBy: 'nonexistentColumn' }, baseConfig);
       expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc' });

@@ -53,6 +53,25 @@ describe('suggestFieldMappings', () => {
     expect(attrs.some((a) => a.suggestedMapping === 'transmission')).toBe(true);
   });
 
+  it('keeps the first matching column for each attribute target', () => {
+    const columns = [
+      col('id', 'integer', true),
+      col('makeEn', 'text'),
+      col('makeAr', 'text'),
+      col('engineSize', 'numeric'),
+      col('enginePower', 'numeric'),
+    ];
+
+    const attributes = suggestFieldMappings(columns).filter(
+      (suggestion) => suggestion.mappingType === 'attribute',
+    );
+
+    expect(attributes).toEqual([
+      expect.objectContaining({ columnName: 'makeEn', suggestedMapping: 'make' }),
+      expect.objectContaining({ columnName: 'engineSize', suggestedMapping: 'enginePower' }),
+    ]);
+  });
+
   it('skips foreign key and timestamp columns for attributes', () => {
     const columns = [
       col('id', 'integer', true),
@@ -296,6 +315,28 @@ describe('suggestFilterableColumns', () => {
         filterType: 'string',
       }),
     );
+  });
+
+  it('keeps the first column when mapped names would produce duplicate filters', () => {
+    const columns = [col('id', 'integer', true), col('makeEn'), col('makeAr')];
+    const fieldMappings = [
+      {
+        columnName: 'makeEn',
+        suggestedMapping: 'make',
+        confidence: 'medium' as const,
+        mappingType: 'attribute' as const,
+      },
+      {
+        columnName: 'makeAr',
+        suggestedMapping: 'make',
+        confidence: 'medium' as const,
+        mappingType: 'attribute' as const,
+      },
+    ];
+
+    expect(suggestFilterableColumns(columns, fieldMappings, [])).toEqual([
+      expect.objectContaining({ columnName: 'makeEn', filterName: 'make' }),
+    ]);
   });
 
   it('skips FK and timestamp columns', () => {

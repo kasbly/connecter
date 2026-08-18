@@ -71,20 +71,13 @@ export function mapRowToInventoryItem(
     title: String(fields['title'] ?? ''),
     description: typeof fields['description'] === 'string' ? fields['description'] : null,
     price: Number(fields['price'] ?? 0),
-    currency: requireConfiguredCurrency(fields['currency']),
+    currency: String(fields['currency'] ?? ''),
     category: String(fields['category'] ?? ''),
     status: String(fields['status'] ?? 'ACTIVE'),
     images,
     attributes,
     updatedAt,
   };
-}
-
-function requireConfiguredCurrency(currency: unknown): string {
-  if (typeof currency !== 'string' || !currency.trim()) {
-    throw new Error('Inventory field "currency" must be configured.');
-  }
-  return currency;
 }
 
 export function resolveColumnValue(row: Record<string, unknown>, columnExpr: string): unknown {
