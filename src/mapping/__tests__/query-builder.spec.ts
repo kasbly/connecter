@@ -105,6 +105,26 @@ describe('buildQuery', () => {
     });
   });
 
+  it('translates Kasbly status filters to the configured source values', () => {
+    const result = buildQuery(
+      { 'filter.status': 'SOLD' },
+      {
+        ...baseConfig,
+        filterableColumns: {
+          ...baseConfig.filterableColumns,
+          status: { column: 'availability', type: 'string' },
+        },
+        statusValues: { SOLD: ['sold', 'closed'] },
+      },
+    );
+
+    expect(result.conditions).toContainEqual({
+      column: 'availability',
+      operator: 'IN',
+      value: ['sold', 'closed'],
+    });
+  });
+
   it('generates filter conditions for number type', () => {
     const result = buildQuery({ 'filter.year': '2024' }, baseConfig);
     expect(result.conditions).toContainEqual({
@@ -137,15 +157,18 @@ describe('buildQuery', () => {
     expect(result.conditions).toContainEqual({ column: 'year', operator: '<=', value: 2022 });
   });
 
-  it('rejects filter parameters that are not declared in the config', () => {
-    expect(() =>
-      buildQuery({ 'filter.minMileage': '10000', 'filter.color': 'blue' }, baseConfig),
-    ).toThrow(
-      expect.objectContaining({
-        statusCode: 400,
-        message: 'Unknown filter parameters: "filter.minMileage", "filter.color"',
-      }),
+  it('reports filter parameters that are not declared in the config without rejecting the query', () => {
+    const result = buildQuery(
+      { 'filter.minMileage': '10000', 'filter.color': 'blue', 'filter.make': 'Toyota' },
+      baseConfig,
     );
+
+    expect(result.ignoredFilters).toEqual(['minMileage', 'color']);
+    expect(result.conditions).toContainEqual({
+      column: '"makeEn"',
+      operator: '=',
+      value: 'Toyota',
+    });
   });
 
   it.each(['filter.year', 'filter.minPrice', 'filter.maxPrice'])(

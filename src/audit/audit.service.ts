@@ -37,6 +37,7 @@ export class AuditService {
   private readonly logger?: Pick<FastifyBaseLogger, 'warn'>;
   private writeQueue: Promise<void> = Promise.resolve();
   private lastPruneMs = 0;
+  private hasWarnedAboutRotationTruncation = false;
 
   constructor(config: AuditConfig, logger?: Pick<FastifyBaseLogger, 'warn'>) {
     this.config = config;
@@ -181,8 +182,39 @@ export class AuditService {
         const dir = dirname(this.config.filePath);
         const base = basename(this.config.filePath);
 
-        // Shift existing rotated files
-        for (let i = 9; i >= 1; i--) {
+        const oldestFile = join(dir, `${base}.${this.config.maxFiles}`);
+        const oldestStats = await stat(oldestFile).catch((error: unknown) => {
+          if (isMissingFileError(error)) return undefined;
+          throw error;
+        });
+        const willDiscardOldest =
+          this.config.maxFiles === 1 ||
+          (await stat(join(dir, `${base}.${this.config.maxFiles - 1}`))
+            .then(() => true)
+            .catch((error: unknown) => {
+              if (isMissingFileError(error)) return false;
+              throw error;
+            }));
+        if (
+          oldestStats &&
+          willDiscardOldest &&
+          !this.hasWarnedAboutRotationTruncation &&
+          Date.now() - oldestStats.mtimeMs < this.config.retentionDays * 24 * 60 * 60 * 1000
+        ) {
+          this.hasWarnedAboutRotationTruncation = true;
+          this.logger?.warn(
+            {
+              filePath: this.config.filePath,
+              maxFiles: this.config.maxFiles,
+              maxFileSizeMB: this.config.maxFileSizeMB,
+              retentionDays: this.config.retentionDays,
+            },
+            'Audit log rotation is discarding a file before its retention period; increase maxFiles or maxFileSizeMB to retain more history',
+          );
+        }
+
+        // Shift existing rotated files, replacing the oldest generation when at capacity.
+        for (let i = this.config.maxFiles - 1; i >= 1; i--) {
           const from = join(dir, `${base}.${i}`);
           const to = join(dir, `${base}.${i + 1}`);
           try {

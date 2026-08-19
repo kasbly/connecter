@@ -1,6 +1,6 @@
 import type { InventoryResourceConfig } from '../config/config.types.js';
 import type { QueryCondition, PaginationOptions, SortOptions } from '../db/adapter.interface.js';
-import { getRequiredColumns } from './field-mapper.js';
+import { getRequiredColumns, getSourceStatusValues } from './field-mapper.js';
 
 const MAX_PAGE_SIZE = 100;
 const MAX_PAGE_OFFSET = 100_000;
@@ -12,6 +12,8 @@ export interface ParsedQuery {
   conditions: QueryCondition[];
   pagination: PaginationOptions;
   sort: SortOptions;
+  /** Filter names supplied by the caller that this connector cannot apply. */
+  ignoredFilters: string[];
 }
 
 export interface RawQueryParams {
@@ -65,16 +67,11 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   const requestedSortDirection = getSingleQueryValue(params, 'sortDirection');
 
   const configuredFilterKeys = new Set(Object.keys(config.filterableColumns ?? {}));
-  const unknownFilterParams = Object.keys(params).filter(
-    (key) => key.startsWith('filter.') && !configuredFilterKeys.has(key.slice('filter.'.length)),
-  );
-  if (unknownFilterParams.length > 0) {
-    throw new QueryValidationError(
-      `Unknown filter parameter${unknownFilterParams.length === 1 ? '' : 's'}: ${unknownFilterParams
-        .map((key) => `"${key}"`)
-        .join(', ')}`,
-    );
-  }
+  const ignoredFilters = Object.keys(params)
+    .filter(
+      (key) => key.startsWith('filter.') && !configuredFilterKeys.has(key.slice('filter.'.length)),
+    )
+    .map((key) => key.slice('filter.'.length));
 
   if (search && search.length > MAX_SEARCH_LENGTH) {
     throw new QueryValidationError(
@@ -145,8 +142,8 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     });
   }
 
-  // Dynamic filters from filterableColumns config. Unknown filter keys are
-  // rejected above before they can be silently ignored.
+  // Dynamic filters from filterableColumns config. Unknown keys are reported
+  // in the response instead of making an otherwise valid inventory request fail.
   for (const [filterKey, filterConfig] of Object.entries(config.filterableColumns ?? {})) {
     const paramKey = `filter.${filterKey}`;
     const paramValue = getSingleQueryValue(params, paramKey);
@@ -154,6 +151,13 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
 
     switch (filterConfig.type) {
       case 'string':
+        if (filterKey === 'status') {
+          const sourceValues = getSourceStatusValues(paramValue, config.statusValues);
+          if (sourceValues) {
+            conditions.push({ column: filterConfig.column, operator: 'IN', value: sourceValues });
+            break;
+          }
+        }
         conditions.push({
           column: filterConfig.column,
           operator: '=',
@@ -188,6 +192,7 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     conditions,
     pagination: { page, pageSize },
     sort: { column: sortBy, direction: sortDirection },
+    ignoredFilters,
   };
 }
 

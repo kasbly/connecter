@@ -156,6 +156,14 @@ export class PostgresAdapter implements DatabaseAdapter {
     const filterConditions = conditions.filter((c) => c.operator !== 'ILIKE');
 
     for (const condition of filterConditions) {
+      if (condition.operator === 'IN') {
+        const sourceValues = condition.value as string[];
+        queryBuilder = queryBuilder.whereRaw(
+          `${condition.column} IN (${sourceValues.map(() => '?').join(', ')})`,
+          sourceValues,
+        );
+        continue;
+      }
       queryBuilder = queryBuilder.where(
         db.raw(condition.column),
         condition.operator,
@@ -260,18 +268,36 @@ export class PostgresAdapter implements DatabaseAdapter {
     const db = this.getDb();
     const result = new Map<string | number, Record<string, unknown>[]>();
 
-    if (query.parentIds.length === 0) {
-      return result;
-    }
-
     // Use a single raw query for maximum performance — avoids Knex builder overhead
     const selectParts = Object.entries(query.fields).map(([alias, col]) => `${col} as "${alias}"`);
     selectParts.push(`${query.foreignKey} as "__fk"`);
+
+    // The startup resource probe deliberately calls this with an empty parent ID
+    // list when the inventory table has no rows. Still prepare a read-only query
+    // so PostgreSQL validates the relation table, fields, foreign key, and filter.
+    if (query.parentIds.length === 0) {
+      let sql = `SELECT ${selectParts.join(', ')} FROM "${query.table}" WHERE FALSE`;
+      if (query.filter) {
+        sql += ` AND (${query.filter})`;
+      }
+      await db.raw(sql);
+      return result;
+    }
 
     const placeholders = query.parentIds.map(() => '?').join(', ');
     let sql = `SELECT ${selectParts.join(', ')} FROM "${query.table}" WHERE ${query.foreignKey} IN (${placeholders})`;
     if (query.filter) {
       sql += ` AND (${query.filter})`;
+    }
+    if (query.orderBy) {
+      sql += ` ORDER BY ${buildOrderByClause(query.orderBy)}`;
+    } else {
+      const [firstField] = Object.values(query.fields);
+      const fallbackSorts: SortOptions[] = [
+        { column: query.foreignKey, direction: 'asc' },
+        ...(firstField ? [{ column: firstField, direction: 'asc' } as const] : []),
+      ];
+      sql += ` ORDER BY ${fallbackSorts.map(buildOrderByClause).join(', ')}`;
     }
 
     const rawResult = await db.raw<{ rows: Record<string, unknown>[] }>(sql, query.parentIds);

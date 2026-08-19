@@ -112,6 +112,31 @@ describe('PostgresAdapter pool configuration', () => {
   });
 });
 
+describe('PostgresAdapter relation probes', () => {
+  beforeEach(() => {
+    knexMock.mockClear();
+    rawMock.mockClear();
+  });
+
+  it('validates relation expressions even when the parent resource has no rows', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.queryRelation({
+      table: 'images',
+      foreignKey: 'inventory_id',
+      parentIds: [],
+      fields: { url: 'url' },
+      filter: 'published = true',
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT url as "url", inventory_id as "__fk" FROM "images" WHERE FALSE AND (published = true)',
+    );
+  });
+});
+
 describe('PostgresAdapter statement timeout', () => {
   beforeEach(() => {
     knexMock.mockClear();
@@ -222,6 +247,67 @@ describe('buildOrderByClause', () => {
   it('throws for a stacked-query payload rather than ever returning a clause containing it', () => {
     const sort: SortOptions = { column: 'price; DROP TABLE "Car"; --', direction: 'asc' };
     expect(() => buildOrderByClause(sort)).toThrow();
+  });
+});
+
+describe('PostgresAdapter relation ordering', () => {
+  beforeEach(() => {
+    rawMock.mockClear();
+    rawMock.mockResolvedValue({ rows: [] });
+  });
+
+  function createAdapterForRelationQuery() {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    (adapter as unknown as { db: { raw: typeof rawMock } }).db = { raw: rawMock };
+    return adapter;
+  }
+
+  it('uses the configured safe relation order', async () => {
+    const adapter = createAdapterForRelationQuery();
+
+    await adapter.queryRelation({
+      table: 'Image',
+      foreignKey: 'carId',
+      parentIds: ['car-1'],
+      fields: { url: 'url' },
+      orderBy: { column: 'position', direction: 'asc' },
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT url as "url", carId as "__fk" FROM "Image" WHERE carId IN (?) ORDER BY position ASC NULLS LAST',
+      ['car-1'],
+    );
+  });
+
+  it('falls back to the foreign key and first field for deterministic relation order', async () => {
+    const adapter = createAdapterForRelationQuery();
+
+    await adapter.queryRelation({
+      table: 'Image',
+      foreignKey: 'carId',
+      parentIds: ['car-1'],
+      fields: { url: 'url' },
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT url as "url", carId as "__fk" FROM "Image" WHERE carId IN (?) ORDER BY carId ASC NULLS LAST, url ASC NULLS LAST',
+      ['car-1'],
+    );
+  });
+
+  it('refuses unsafe configured relation ordering', async () => {
+    const adapter = createAdapterForRelationQuery();
+
+    await expect(
+      adapter.queryRelation({
+        table: 'Image',
+        foreignKey: 'carId',
+        parentIds: ['car-1'],
+        fields: { url: 'url' },
+        orderBy: { column: 'position; DROP TABLE "Image"', direction: 'asc' },
+      }),
+    ).rejects.toThrow(/unsafe column expression/);
+    expect(rawMock).not.toHaveBeenCalled();
   });
 });
 

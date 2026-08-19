@@ -41,6 +41,7 @@ export interface AuditConfig {
   enabled: boolean;
   filePath: string;
   maxFileSizeMB: number;
+  maxFiles: number;
   retentionDays: number;
 }
 
@@ -49,8 +50,19 @@ export interface FilterableColumnConfig {
   type: 'string' | 'number' | 'gte' | 'lte';
 }
 
+export const INVENTORY_STATUSES = ['ACTIVE', 'DRAFT', 'RESERVED', 'SOLD', 'EXPIRED'] as const;
+
+export type InventoryStatus = (typeof INVENTORY_STATUSES)[number];
+
+export type StatusValuesConfig = Partial<Record<InventoryStatus, string[]>>;
+
 export interface RelationFieldsConfig {
   [mappedName: string]: string;
+}
+
+export interface RelationOrderByConfig {
+  column: string;
+  direction: 'asc' | 'desc';
 }
 
 export interface RelationConfig {
@@ -61,6 +73,7 @@ export interface RelationConfig {
   imageUrlField?: string;
   filter?: string;
   flatten?: string;
+  orderBy?: RelationOrderByConfig;
 }
 
 export interface InventoryResourceConfig {
@@ -69,6 +82,8 @@ export interface InventoryResourceConfig {
   idColumn: string;
   updatedAtColumn?: string;
   fields: Record<string, string>;
+  /** Values used by the source system for each Kasbly inventory status. */
+  statusValues?: StatusValuesConfig;
   attributes?: Record<string, string>;
   searchableColumns?: string[];
   filterableColumns?: Record<string, FilterableColumnConfig>;

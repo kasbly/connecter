@@ -1,9 +1,17 @@
 import { randomBytes } from 'node:crypto';
-import { chmodSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { input, select, confirm, checkbox, password } from '@inquirer/prompts';
+import { parse } from 'dotenv';
 import * as yaml from 'js-yaml';
+import { loadConfig } from '../config/config.loader.js';
+import type { ConnectorConfig } from '../config/config.types.js';
 import { introspectDatabase } from './introspect.js';
+import {
+  INVENTORY_STATUSES,
+  type InventoryStatus,
+  type StatusValuesConfig,
+} from '../config/config.types.js';
 import {
   suggestFieldMappings,
   suggestIdColumn,
@@ -35,12 +43,34 @@ type FieldMappingTarget = (typeof FIELD_MAPPING_TARGETS)[number];
 
 const UNMAPPED_FIELD_VALUE = '\0unmapped';
 const FIXED_VALUE_FIELD_VALUE = '\0fixed-value';
-const FIXED_VALUE_FIELDS = new Set<FieldMappingTarget>(['currency', 'category']);
+const FIXED_VALUE_FIELDS = new Set<FieldMappingTarget>(['currency', 'category', 'status']);
 
 interface FieldMappingPrompt {
   message: string;
   choices: Array<{ name: string; value: string }>;
   default: string;
+}
+
+async function collectStatusValues(
+  db: Awaited<ReturnType<typeof introspectDatabase>>['db'],
+  table: string,
+  column: string,
+): Promise<StatusValuesConfig> {
+  const values = await db(table).distinct(column).whereNotNull(column).pluck(column);
+  const statusValues: StatusValuesConfig = {};
+
+  for (const value of Array.from(new Set(values.map(String))).sort()) {
+    const status = await select<InventoryStatus>({
+      message: `Which Kasbly status matches "${value}"?`,
+      choices: INVENTORY_STATUSES.map((inventoryStatus) => ({
+        name: inventoryStatus,
+        value: inventoryStatus,
+      })),
+    });
+    (statusValues[status] ??= []).push(value);
+  }
+
+  return statusValues;
 }
 
 /** Build the selectable mapping choices for one standard inventory field. */
@@ -78,20 +108,54 @@ export function shouldDefaultToTls(host: string): boolean {
 export async function runWizard(): Promise<void> {
   console.log('\n🔧 Kasbly Connector Setup\n');
 
+  const configPath = resolve('connector.config.yml');
+  const envPath = resolve('.env');
+  const hasExistingConfig = existsSync(configPath);
+  const hasExistingEnv = existsSync(envPath);
+  if (hasExistingConfig || hasExistingEnv) {
+    const overwriteExisting = await confirm({
+      message:
+        'Existing connector configuration was found. Continue and create timestamped backups before saving?',
+      default: false,
+    });
+    if (!overwriteExisting) {
+      console.log('Setup cancelled. Existing files were not changed.');
+      return;
+    }
+  }
+
+  const existingConfig = hasExistingConfig
+    ? loadExistingSetupConfig(configPath, envPath)
+    : undefined;
+  const existingEnv = hasExistingEnv ? parse(readFileSync(envPath, 'utf-8')) : {};
+  const existingApiKey = existingEnv['CONNECTOR_API_KEY'];
+
   // Step 1: Database Connection
   console.log('Step 1: Database Connection');
   const dbType = await select({
     message: 'Database type:',
     choices: [{ name: 'PostgreSQL', value: 'postgres' as const }],
   });
-  const dbHost = await input({ message: 'Host:', default: 'localhost' });
-  const dbPort = await input({ message: 'Port:', default: '5432' });
-  const dbName = await input({ message: 'Database name:' });
-  const dbUser = await input({ message: 'Username:' });
-  const dbPassword = await password({ message: 'Password:', mask: true });
+  const dbHost = await input({
+    message: 'Host:',
+    default: existingConfig?.database.host ?? 'localhost',
+  });
+  const dbPort = await input({
+    message: 'Port:',
+    default: String(existingConfig?.database.port ?? 5432),
+  });
+  const dbName = await input({
+    message: 'Database name:',
+    default: existingConfig?.database.database,
+  });
+  const dbUser = await input({ message: 'Username:', default: existingConfig?.database.user });
+  // Password prompts deliberately have no default. Reuse the validated existing
+  // value on edits so a mapping-only change does not require re-entering it.
+  const dbPassword =
+    existingConfig?.database.password ?? (await password({ message: 'Password:', mask: true }));
   const requiresTls = await confirm({
     message: 'Does this database require TLS?',
-    default: shouldDefaultToTls(dbHost),
+    default: existingConfig?.database.ssl ?? shouldDefaultToTls(dbHost),
   });
   const tls = await collectTlsSettings(requiresTls);
 
@@ -127,6 +191,11 @@ export async function runWizard(): Promise<void> {
   const selectedTableName = await select({
     message: 'Which table contains your products/inventory?',
     choices: tableChoices,
+    default: tableChoices.some(
+      (choice) => choice.value === existingConfig?.resources.inventory.table,
+    )
+      ? existingConfig?.resources.inventory.table
+      : undefined,
   });
 
   const selectedTable = result.tables.find((t) => t.name === selectedTableName)!;
@@ -134,37 +203,65 @@ export async function runWizard(): Promise<void> {
   // Step 3: Field Mapping
   console.log('\nStep 3: Field Mapping');
   const suggestions = suggestFieldMappings(selectedTable.columns);
-  const idColumn = suggestIdColumn(selectedTable.columns) ?? 'id';
-  const updatedAtColumn = suggestUpdatedAtColumn(selectedTable.columns);
+  const existingInventory = existingConfig?.resources.inventory;
+  const idColumn =
+    getExistingMappingSelection(
+      existingInventory?.idColumn,
+      selectedTable.columns.map((column) => column.name),
+    ) ??
+    suggestIdColumn(selectedTable.columns) ??
+    'id';
+  const updatedAtColumn =
+    getExistingMappingSelection(
+      existingInventory?.updatedAtColumn,
+      selectedTable.columns.map((column) => column.name),
+    ) ?? suggestUpdatedAtColumn(selectedTable.columns);
   const allColumnNames = selectedTable.columns.map((c) => c.name);
 
   const fieldMappings: Partial<Record<FieldMappingTarget, string>> = {};
+  let statusValues: StatusValuesConfig | undefined;
   const mappedColumnNames = new Set<string>();
   for (const field of FIELD_MAPPING_TARGETS) {
     const suggestedColumn = suggestions.find(
       (suggestion) => suggestion.mappingType === 'field' && suggestion.suggestedMapping === field,
     )?.columnName;
-    const selectedValue = await select(
-      getFieldMappingPrompt(field, allColumnNames, suggestedColumn),
+    const existingMapping = existingConfig?.resources.inventory.fields[field];
+    const existingSelection = getExistingMappingSelection(existingMapping, allColumnNames);
+    const prompt = getFieldMappingPrompt(
+      field,
+      allColumnNames,
+      existingSelection ?? suggestedColumn,
     );
+    const selectedValue = await select(prompt);
 
     if (selectedValue === UNMAPPED_FIELD_VALUE) continue;
     if (selectedValue === FIXED_VALUE_FIELD_VALUE) {
-      const fixedValue = await input({
-        message: `Fixed ${field} value for every row:`,
-        validate: (value) => {
-          const trimmed = value.trim();
-          if (!trimmed) return 'A fixed value is required.';
-          if (trimmed.includes("'")) return 'Fixed values cannot contain single quotes.';
-          return true;
-        },
-      });
+      const fixedValue =
+        field === 'status'
+          ? await select<InventoryStatus>({
+              message: 'Fixed Kasbly status for every row:',
+              choices: INVENTORY_STATUSES.map((status) => ({ name: status, value: status })),
+              default: getFixedConfigValue(existingMapping) as InventoryStatus | undefined,
+            })
+          : await input({
+              message: `Fixed ${field} value for every row:`,
+              default: getFixedConfigValue(existingMapping),
+              validate: (value) => {
+                const trimmed = value.trim();
+                if (!trimmed) return 'A fixed value is required.';
+                if (trimmed.includes("'")) return 'Fixed values cannot contain single quotes.';
+                return true;
+              },
+            });
       fieldMappings[field] = toConfigLiteral(fixedValue.trim());
       continue;
     }
 
     fieldMappings[field] = quoteIfNeeded(selectedValue);
     mappedColumnNames.add(selectedValue);
+    if (field === 'status') {
+      statusValues = await collectStatusValues(db, selectedTableName, selectedValue);
+    }
   }
 
   const missingRequiredMappings = ['title', 'price', 'currency'].filter(
@@ -197,7 +294,7 @@ export async function runWizard(): Promise<void> {
       choices: unmappedColumns.map((name) => ({
         name,
         value: name,
-        checked: false,
+        checked: Boolean(existingConfig?.resources.inventory.attributes?.[name]),
       })),
     });
   }
@@ -218,7 +315,9 @@ export async function runWizard(): Promise<void> {
       choices: allTextColumns.map((name) => ({
         name,
         value: name,
-        checked: suggestedSearchNames.has(name),
+        checked:
+          existingConfig?.resources.inventory.searchableColumns?.includes(quoteIfNeeded(name)) ??
+          suggestedSearchNames.has(name),
       })),
     });
   }
@@ -248,7 +347,9 @@ export async function runWizard(): Promise<void> {
       choices: filterSuggestions.map((f) => ({
         name: `${f.filterName} (${f.columnName}, ${f.filterType})`,
         value: f.filterName,
-        checked: true,
+        checked: existingConfig
+          ? Boolean(existingConfig.resources.inventory.filterableColumns?.[f.filterName])
+          : true,
       })),
     });
     const selectedNames = new Set(filterChoiceNames);
@@ -265,7 +366,10 @@ export async function runWizard(): Promise<void> {
   if (publishedColumn) {
     const usePublished = await confirm({
       message: `Only expose published items? (detected column: ${publishedColumn})`,
-      default: true,
+      default:
+        existingConfig?.resources.inventory.baseFilter?.includes(
+          `${quoteIfNeeded(publishedColumn)} = true`,
+        ) ?? true,
     });
     if (usePublished) {
       baseFilterParts.push(`${quoteIfNeeded(publishedColumn)} = true`);
@@ -275,7 +379,10 @@ export async function runWizard(): Promise<void> {
   if (softDeleteColumn) {
     const excludeDeleted = await confirm({
       message: `Exclude soft-deleted items? (detected column: ${softDeleteColumn})`,
-      default: true,
+      default:
+        existingConfig?.resources.inventory.baseFilter?.includes(
+          `${quoteIfNeeded(softDeleteColumn)} IS NULL`,
+        ) ?? true,
     });
     if (excludeDeleted) {
       baseFilterParts.push(`${quoteIfNeeded(softDeleteColumn)} IS NULL`);
@@ -289,7 +396,7 @@ export async function runWizard(): Promise<void> {
     result.tables,
     result.foreignKeys,
   );
-  const relations: Record<string, unknown> = {};
+  const relations: Record<string, unknown> = { ...existingConfig?.resources.inventory.relations };
 
   for (const suggestion of relationSuggestions) {
     const relTable = result.tables.find((t) => t.name === suggestion.table);
@@ -297,7 +404,9 @@ export async function runWizard(): Promise<void> {
 
     const addRelation = await confirm({
       message: `Add relation: ${suggestion.table} (${suggestion.relationType}, FK: ${suggestion.foreignKeyColumn})?`,
-      default: suggestion.confidence !== 'low',
+      default:
+        Boolean(existingConfig?.resources.inventory.relations?.[suggestion.relationType]) ||
+        suggestion.confidence !== 'low',
     });
 
     if (addRelation) {
@@ -318,7 +427,12 @@ export async function runWizard(): Promise<void> {
         choices: selectableColumns.map((col) => ({
           name: col.name,
           value: col.name,
-          checked: col.name === defaultColumn?.name,
+          checked:
+            Boolean(
+              existingConfig?.resources.inventory.relations?.[suggestion.relationType]?.fields[
+                col.name
+              ],
+            ) || col.name === defaultColumn?.name,
         })),
       });
       const selectedColumnNames = new Set(selectedColumns);
@@ -341,6 +455,25 @@ export async function runWizard(): Promise<void> {
         if (urlCol && selectedColumnNames.has(urlCol.name)) {
           relation['imageUrlField'] = urlCol.name;
         }
+
+        const orderColumn = relTable.columns.find((col) =>
+          /^(sort_?order|position|order|is_?primary)$/i.test(col.name),
+        );
+        if (orderColumn) {
+          const defaultDirection = /^is_?primary$/i.test(orderColumn.name) ? 'desc' : 'asc';
+          const useOrder = await confirm({
+            message: `Order images by ${orderColumn.name}?`,
+            default: Boolean(
+              existingConfig?.resources.inventory.relations?.[suggestion.relationType]?.orderBy,
+            ),
+          });
+          if (useOrder) {
+            relation['orderBy'] = {
+              column: quoteIfNeeded(orderColumn.name),
+              direction: defaultDirection,
+            };
+          }
+        }
       } else if (suggestion.relationType === 'features') {
         // Find the name/value column to flatten
         const nameCol = relTable.columns.find(
@@ -357,21 +490,30 @@ export async function runWizard(): Promise<void> {
 
   // Step 6: Security
   console.log('\nStep 6: Security');
-  const generateKey = await confirm({
-    message: 'Generate API key?',
-    default: true,
-  });
+  const generateKey = await confirm(
+    existingApiKey
+      ? {
+          message:
+            'Generate a new API key? This invalidates the key currently configured in Kasbly; update it in the Kasbly dashboard.',
+          default: false,
+        }
+      : { message: 'Generate API key?', default: true },
+  );
 
   const apiKey = generateKey
     ? `kc_${randomBytes(24).toString('hex')}`
-    : await input({ message: 'Enter your API key:' });
+    : (existingApiKey ?? (await input({ message: 'Enter your API key:' })));
 
   console.log(`✓ API key: ${apiKey}`);
-  console.log('⚠ Share this key with Kasbly only. Store it in your .env file.\n');
+  console.log(
+    generateKey && existingApiKey
+      ? '⚠ This replaces the existing key. Update it in the Kasbly dashboard before restarting.\n'
+      : '⚠ Share this key with Kasbly only. Store it in your .env file.\n',
+  );
 
   // Build config object
-  const fields: Record<string, string> = {};
-  const attributes: Record<string, string> = {};
+  const fields: Record<string, string> = { ...existingConfig?.resources.inventory.fields };
+  const attributes: Record<string, string> = { ...existingConfig?.resources.inventory.attributes };
 
   fields['externalId'] = quoteIfNeeded(idColumn);
   Object.assign(fields, fieldMappings);
@@ -385,12 +527,14 @@ export async function runWizard(): Promise<void> {
   }
 
   const config = {
-    version: 1,
-    server: { port: 4000, host: '0.0.0.0' },
+    ...existingConfig,
+    version: existingConfig?.version ?? 1,
+    server: existingConfig?.server ?? { port: 4000, host: '0.0.0.0' },
     auth: {
       apiKeys: [{ key: '${CONNECTOR_API_KEY}', label: 'kasbly-production' }],
     },
     database: {
+      ...existingConfig?.database,
       type: dbType,
       host: '${DB_HOST}',
       port: parseInt(dbPort, 10),
@@ -400,35 +544,42 @@ export async function runWizard(): Promise<void> {
       ssl: tls.enabled,
       ...(tls.ca ? { sslCa: '${DB_SSL_CA}' } : {}),
       ...(tls.enabled && !tls.rejectUnauthorized ? { sslRejectUnauthorized: false } : {}),
-      statementTimeoutMs: 10000,
-      pool: { min: 2, max: 10 },
+      statementTimeoutMs: existingConfig?.database.statementTimeoutMs ?? 10000,
+      pool: existingConfig?.database.pool ?? { min: 2, max: 10 },
     },
-    rateLimit: { maxRequests: 100, windowSeconds: 60 },
-    audit: {
+    rateLimit: existingConfig?.rateLimit ?? { maxRequests: 100, windowSeconds: 60 },
+    audit: existingConfig?.audit ?? {
       enabled: true,
       filePath: './logs/audit.log',
       maxFileSizeMB: 50,
+      maxFiles: 10,
       retentionDays: 90,
     },
     resources: {
+      ...existingConfig?.resources,
       inventory: {
+        ...existingConfig?.resources.inventory,
         table: selectedTableName,
         ...(baseFilterParts.length > 0 ? { baseFilter: baseFilterParts.join(' AND ') } : {}),
         idColumn: quoteIfNeeded(idColumn),
         ...(updatedAtColumn ? { updatedAtColumn: quoteIfNeeded(updatedAtColumn) } : {}),
         fields,
+        ...(statusValues ? { statusValues } : {}),
         ...(Object.keys(attributes).length > 0 ? { attributes } : {}),
         ...(searchableColumns.length > 0
           ? { searchableColumns: searchableColumns.map(quoteIfNeeded) }
           : {}),
         ...(selectedFilters.length > 0
           ? {
-              filterableColumns: Object.fromEntries(
-                selectedFilters.map((f) => [
-                  f.filterName,
-                  { column: quoteIfNeeded(f.columnName), type: f.filterType },
-                ]),
-              ),
+              filterableColumns: {
+                ...existingConfig?.resources.inventory.filterableColumns,
+                ...Object.fromEntries(
+                  selectedFilters.map((f) => [
+                    f.filterName,
+                    { column: quoteIfNeeded(f.columnName), type: f.filterType },
+                  ]),
+                ),
+              },
             }
           : {}),
         ...(Object.keys(relations).length > 0 ? { relations } : {}),
@@ -449,23 +600,22 @@ export async function runWizard(): Promise<void> {
   }
 
   // Write config file
-  const configPath = resolve('connector.config.yml');
+  if (hasExistingConfig) backupPrivateFile(configPath);
+  if (hasExistingEnv) backupPrivateFile(envPath);
   // js-yaml v5 replaced `quotingType: '"'` with `quoteStyle: 'double'`.
   const yamlContent = yaml.dump(config, { lineWidth: 120, quoteStyle: 'double' });
   writePrivateFile(configPath, yamlContent);
   console.log(`✅ Configuration saved to ${configPath}`);
 
-  // Write .env file
-  const envPath = resolve('.env');
-  const envContent =
-    [
-      `DB_HOST=${serializeEnvValue(dbHost)}`,
-      `DB_NAME=${serializeEnvValue(dbName)}`,
-      `DB_USER=${serializeEnvValue(dbUser)}`,
-      `DB_PASSWORD=${serializeEnvValue(dbPassword)}`,
-      ...(tls.ca ? [`DB_SSL_CA=${serializeEnvValue(tls.ca)}`] : []),
-      `CONNECTOR_API_KEY=${serializeEnvValue(apiKey)}`,
-    ].join('\n') + '\n';
+  // Update generated values while preserving operator-owned .env settings.
+  const envContent = mergeEnvironmentFile(hasExistingEnv ? readFileSync(envPath, 'utf-8') : '', {
+    DB_HOST: dbHost,
+    DB_NAME: dbName,
+    DB_USER: dbUser,
+    DB_PASSWORD: dbPassword,
+    ...(tls.ca ? { DB_SSL_CA: tls.ca } : {}),
+    CONNECTOR_API_KEY: apiKey,
+  });
   writePrivateFile(envPath, envContent);
   console.log(`✅ Environment saved to ${envPath}`);
 
@@ -478,6 +628,57 @@ export async function runWizard(): Promise<void> {
 export function writePrivateFile(path: string, content: string): void {
   writeFileSync(path, content, { encoding: 'utf-8', mode: 0o600 });
   chmodSync(path, 0o600);
+}
+
+/** Make an owner-only timestamped backup beside a generated file before replacing it. */
+export function backupPrivateFile(path: string, timestamp: Date = new Date()): string {
+  const backupPath = `${path}.${timestamp.toISOString().replaceAll(/[:.]/g, '-')}.bak`;
+  copyFileSync(path, backupPath);
+  chmodSync(backupPath, 0o600);
+  return backupPath;
+}
+
+/** Update wizard-owned env vars without dropping unrelated operator configuration. */
+export function mergeEnvironmentFile(existing: string, values: Record<string, string>): string {
+  let result = existing;
+  for (const [name, value] of Object.entries(values)) {
+    const line = `${name}=${serializeEnvValue(value)}`;
+    const pattern = new RegExp(`^\\s*${name}=.*$`, 'm');
+    result = pattern.test(result)
+      ? result.replace(pattern, line)
+      : `${result}${result.endsWith('\n') || !result ? '' : '\n'}${line}\n`;
+  }
+  return result.endsWith('\n') ? result : `${result}\n`;
+}
+
+/** Load the existing config with its local .env values, without changing the process environment. */
+export function loadExistingSetupConfig(configPath: string, envPath: string): ConnectorConfig {
+  const envValues = existsSync(envPath) ? parse(readFileSync(envPath, 'utf-8')) : {};
+  const addedNames: string[] = [];
+  for (const [name, value] of Object.entries(envValues)) {
+    if (process.env[name] === undefined) {
+      process.env[name] = value;
+      addedNames.push(name);
+    }
+  }
+  try {
+    return loadConfig(configPath);
+  } finally {
+    for (const name of addedNames) delete process.env[name];
+  }
+}
+
+function getExistingMappingSelection(
+  value: string | undefined,
+  columnNames: string[],
+): string | undefined {
+  if (!value || value.startsWith("'")) return undefined;
+  const unquoted = value.match(/^"((?:[^"]|"")*)"$/)?.[1]?.replaceAll('""', '"') ?? value;
+  return columnNames.includes(unquoted) ? unquoted : undefined;
+}
+
+function getFixedConfigValue(value: string | undefined): string | undefined {
+  return value?.match(/^'([^']*)'$/)?.[1];
 }
 
 export function quoteIfNeeded(name: string): string {

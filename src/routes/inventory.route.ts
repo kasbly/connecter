@@ -40,7 +40,7 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
   // GET /inventory — paginated search with filters
   app.get('/inventory', async (request: FastifyRequest, _reply: FastifyReply) => {
     const params = request.query as RawQueryParams;
-    const { conditions, pagination, sort } = buildQuery(params, resourceConfig);
+    const { conditions, pagination, sort, ignoredFilters } = buildQuery(params, resourceConfig);
     const { searchConditions, filterConditions } = splitConditions(conditions);
 
     let queryResult: QueryResult;
@@ -75,6 +75,7 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
               parentIds: getReferenceValues(rows, relationConfig.referenceKey),
               fields: relationConfig.fields,
               filter: relationConfig.filter,
+              orderBy: relationConfig.orderBy,
             })
             .then((result) => [relationName, result] as const),
         ),
@@ -95,6 +96,7 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       page: pagination.page,
       pageSize: pagination.pageSize,
       totalPages: Math.ceil(total / pagination.pageSize),
+      ...(ignoredFilters.length > 0 ? { ignoredFilters } : {}),
     };
 
     (request as FastifyRequest & { auditItems?: number }).auditItems = items.length;
@@ -141,6 +143,7 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
               parentIds: getReferenceValues([row], relationConfig.referenceKey),
               fields: relationConfig.fields,
               filter: relationConfig.filter,
+              orderBy: relationConfig.orderBy,
             })
             .then((result) => [relationName, result] as const),
         ),

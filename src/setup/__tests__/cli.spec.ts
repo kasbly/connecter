@@ -14,11 +14,16 @@ describe('connector setup CLI', () => {
     expect(getCliCommand([])).toBe('start');
   });
 
+  it('dispatches the validate subcommand without starting the server', () => {
+    expect(getCliCommand(['validate'])).toBe('validate');
+  });
+
   it('passes the setup subcommand from the documented npm script', async () => {
     const packageJson = JSON.parse(await readFile(packageJsonPath, 'utf8')) as {
       scripts: Record<string, string>;
     };
 
     expect(packageJson.scripts['setup']).toBe('tsx src/setup/cli.ts setup');
+    expect(packageJson.scripts['validate']).toBe('tsx src/setup/cli.ts validate');
   });
 });

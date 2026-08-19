@@ -60,6 +60,7 @@ npm run dev        # Start the dev server
 npm run build      # Compile TypeScript
 npm start          # Start the built server
 npm run setup      # Launch the interactive setup wizard
+npm run validate   # Validate config and probe the live inventory mapping
 npm run typecheck  # Run `tsc --noEmit`
 npm run lint       # Run ESLint
 npm test           # Run the Vitest suite
@@ -71,10 +72,13 @@ All endpoints (except `/health`) require an `X-API-Key` header.
 
 ### `GET /health`
 
-Returns service status and database connectivity.
+Returns service status, database connectivity, and whether the configured inventory
+resource can be queried. The resource check is cached briefly to keep health checks
+lightweight; a failed mapping check returns HTTP 503 and includes the operator-facing
+database error in `resourceError`.
 
 ```json
-{ "status": "ok", "version": "1.0.0", "database": "connected", "uptime": 42 }
+{ "status": "ok", "version": "1.0.0", "database": "connected", "resources": "ok", "uptime": 42 }
 ```
 
 ### `GET /inventory`
@@ -177,7 +181,11 @@ audit:
   enabled: true
   filePath: './logs/audit.log'
   maxFileSizeMB: 50
+  maxFiles: 10
   retentionDays: 90
+
+# Audit history lasts the smaller of retentionDays and the time traffic fills
+# (maxFiles + 1) x maxFileSizeMB. Raise maxFiles or maxFileSizeMB for busy connectors.
 
 resources:
   inventory:
@@ -194,6 +202,16 @@ resources:
       price: 'price'
       currency: "'KRW'" # Literal value (single quotes)
       category: "'car'"
+      status: 'status' # Leave unmapped only when every listing is Active
+
+    # Source-system values for Kasbly's accepted status tokens.
+    # Defaults accept ACTIVE, DRAFT, RESERVED, SOLD, and EXPIRED (case-insensitive).
+    statusValues:
+      ACTIVE: ['active', 'for_sale']
+      DRAFT: ['draft']
+      RESERVED: ['reserved']
+      SOLD: ['sold']
+      EXPIRED: ['expired']
 
     # Additional columns exposed as key-value attributes
     attributes:
@@ -209,6 +227,7 @@ resources:
 
     # Filters available via ?filter.<name>=<value>
     filterableColumns:
+      status: { column: 'status', type: 'string' }
       year: { column: 'year', type: 'number' }
       minYear: { column: 'year', type: 'gte' }
       maxYear: { column: 'year', type: 'lte' }
@@ -226,6 +245,7 @@ resources:
         fields: { url: 'url', type: 'type' }
         imageUrlField: 'url' # Extracts URLs into images[]
         filter: "type = 'gallery' OR type = 'featured'"
+        orderBy: { column: 'position', direction: 'asc' } # Stable image order
       features:
         table: 'CarFeatures'
         foreignKey: '"carId"'
@@ -252,6 +272,18 @@ temporarily while a valid CA bundle is configured.
 | `year`       | Lowercase column      | `SELECT year ...`             |
 | `'"makeEn"'` | Case-sensitive column | `SELECT "makeEn" ...`         |
 | `"'KRW'"`    | Literal string value  | Returns `"KRW"` for every row |
+
+### Inventory Status Mapping
+
+Kasbly accepts these inventory status tokens: `ACTIVE`, `DRAFT`, `RESERVED`, `SOLD`, and
+`EXPIRED`. Map the source status column in `fields.status`, then use `statusValues` to translate
+the source system's vocabulary. The defaults recognize each token in either uppercase or lowercase;
+add source-specific values such as `for_sale`, `under_offer`, or `backorder` to the corresponding
+list. When `fields.status` is not mapped, the connector logs a startup warning and reports every
+listing as `ACTIVE`.
+
+Status filters use the same mapping: `filter.status=SOLD` queries every source value configured
+under `statusValues.SOLD`.
 
 ### Filter Types
 

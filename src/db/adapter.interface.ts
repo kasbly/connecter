@@ -1,7 +1,7 @@
 export interface QueryCondition {
   column: string;
-  operator: '=' | '>' | '<' | '>=' | '<=' | 'ILIKE';
-  value: string | number;
+  operator: '=' | '>' | '<' | '>=' | '<=' | 'ILIKE' | 'IN';
+  value: string | number | string[];
   /** Optional group key — search conditions with the same group are OR'd, different groups are AND'd */
   _group?: string;
 }
@@ -34,6 +34,7 @@ export interface RelationQuery {
   parentIds: (string | number)[];
   fields: Record<string, string>;
   filter?: string;
+  orderBy?: SortOptions;
 }
 
 export interface TableInfo {

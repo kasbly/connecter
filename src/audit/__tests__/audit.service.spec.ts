@@ -39,6 +39,7 @@ describe('AuditService', () => {
       enabled: true,
       filePath: TEST_FILE,
       maxFileSizeMB: 50,
+      maxFiles: 10,
       retentionDays: 90,
     });
     expect(existsSync(TEST_DIR)).toBe(true);
@@ -49,6 +50,7 @@ describe('AuditService', () => {
       enabled: true,
       filePath: TEST_FILE,
       maxFileSizeMB: 50,
+      maxFiles: 10,
       retentionDays: 90,
     });
 
@@ -69,6 +71,7 @@ describe('AuditService', () => {
       enabled: false,
       filePath: TEST_FILE,
       maxFileSizeMB: 50,
+      maxFiles: 10,
       retentionDays: 90,
     });
 
@@ -86,6 +89,7 @@ describe('AuditService', () => {
         // disk/permission failures without depending on the test user's UID.
         filePath: TEST_DIR,
         maxFileSizeMB: 50,
+        maxFiles: 10,
         retentionDays: 90,
       },
       logger,
@@ -104,6 +108,7 @@ describe('AuditService', () => {
       enabled: true,
       filePath: TEST_FILE,
       maxFileSizeMB: 0.000_001,
+      maxFiles: 10,
       retentionDays: 90,
     });
 
@@ -115,11 +120,50 @@ describe('AuditService', () => {
     expect(readFileSync(TEST_FILE, 'utf-8')).toContain('/inventory/second');
   });
 
+  it('uses maxFiles for rotation and warns once when it overwrites recent history', async () => {
+    const logger = { warn: vi.fn() };
+    mkdirSync(TEST_DIR, { recursive: true });
+    writeFileSync(TEST_FILE, `${JSON.stringify(makeEntry({ path: '/inventory/live' }))}\n`, 'utf8');
+    writeFileSync(
+      `${TEST_FILE}.1`,
+      `${JSON.stringify(makeEntry({ path: '/inventory/previous' }))}\n`,
+      'utf8',
+    );
+    writeFileSync(
+      `${TEST_FILE}.2`,
+      `${JSON.stringify(makeEntry({ path: '/inventory/oldest' }))}\n`,
+      'utf8',
+    );
+    const svc = new AuditService(
+      {
+        enabled: true,
+        filePath: TEST_FILE,
+        maxFileSizeMB: 0.000_001,
+        maxFiles: 2,
+        retentionDays: 90,
+      },
+      logger,
+    );
+
+    svc.log(makeEntry({ path: '/inventory/first' }));
+    svc.log(makeEntry({ path: '/inventory/second' }));
+    await svc.flush();
+
+    expect(readFileSync(`${TEST_FILE}.2`, 'utf-8')).toContain('/inventory/live');
+    expect(readFileSync(`${TEST_FILE}.2`, 'utf-8')).not.toContain('/inventory/oldest');
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ filePath: TEST_FILE, maxFiles: 2, retentionDays: 90 }),
+      expect.stringContaining('discarding a file before its retention period'),
+    );
+  });
+
   it('prunes expired rotated logs without requiring a size-triggered rotation', async () => {
     const svc = new AuditService({
       enabled: true,
       filePath: TEST_FILE,
       maxFileSizeMB: 50,
+      maxFiles: 10,
       retentionDays: 90,
     });
     const expiredFile = `${TEST_FILE}.1`;
@@ -139,6 +183,7 @@ describe('AuditService', () => {
       enabled: true,
       filePath: TEST_FILE,
       maxFileSizeMB: 50,
+      maxFiles: 10,
       retentionDays: 90,
     });
 
@@ -157,6 +202,7 @@ describe('AuditService', () => {
       enabled: true,
       filePath: join(TEST_DIR, 'nonexistent.log'),
       maxFileSizeMB: 50,
+      maxFiles: 10,
       retentionDays: 90,
     });
 
@@ -169,6 +215,7 @@ describe('AuditService', () => {
       enabled: true,
       filePath: TEST_FILE,
       maxFileSizeMB: 50,
+      maxFiles: 10,
       retentionDays: 90,
     });
 
@@ -189,6 +236,7 @@ describe('AuditService', () => {
       enabled: true,
       filePath: TEST_FILE,
       maxFileSizeMB: 50,
+      maxFiles: 10,
       retentionDays: 90,
     });
     writeFileSync(TEST_FILE, `${JSON.stringify(makeEntry({ items: 3 }))}\n`, 'utf8');
@@ -209,6 +257,7 @@ describe('AuditService', () => {
       enabled: true,
       filePath: TEST_FILE,
       maxFileSizeMB: 50,
+      maxFiles: 10,
       retentionDays: 90,
     });
     const entries = Array.from({ length: 2_000 }, (_, items) =>
@@ -230,6 +279,7 @@ describe('AuditService', () => {
       enabled: true,
       filePath: TEST_FILE,
       maxFileSizeMB: 50,
+      maxFiles: 10,
       retentionDays: 90,
     });
     const entries = Array.from({ length: 2_000 }, (_, items) =>

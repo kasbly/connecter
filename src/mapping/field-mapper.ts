@@ -1,4 +1,10 @@
-import type { InventoryResourceConfig, RelationConfig } from '../config/config.types.js';
+import {
+  INVENTORY_STATUSES,
+  type InventoryResourceConfig,
+  type InventoryStatus,
+  type RelationConfig,
+  type StatusValuesConfig,
+} from '../config/config.types.js';
 
 export interface ConnectorInventoryItem {
   externalId: string;
@@ -11,6 +17,43 @@ export interface ConnectorInventoryItem {
   images: string[];
   attributes: Record<string, unknown>;
   updatedAt: string | null;
+}
+
+const DEFAULT_STATUS_VALUES: Required<StatusValuesConfig> = {
+  ACTIVE: ['ACTIVE', 'active'],
+  DRAFT: ['DRAFT', 'draft'],
+  RESERVED: ['RESERVED', 'reserved'],
+  SOLD: ['SOLD', 'sold'],
+  EXPIRED: ['EXPIRED', 'expired'],
+};
+
+/** Resolve a source-system status to Kasbly's closed inventory-status vocabulary. */
+export function resolveInventoryStatus(
+  value: unknown,
+  statusValues: StatusValuesConfig | undefined,
+): InventoryStatus | undefined {
+  if (value === null || value === undefined) return undefined;
+
+  const normalizedValue = String(value).trim().toLowerCase();
+  if (!normalizedValue) return undefined;
+
+  const mappings = statusValues ?? DEFAULT_STATUS_VALUES;
+  return INVENTORY_STATUSES.find((status) =>
+    (mappings[status] ?? DEFAULT_STATUS_VALUES[status]).some(
+      (sourceValue) => sourceValue.trim().toLowerCase() === normalizedValue,
+    ),
+  );
+}
+
+/** Return source-system values that correspond to a Kasbly status filter. */
+export function getSourceStatusValues(
+  status: string,
+  statusValues: StatusValuesConfig | undefined,
+): string[] | undefined {
+  if (!INVENTORY_STATUSES.includes(status as InventoryStatus)) return undefined;
+
+  const inventoryStatus = status as InventoryStatus;
+  return statusValues?.[inventoryStatus] ?? DEFAULT_STATUS_VALUES[inventoryStatus];
 }
 
 export function mapRowToInventoryItem(
@@ -73,7 +116,7 @@ export function mapRowToInventoryItem(
     price: Number(fields['price'] ?? 0),
     currency: String(fields['currency'] ?? ''),
     category: String(fields['category'] ?? ''),
-    status: String(fields['status'] ?? 'ACTIVE'),
+    status: resolveInventoryStatus(fields['status'], config.statusValues) ?? 'ACTIVE',
     images,
     attributes,
     updatedAt,

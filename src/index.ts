@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { access } from 'node:fs/promises';
 import { loadConfig } from './config/config.loader.js';
 import { createDatabaseAdapter } from './db/adapter.factory.js';
+import { probeInventoryResource } from './routes/health.route.js';
 import { buildApp } from './server.js';
 
 const DEFAULT_CONFIG_PATH = resolve('connector.config.yml');
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
   );
   await dbAdapter.connect();
   console.log('Database connected (read-only mode)');
+  await probeInventoryResource(dbAdapter, config.resources.inventory);
 
   const app = await buildApp({ config, dbAdapter });
 

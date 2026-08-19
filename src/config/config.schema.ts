@@ -1,5 +1,13 @@
 import { z } from 'zod';
 
+const defaultStatusValues = {
+  ACTIVE: ['ACTIVE', 'active'],
+  DRAFT: ['DRAFT', 'draft'],
+  RESERVED: ['RESERVED', 'reserved'],
+  SOLD: ['SOLD', 'sold'],
+  EXPIRED: ['EXPIRED', 'expired'],
+};
+
 const serverSchema = z.object({
   port: z.number().int().min(1).max(65535).default(4000),
   host: z.string().default('0.0.0.0'),
@@ -50,6 +58,7 @@ const auditSchema = z.object({
   enabled: z.boolean().default(true),
   filePath: z.string().default('./logs/audit.log'),
   maxFileSizeMB: z.number().min(1).max(500).default(50),
+  maxFiles: z.number().int().min(1).default(10),
   retentionDays: z.number().int().min(1).default(90),
 });
 
@@ -66,6 +75,12 @@ const relationSchema = z.object({
   imageUrlField: z.string().optional(),
   filter: z.string().optional(),
   flatten: z.string().optional(),
+  orderBy: z
+    .object({
+      column: z.string().min(1),
+      direction: z.enum(['asc', 'desc']),
+    })
+    .optional(),
 });
 
 const inventoryResourceSchema = z.object({
@@ -80,6 +95,15 @@ const inventoryResourceSchema = z.object({
       currency: z.string().min(1),
     })
     .catchall(z.string()),
+  statusValues: z
+    .object({
+      ACTIVE: z.array(z.string().min(1)).min(1).default(defaultStatusValues.ACTIVE),
+      DRAFT: z.array(z.string().min(1)).min(1).default(defaultStatusValues.DRAFT),
+      RESERVED: z.array(z.string().min(1)).min(1).default(defaultStatusValues.RESERVED),
+      SOLD: z.array(z.string().min(1)).min(1).default(defaultStatusValues.SOLD),
+      EXPIRED: z.array(z.string().min(1)).min(1).default(defaultStatusValues.EXPIRED),
+    })
+    .default(defaultStatusValues),
   attributes: z.record(z.string(), z.string()).optional(),
   searchableColumns: z.array(z.string()).optional(),
   filterableColumns: z.record(z.string(), filterableColumnSchema).optional(),
@@ -100,6 +124,7 @@ export const connectorConfigSchema = z.object({
     enabled: true,
     filePath: './logs/audit.log',
     maxFileSizeMB: 50,
+    maxFiles: 10,
     retentionDays: 90,
   }),
   resources: resourcesSchema,

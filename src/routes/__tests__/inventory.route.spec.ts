@@ -166,7 +166,6 @@ describe('inventory routes', () => {
   it.each([
     ['/inventory?search=first&search=second', 'Query parameter "search"'],
     ['/inventory?filter.year=not-a-number', 'Query parameter "filter.year"'],
-    ['/inventory?filter.minYear=2020', 'Unknown filter parameter: "filter.minYear"'],
     ['/inventory?updatedSince=not-a-date', 'Query parameter "updatedSince"'],
   ])('GET %s returns 400 without querying the database', async (url, expectedMessage) => {
     const mockAdapter = createMockDbAdapter();
@@ -181,6 +180,35 @@ describe('inventory routes', () => {
     expect(response.statusCode).toBe(400);
     expect((response.json() as { message: string }).message).toContain(expectedMessage);
     expect(mockAdapter.query).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it('GET /inventory reports unsupported filters and still queries configured filters', async () => {
+    const mockAdapter = createMockDbAdapter();
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/inventory?filter.minYear=2020&filter.category=item',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ ignoredFilters: ['minYear'] });
+    expect(mockAdapter.query).toHaveBeenCalledWith(
+      'Product',
+      expect.arrayContaining([
+        expect.objectContaining({ column: 'category', operator: '=', value: 'item' }),
+      ]),
+      expect.anything(),
+      expect.anything(),
+      undefined,
+      expect.anything(),
+    );
 
     await app.close();
   });
@@ -339,6 +367,7 @@ describe('inventory routes', () => {
           referenceKey: '"externalId"',
           fields: { url: 'url' },
           imageUrlField: 'url',
+          orderBy: { column: 'position', direction: 'asc' },
         },
       },
     };
@@ -365,11 +394,17 @@ describe('inventory routes', () => {
     expect((await app.inject({ method: 'GET', url: '/inventory/quoted-42' })).statusCode).toBe(200);
     expect(queryRelation).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ parentIds: ['quoted-42'] }),
+      expect.objectContaining({
+        parentIds: ['quoted-42'],
+        orderBy: { column: 'position', direction: 'asc' },
+      }),
     );
     expect(queryRelation).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ parentIds: ['quoted-42'] }),
+      expect.objectContaining({
+        parentIds: ['quoted-42'],
+        orderBy: { column: 'position', direction: 'asc' },
+      }),
     );
 
     await app.close();

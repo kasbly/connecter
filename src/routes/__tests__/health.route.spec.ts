@@ -1,18 +1,27 @@
 import Fastify from 'fastify';
 import { describe, expect, it, vi } from 'vitest';
 import type { DatabaseAdapter } from '../../db/adapter.interface.js';
-import { registerHealthRoute } from '../health.route.js';
+import { probeInventoryResource, registerHealthRoute } from '../health.route.js';
 
-function createHealthAdapter(healthy: boolean): DatabaseAdapter {
+const inventoryResource = {
+  table: 'inventory',
+  idColumn: 'id',
+  fields: { title: 'title', price: 'price', currency: "'SAR'" },
+};
+
+function createHealthAdapter(healthy: boolean, resourceHealthy = true): DatabaseAdapter {
   return {
     healthCheck: vi.fn().mockResolvedValue(healthy),
+    query: resourceHealthy
+      ? vi.fn().mockResolvedValue({ rows: [], total: 0 })
+      : vi.fn().mockRejectedValue(new Error('column "price" does not exist')),
   } as unknown as DatabaseAdapter;
 }
 
 describe('health route', () => {
   it('returns 200 when the database is connected', async () => {
     const app = Fastify();
-    registerHealthRoute(app, createHealthAdapter(true));
+    registerHealthRoute(app, createHealthAdapter(true), inventoryResource);
 
     const response = await app.inject({ method: 'GET', url: '/health' });
 
@@ -20,13 +29,14 @@ describe('health route', () => {
     expect(response.json()).toMatchObject({
       status: 'ok',
       database: 'connected',
+      resources: 'ok',
     });
     await app.close();
   });
 
   it('returns 503 when the database is disconnected', async () => {
     const app = Fastify();
-    registerHealthRoute(app, createHealthAdapter(false));
+    registerHealthRoute(app, createHealthAdapter(false), inventoryResource);
 
     const response = await app.inject({ method: 'GET', url: '/health' });
 
@@ -34,7 +44,73 @@ describe('health route', () => {
     expect(response.json()).toMatchObject({
       status: 'degraded',
       database: 'disconnected',
+      resources: 'ok',
     });
+    await app.close();
+  });
+
+  it('returns 503 with resource probe details when the inventory mapping is invalid', async () => {
+    const app = Fastify();
+    registerHealthRoute(app, createHealthAdapter(true, false), inventoryResource);
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      status: 'degraded',
+      database: 'connected',
+      resources: 'misconfigured',
+      resourceError: expect.stringContaining('column "price" does not exist'),
+    });
+    await app.close();
+  });
+
+  it('probes configured columns and every relation before reporting healthy', async () => {
+    const dbAdapter = createHealthAdapter(true);
+    dbAdapter.queryRelation = vi.fn().mockResolvedValue(new Map());
+    const resource = {
+      ...inventoryResource,
+      baseFilter: 'published = true',
+      searchableColumns: ['sku'],
+      filterableColumns: { condition: { column: 'condition', type: 'string' as const } },
+      relations: {
+        images: {
+          table: 'images',
+          foreignKey: 'inventory_id',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+        },
+      },
+    };
+
+    await probeInventoryResource(dbAdapter, resource);
+
+    expect(dbAdapter.query).toHaveBeenCalledWith(
+      'inventory',
+      [],
+      { page: 1, pageSize: 1 },
+      { column: 'id', direction: 'asc' },
+      'published = true',
+      expect.arrayContaining(['id', 'title', 'price', 'sku', 'condition']),
+    );
+    expect(dbAdapter.queryRelation).toHaveBeenCalledWith({
+      table: 'images',
+      foreignKey: 'inventory_id',
+      parentIds: [],
+      fields: { url: 'url' },
+      filter: undefined,
+    });
+  });
+
+  it('caches a successful resource probe across health checks', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    registerHealthRoute(app, dbAdapter, inventoryResource);
+
+    await app.inject({ method: 'GET', url: '/health' });
+    await app.inject({ method: 'GET', url: '/health' });
+
+    expect(dbAdapter.query).toHaveBeenCalledTimes(1);
     await app.close();
   });
 });

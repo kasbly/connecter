@@ -38,7 +38,10 @@ audit:
   enabled: true
   filePath: './logs/audit.log'
   maxFileSizeMB: 50
+  maxFiles: 10 # Rotated files to retain; live plus rotations use up to 550 MB at this size
   retentionDays: 90
+  # History lasts the smaller of retentionDays and the time traffic fills
+  # (maxFiles + 1) x maxFileSizeMB. Increase either size setting for busy connectors.
 
 resources:
   inventory:
@@ -53,6 +56,16 @@ resources:
       price: 'price'
       currency: "'KRW'"
       category: "'car'"
+      status: 'status' # Unmapped status reports every listing as ACTIVE
+
+    # Map source-system availability terms to Kasbly's five status tokens.
+    # Defaults accept ACTIVE, DRAFT, RESERVED, SOLD, and EXPIRED (case-insensitive).
+    statusValues:
+      ACTIVE: ['active', 'for_sale']
+      DRAFT: ['draft']
+      RESERVED: ['reserved']
+      SOLD: ['sold']
+      EXPIRED: ['expired']
 
     attributes:
       makeEn: '"makeEn"'
@@ -68,6 +81,7 @@ resources:
     searchableColumns: ['title', '"makeEn"', '"modelEn"']
 
     filterableColumns:
+      status: { column: 'status', type: 'string' }
       year: { column: 'year', type: 'number' }
       minYear: { column: 'year', type: 'gte' }
       maxYear: { column: 'year', type: 'lte' }
@@ -87,6 +101,7 @@ resources:
         fields: { url: 'url', type: 'type' }
         imageUrlField: 'url'
         filter: "type = 'gallery' OR type = 'featured'"
+        orderBy: { column: 'type', direction: 'asc' } # featured images first
       features:
         table: 'CarFeatures'
         foreignKey: '"carId"'

@@ -65,6 +65,51 @@ describe('connectorConfigSchema inventory fields', () => {
 
     expect(() => connectorConfigSchema.parse(config)).toThrow();
   });
+
+  it('accepts an optional relation orderBy', () => {
+    const config = connectorConfigSchema.parse({
+      ...createConfigInput(),
+      resources: {
+        inventory: {
+          ...createConfigInput().resources.inventory,
+          relations: {
+            images: {
+              table: 'images',
+              foreignKey: 'product_id',
+              referenceKey: 'id',
+              fields: { url: 'url' },
+              orderBy: { column: 'position', direction: 'asc' },
+            },
+          },
+        },
+      },
+    });
+
+    expect(config.resources.inventory.relations?.images?.orderBy).toEqual({
+      column: 'position',
+      direction: 'asc',
+    });
+  });
+
+  it('defaults and accepts source values for the closed inventory status vocabulary', () => {
+    const defaults = connectorConfigSchema.parse(createConfigInput());
+    expect(defaults.resources.inventory.statusValues.SOLD).toEqual(['SOLD', 'sold']);
+
+    const configured = connectorConfigSchema.parse({
+      ...createConfigInput(),
+      resources: {
+        inventory: {
+          ...createConfigInput().resources.inventory,
+          statusValues: { ACTIVE: ['for_sale'], SOLD: ['sold_out'] },
+        },
+      },
+    });
+    expect(configured.resources.inventory.statusValues).toMatchObject({
+      ACTIVE: ['for_sale'],
+      SOLD: ['sold_out'],
+      RESERVED: ['RESERVED', 'reserved'],
+    });
+  });
 });
 
 describe('connectorConfigSchema database statement timeout', () => {
@@ -86,6 +131,23 @@ describe('connectorConfigSchema database statement timeout', () => {
 });
 
 describe('connectorConfigSchema audit file size', () => {
+  it('defaults the number of retained rotated audit files to ten', () => {
+    expect(connectorConfigSchema.parse(createConfigInput()).audit.maxFiles).toBe(10);
+  });
+
+  it('accepts a configured number of retained rotated audit files', () => {
+    expect(
+      connectorConfigSchema.parse({ ...createConfigInput(), audit: { maxFiles: 25 } }).audit
+        .maxFiles,
+    ).toBe(25);
+  });
+
+  it.each([0, 1.5])('rejects an invalid number of rotated audit files: %d', (maxFiles) => {
+    expect(() =>
+      connectorConfigSchema.parse({ ...createConfigInput(), audit: { maxFiles } }),
+    ).toThrow();
+  });
+
   it('rejects audit rotation thresholds above the safety cap', () => {
     expect(() =>
       connectorConfigSchema.parse({ ...createConfigInput(), audit: { maxFileSizeMB: 501 } }),

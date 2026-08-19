@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { mapRowToInventoryItem, getRelationConfigs, getRequiredColumns } from '../field-mapper.js';
+import {
+  getRelationConfigs,
+  getRequiredColumns,
+  getSourceStatusValues,
+  mapRowToInventoryItem,
+  resolveInventoryStatus,
+} from '../field-mapper.js';
 import type { InventoryResourceConfig } from '../../config/config.types.js';
 
 const baseConfig: InventoryResourceConfig = {
@@ -108,6 +114,34 @@ describe('mapRowToInventoryItem', () => {
     );
 
     expect(result.currency).toBe('');
+  });
+
+  it('maps configured source statuses to Kasbly status tokens', () => {
+    const config: InventoryResourceConfig = {
+      ...baseConfig,
+      fields: { ...baseConfig.fields, status: 'availability' },
+      statusValues: { ACTIVE: ['for_sale'], SOLD: ['sold_out'] },
+    };
+
+    expect(
+      mapRowToInventoryItem(
+        { id: '1', title: 'Test', price: 100, availability: 'sold_out' },
+        config,
+        new Map(),
+      ).status,
+    ).toBe('SOLD');
+    expect(
+      mapRowToInventoryItem(
+        { id: '2', title: 'Test', price: 100, availability: 'for_sale' },
+        config,
+        new Map(),
+      ).status,
+    ).toBe('ACTIVE');
+  });
+
+  it('uses the documented case-insensitive defaults for canonical status values', () => {
+    expect(resolveInventoryStatus('sold', undefined)).toBe('SOLD');
+    expect(getSourceStatusValues('SOLD', undefined)).toEqual(['SOLD', 'sold']);
   });
 
   it('processes image relations', () => {

@@ -32,6 +32,12 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     trustProxy: false,
   });
 
+  if (!config.resources.inventory.fields['status']) {
+    app.log.warn(
+      'Inventory status is not mapped; every listing will be reported as ACTIVE. Map resources.inventory.fields.status to expose availability.',
+    );
+  }
+
   // Rate limiting — keyed on the trust-aware client IP, not the spoofable
   // Fastify-derived request.ip (see middleware/rate-limiter.ts).
   await app.register(
@@ -80,7 +86,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   // Routes
-  registerHealthRoute(app, dbAdapter);
+  registerHealthRoute(app, dbAdapter, config.resources.inventory);
   registerInventoryRoutes(app, {
     dbAdapter,
     resourceConfig: config.resources.inventory,
