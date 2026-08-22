@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'dotenv';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,6 +15,22 @@ import {
   toConfigLiteral,
   writePrivateFile,
 } from '../wizard.js';
+import { runWizard } from '../wizard.js';
+import { buildQuery } from '../../mapping/query-builder.js';
+import { introspectDatabase } from '../introspect.js';
+
+const promptMocks = vi.hoisted(() => ({
+  checkbox: vi.fn(),
+  confirm: vi.fn(),
+  input: vi.fn(),
+  password: vi.fn(),
+  select: vi.fn(),
+}));
+
+const introspectionMocks = vi.hoisted(() => ({ introspectDatabase: vi.fn() }));
+
+vi.mock('@inquirer/prompts', () => promptMocks);
+vi.mock('../introspect.js', () => introspectionMocks);
 
 describe('getFieldMappingPrompt', () => {
   it('offers every column and preselects the matching suggestion', () => {
@@ -182,4 +198,93 @@ describe('serializeEnvValue', () => {
       expect(parse(`DB_PASSWORD=${serializeEnvValue(value)}\n`).DB_PASSWORD).toBe(value);
     },
   );
+});
+
+describe('runWizard', () => {
+  it('writes a loadable config whose quoted fields support bare sortBy values', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), { destroy: vi.fn().mockResolvedValue(undefined) });
+
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      'description',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    for (const answer of ['database.example.com', '5432', 'catalog', 'reader']) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.password.mockResolvedValueOnce('p@ss#word');
+    promptMocks.confirm
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true);
+    promptMocks.checkbox
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(['title', 'description'])
+      .mockResolvedValueOnce(['minPrice', 'maxPrice', 'currency'])
+      .mockResolvedValueOnce(['url']);
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            rowCount: 100,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+          {
+            name: 'product_images',
+            rowCount: 200,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'product_id', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'sort_order', type: 'integer', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [
+          {
+            fromTable: 'product_images',
+            fromColumn: 'product_id',
+            toTable: 'products',
+            toColumn: 'id',
+          },
+        ],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(config.resources.inventory.fields.price).toBe('"price"');
+      expect(buildQuery({ sortBy: 'price' }, config.resources.inventory).sort.column).toBe(
+        config.resources.inventory.fields.price,
+      );
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });
