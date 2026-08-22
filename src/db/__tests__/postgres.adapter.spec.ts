@@ -465,6 +465,22 @@ describe('PostgresAdapter list count (#17420)', () => {
     expect(dataQuery.bindings.slice(0, 3)).toEqual([2024, '%sonata%', '%sonata%']);
   });
 
+  it('applies IN filters with their bindings to both data and bounded count queries', async () => {
+    const conditions: QueryCondition[] = [
+      { column: 'availability', operator: 'IN', value: ['sold', 'closed'] },
+      { column: 'year', operator: '=', value: 2024 },
+      { column: 'title', operator: 'ILIKE', value: 'sonata', _group: 'sonata' },
+      { column: '"makeEn"', operator: 'ILIKE', value: 'sonata', _group: 'sonata' },
+    ];
+
+    const { countQuery, dataQuery } = await runListQuery({ count: 3, conditions });
+
+    expect(countQuery.sql).toContain('availability IN (?, ?)');
+    expect(dataQuery.sql).toContain('availability IN (?, ?)');
+    expect(countQuery.bindings.slice(0, 2)).toEqual(['sold', 'closed']);
+    expect(dataQuery.bindings.slice(0, 2)).toEqual(['sold', 'closed']);
+  });
+
   it('escapes LIKE metacharacters in search values for data and count queries', async () => {
     const conditions: QueryCondition[] = [
       { column: 'title', operator: 'ILIKE', value: String.raw`50%_off\sale`, _group: 'term' },

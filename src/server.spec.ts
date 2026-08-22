@@ -8,6 +8,67 @@ import type { DatabaseAdapter } from './db/adapter.interface.js';
 import { buildApp } from './server.js';
 
 describe('buildApp database timeout handling', () => {
+  it('limits audit-log requests without limiting inventory requests', async () => {
+    const auditDir = await mkdtemp(join(tmpdir(), 'kasbly-connector-audit-'));
+    const auditFile = join(auditDir, 'audit.log');
+    const config = connectorConfigSchema.parse({
+      version: 1,
+      auth: { apiKeys: [{ key: 'test-key', label: 'test' }] },
+      database: {
+        type: 'postgres',
+        host: 'database.internal',
+        database: 'inventory',
+        user: 'connector',
+        password: 'password',
+      },
+      resources: {
+        inventory: {
+          table: 'cars',
+          idColumn: 'id',
+          fields: { externalId: 'id', title: 'title', price: 'price', currency: "'SAR'" },
+        },
+      },
+      audit: { enabled: true, filePath: auditFile, maxFileSizeMB: 50, retentionDays: 90 },
+    });
+    const dbAdapter: DatabaseAdapter = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      query: vi.fn().mockResolvedValue({ rows: [], total: 0, totalIsCapped: false }),
+      queryById: vi.fn(),
+      queryRelation: vi.fn(),
+      healthCheck: vi.fn(),
+      introspect: vi.fn(),
+    };
+    const app = await buildApp({ config, dbAdapter });
+    try {
+      const auditLogRequests = [];
+      for (let request = 0; request < 11; request++) {
+        auditLogRequests.push(
+          await app.inject({
+            method: 'GET',
+            url: '/audit-log',
+            headers: { 'x-api-key': 'test-key' },
+          }),
+        );
+      }
+
+      expect(auditLogRequests.slice(0, 10).map((response) => response.statusCode)).toEqual(
+        Array.from({ length: 10 }, () => 200),
+      );
+      expect(auditLogRequests[10]?.statusCode).toBe(429);
+
+      const inventoryResponse = await app.inject({
+        method: 'GET',
+        url: '/inventory',
+        headers: { 'x-api-key': 'test-key' },
+      });
+      expect(inventoryResponse.statusCode).toBe(200);
+    } finally {
+      await app.close();
+      await rm(auditDir, { recursive: true, force: true });
+    }
+  });
+
   it('returns 503 when PostgreSQL cancels a query at the configured bound', async () => {
     const auditDir = await mkdtemp(join(tmpdir(), 'kasbly-connector-audit-'));
     const auditFile = join(auditDir, 'audit.log');
