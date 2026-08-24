@@ -6,17 +6,24 @@ import { createApiKeyGuard } from './auth/api-key.guard.js';
 import { AuditService } from './audit/audit.service.js';
 import { getClientIp } from './middleware/client-ip.js';
 import { buildRateLimitOptions } from './middleware/rate-limiter.js';
-import { registerHealthRoute } from './routes/health.route.js';
+import {
+  createResourceHealthCheck,
+  registerHealthRoute,
+  type ResourceHealthCheck,
+} from './routes/health.route.js';
 import { registerInventoryRoutes } from './routes/inventory.route.js';
 import { registerAuditLogRoute } from './routes/audit-log.route.js';
 
 export interface AppDeps {
   config: ConnectorConfig;
   dbAdapter: DatabaseAdapter;
+  getResourceHealth?: ResourceHealthCheck;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config, dbAdapter } = deps;
+  const getResourceHealth =
+    deps.getResourceHealth ?? createResourceHealthCheck(dbAdapter, config.resources.inventory);
 
   // SECURITY: trustProxy stays false — the connector is merchant-self-hosted
   // with no guaranteed reverse proxy in front of it, so `request.ip` must
@@ -34,7 +41,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
 
   if (!config.resources.inventory.fields['status']) {
     app.log.warn(
-      'Inventory status is not mapped; every listing will be reported as ACTIVE. Map resources.inventory.fields.status to expose availability.',
+      `Inventory status is not mapped; every listing will be reported as ${
+        config.resources.inventory.unknownStatusPolicy ?? 'DRAFT'
+      }. Map resources.inventory.fields.status to expose availability.`,
     );
   }
 
@@ -86,10 +95,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   // Routes
-  registerHealthRoute(app, dbAdapter, config.resources.inventory);
+  registerHealthRoute(app, dbAdapter, getResourceHealth, () => auditService.getHealth());
   registerInventoryRoutes(app, {
     dbAdapter,
     resourceConfig: config.resources.inventory,
+    getResourceHealth,
   });
   registerAuditLogRoute(app, auditService);
 

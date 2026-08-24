@@ -35,6 +35,8 @@ export interface DbConnectOptions {
   ssl: boolean;
   sslCa?: string;
   sslRejectUnauthorized?: boolean;
+  /** PostgreSQL schema to inspect. Defaults to public. */
+  schema?: string;
 }
 
 export interface DatabaseConnectionOptions {
@@ -95,8 +97,9 @@ export async function introspectDatabase(options: DbConnectOptions): Promise<{
     retriedWithTls = true;
   }
 
-  const tables = await introspectTables(db);
-  const foreignKeys = await introspectForeignKeys(db);
+  const schema = options.schema ?? 'public';
+  const tables = await introspectTables(db, schema);
+  const foreignKeys = await introspectForeignKeys(db, schema);
 
   return { db, result: { tables, foreignKeys }, retriedWithTls };
 }
@@ -108,9 +111,10 @@ function createDatabaseClient(options: DbConnectOptions): Knex {
   });
 }
 
-async function introspectTables(db: Knex): Promise<IntrospectedTable[]> {
+async function introspectTables(db: Knex, schema: string): Promise<IntrospectedTable[]> {
   const tableRows = await db.raw<{ rows: { tablename: string }[] }>(
-    `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`,
+    `SELECT tablename FROM pg_tables WHERE schemaname = ? ORDER BY tablename`,
+    [schema],
   );
 
   const tables: IntrospectedTable[] = [];
@@ -128,9 +132,9 @@ async function introspectTables(db: Knex): Promise<IntrospectedTable[]> {
     }>(
       `SELECT column_name, data_type, is_nullable
        FROM information_schema.columns
-       WHERE table_name = ? AND table_schema = 'public'
+       WHERE table_name = ? AND table_schema = ?
        ORDER BY ordinal_position`,
-      [tableName],
+      [tableName, schema],
     );
 
     // Get primary key columns
@@ -142,8 +146,8 @@ async function introspectTables(db: Knex): Promise<IntrospectedTable[]> {
          AND tc.table_schema = kcu.table_schema
        WHERE tc.constraint_type = 'PRIMARY KEY'
          AND tc.table_name = ?
-         AND tc.table_schema = 'public'`,
-      [tableName],
+       AND tc.table_schema = ?`,
+      [tableName, schema],
     );
     const pkColumns = new Set(pkRows.rows.map((r) => r.column_name));
 
@@ -158,8 +162,8 @@ async function introspectTables(db: Knex): Promise<IntrospectedTable[]> {
     const countResult = await db.raw<{ rows: { estimate: string }[] }>(
       `SELECT reltuples::bigint AS estimate
        FROM pg_class
-       WHERE relname = ? AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')`,
-      [tableName],
+       WHERE relname = ? AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = ?)`,
+      [tableName, schema],
     );
     const rowCount = Math.max(0, Number(countResult.rows[0]?.estimate ?? 0));
 
@@ -169,7 +173,7 @@ async function introspectTables(db: Knex): Promise<IntrospectedTable[]> {
   return tables;
 }
 
-async function introspectForeignKeys(db: Knex): Promise<ForeignKeyInfo[]> {
+async function introspectForeignKeys(db: Knex, schema: string): Promise<ForeignKeyInfo[]> {
   const fkRows = await db.raw<{
     rows: {
       from_table: string;
@@ -191,8 +195,9 @@ async function introspectForeignKeys(db: Knex): Promise<ForeignKeyInfo[]> {
        ON ccu.constraint_name = tc.constraint_name
        AND ccu.table_schema = tc.table_schema
      WHERE tc.constraint_type = 'FOREIGN KEY'
-       AND tc.table_schema = 'public'
+       AND tc.table_schema = ?
      ORDER BY tc.table_name`,
+    [schema],
   );
 
   return fkRows.rows.map((row) => ({

@@ -60,6 +60,14 @@ export function buildOrderByClause(sort: SortOptions): string {
  */
 export const DEFAULT_COUNT_LIMIT = 1000;
 
+function quoteIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+function qualifiedTable(schema: string | undefined, table: string): string {
+  return `${quoteIdentifier(schema ?? 'public')}.${quoteIdentifier(table)}`;
+}
+
 function escapeLikePattern(value: unknown): string {
   return String(value).replace(/[\\%_]/g, '\\$&');
 }
@@ -205,12 +213,13 @@ export class PostgresAdapter implements DatabaseAdapter {
     sort: SortOptions,
     baseFilter?: string,
     selectColumns?: string[],
+    schema?: string,
   ): Promise<QueryResult> {
     const db = this.getDb();
     const offset = (pagination.page - 1) * pagination.pageSize;
 
     // Build data query with specific columns
-    let dataQuery: Knex.QueryBuilder = db(table);
+    let dataQuery: Knex.QueryBuilder = db.withSchema(schema ?? 'public').from(table);
     if (selectColumns?.length) {
       dataQuery = dataQuery.select(selectColumns.map((col) => db.raw(col)));
     }
@@ -221,7 +230,10 @@ export class PostgresAdapter implements DatabaseAdapter {
     // stop scanning once the cap is reached instead of walking every matching
     // row on the merchant's table (#17420).
     const countLimit = resolveCountLimit(pagination);
-    let countRows: Knex.QueryBuilder = db(table).select(db.raw('1'));
+    let countRows: Knex.QueryBuilder = db
+      .withSchema(schema ?? 'public')
+      .from(table)
+      .select(db.raw('1'));
     countRows = this.applyBaseFilterAndConditions(countRows, db, conditions, baseFilter);
     const countQuery = db.count('* as count').from(countRows.limit(countLimit).as('bounded_count'));
 
@@ -244,9 +256,10 @@ export class PostgresAdapter implements DatabaseAdapter {
     id: string,
     baseFilter?: string,
     selectColumns?: string[],
+    schema?: string,
   ): Promise<Record<string, unknown> | null> {
     const db = this.getDb();
-    let queryBuilder: Knex.QueryBuilder = db(table);
+    let queryBuilder: Knex.QueryBuilder = db.withSchema(schema ?? 'public').from(table);
 
     if (selectColumns?.length) {
       queryBuilder = queryBuilder.select(selectColumns.map((col) => db.raw(col)));
@@ -276,7 +289,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     // list when the inventory table has no rows. Still prepare a read-only query
     // so PostgreSQL validates the relation table, fields, foreign key, and filter.
     if (query.parentIds.length === 0) {
-      let sql = `SELECT ${selectParts.join(', ')} FROM "${query.table}" WHERE FALSE`;
+      let sql = `SELECT ${selectParts.join(', ')} FROM ${qualifiedTable(query.schema, query.table)} WHERE FALSE`;
       if (query.filter) {
         sql += ` AND (${query.filter})`;
       }
@@ -285,7 +298,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
 
     const placeholders = query.parentIds.map(() => '?').join(', ');
-    let sql = `SELECT ${selectParts.join(', ')} FROM "${query.table}" WHERE ${query.foreignKey} IN (${placeholders})`;
+    let sql = `SELECT ${selectParts.join(', ')} FROM ${qualifiedTable(query.schema, query.table)} WHERE ${query.foreignKey} IN (${placeholders})`;
     if (query.filter) {
       sql += ` AND (${query.filter})`;
     }

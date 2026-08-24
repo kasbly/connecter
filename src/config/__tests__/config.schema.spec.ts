@@ -58,6 +58,45 @@ describe('connectorConfigSchema database TLS options', () => {
 });
 
 describe('connectorConfigSchema inventory fields', () => {
+  it('defaults schemas to public and keeps schemas separate from table names', () => {
+    const config = connectorConfigSchema.parse({
+      ...createConfigInput(),
+      resources: {
+        inventory: {
+          ...createConfigInput().resources.inventory,
+          schema: 'catalog',
+          relations: {
+            images: {
+              schema: 'media',
+              table: 'images',
+              foreignKey: 'product_id',
+              referenceKey: 'id',
+              fields: { url: 'url' },
+            },
+          },
+        },
+      },
+    });
+
+    expect(config.resources.inventory.schema).toBe('catalog');
+    expect(config.resources.inventory.relations?.images?.schema).toBe('media');
+    expect(connectorConfigSchema.parse(createConfigInput()).resources.inventory.schema).toBe(
+      'public',
+    );
+  });
+
+  it.each(['catalog.products', 'catalog-products', '1catalog'])(
+    'rejects an unsafe PostgreSQL schema identifier: %s',
+    (schema) => {
+      expect(() =>
+        connectorConfigSchema.parse({
+          ...createConfigInput(),
+          resources: { inventory: { ...createConfigInput().resources.inventory, schema } },
+        }),
+      ).toThrow();
+    },
+  );
+
   it.each(['title', 'price', 'currency'])('requires a %s mapping', (field) => {
     const config = createConfigInput();
     const fields = config.resources.inventory.fields as Record<string, string>;
@@ -94,6 +133,7 @@ describe('connectorConfigSchema inventory fields', () => {
   it('defaults and accepts source values for the closed inventory status vocabulary', () => {
     const defaults = connectorConfigSchema.parse(createConfigInput());
     expect(defaults.resources.inventory.statusValues.SOLD).toEqual(['SOLD', 'sold']);
+    expect(defaults.resources.inventory.unknownStatusPolicy).toBe('DRAFT');
 
     const configured = connectorConfigSchema.parse({
       ...createConfigInput(),
@@ -109,6 +149,17 @@ describe('connectorConfigSchema inventory fields', () => {
       SOLD: ['sold_out'],
       RESERVED: ['RESERVED', 'reserved'],
     });
+  });
+
+  it.each(['ACTIVE', 'unknown'])('rejects an unsafe unknown-status policy: %s', (policy) => {
+    expect(() =>
+      connectorConfigSchema.parse({
+        ...createConfigInput(),
+        resources: {
+          inventory: { ...createConfigInput().resources.inventory, unknownStatusPolicy: policy },
+        },
+      }),
+    ).toThrow();
   });
 });
 

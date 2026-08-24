@@ -78,8 +78,11 @@ export function mapRowToInventoryItem(
     }
   }
 
+  // Row images are emitted first so a primary image stored on the inventory row
+  // remains first when it is supplemented by a related image table.
+  const images = normalizeImageUrls(fields['images']);
+
   // Process relations
-  let images: string[] = [];
   if (config.relations) {
     for (const [relationName, relationConfig] of Object.entries(config.relations)) {
       const relData = relationData.get(relationName);
@@ -87,9 +90,9 @@ export function mapRowToInventoryItem(
       const relRows = relData?.get(referenceValue as string | number) ?? [];
 
       if (relationConfig.imageUrlField) {
-        images = relRows
-          .map((r) => r[relationConfig.imageUrlField!])
-          .filter((url): url is string => typeof url === 'string' && url.length > 0);
+        for (const relationRow of relRows) {
+          images.push(...normalizeImageUrls(relationRow[relationConfig.imageUrlField]));
+        }
       } else if (relationConfig.flatten) {
         attributes[relationName] = relRows
           .map((r) => r[relationConfig.flatten!])
@@ -116,11 +119,42 @@ export function mapRowToInventoryItem(
     price: Number(fields['price'] ?? 0),
     currency: String(fields['currency'] ?? ''),
     category: String(fields['category'] ?? ''),
-    status: resolveInventoryStatus(fields['status'], config.statusValues) ?? 'ACTIVE',
+    // Treat a missing or newly introduced source value as non-sellable until
+    // the merchant explicitly maps it in statusValues.
+    status:
+      resolveInventoryStatus(fields['status'], config.statusValues) ??
+      config.unknownStatusPolicy ??
+      'DRAFT',
     images,
     attributes,
     updatedAt,
   };
+}
+
+/**
+ * Normalize a configured image field from PostgreSQL (which returns text arrays
+ * as JavaScript arrays), a JSON array, or one URL into non-empty string URLs.
+ */
+export function normalizeImageUrls(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap(normalizeImageUrls);
+  }
+
+  if (typeof value !== 'string') return [];
+
+  const url = value.trim();
+  if (!url) return [];
+
+  if (url.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(url) as unknown;
+      return Array.isArray(parsed) ? parsed.flatMap(normalizeImageUrls) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [url];
 }
 
 export function resolveColumnValue(row: Record<string, unknown>, columnExpr: string): unknown {

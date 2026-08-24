@@ -79,4 +79,64 @@ describe('introspectDatabase', () => {
     );
     expect(result.retriedWithTls).toBe(true);
   });
+
+  it('introspects tables, keys, and relations in the selected schema', async () => {
+    const db = {
+      raw: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ rows: [{ tablename: 'products' }] })
+        .mockResolvedValueOnce({
+          rows: [
+            { column_name: 'id', data_type: 'uuid', is_nullable: 'NO' },
+            { column_name: 'title', data_type: 'text', is_nullable: 'NO' },
+          ],
+        })
+        .mockResolvedValueOnce({ rows: [{ column_name: 'id' }] })
+        .mockResolvedValueOnce({ rows: [{ estimate: '12' }] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              from_table: 'images',
+              from_column: 'product_id',
+              to_table: 'products',
+              to_column: 'id',
+            },
+          ],
+        }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    knexMock.mockReturnValueOnce(db);
+
+    const result = await introspectDatabase({ ...connection, schema: 'catalog' });
+
+    expect(db.raw).toHaveBeenNthCalledWith(
+      2,
+      'SELECT tablename FROM pg_tables WHERE schemaname = ? ORDER BY tablename',
+      ['catalog'],
+    );
+    expect(db.raw).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('WHERE table_name = ? AND table_schema = ?'),
+      ['products', 'catalog'],
+    );
+    expect(db.raw).toHaveBeenNthCalledWith(6, expect.stringContaining('tc.table_schema = ?'), [
+      'catalog',
+    ]);
+    expect(result.result).toEqual({
+      tables: [
+        {
+          name: 'products',
+          rowCount: 12,
+          columns: [
+            { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+            { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+          ],
+        },
+      ],
+      foreignKeys: [
+        { fromTable: 'images', fromColumn: 'product_id', toTable: 'products', toColumn: 'id' },
+      ],
+    });
+  });
 });

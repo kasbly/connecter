@@ -1,8 +1,6 @@
 services:
   connector:
     build: .
-    ports:
-      - '${CONNECTOR_PORT:-4000}:4000'
     volumes:
       - ./connector.config.yml:/app/connector.config.yml:ro
       - ./logs:/app/logs
@@ -15,3 +13,34 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    networks:
+      connector_network:
+
+  caddy:
+    image: caddy:2.10-alpine
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      CONNECTOR_DOMAIN: ${CONNECTOR_DOMAIN:?Set CONNECTOR_DOMAIN in .env to the public DNS name for this connector}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    depends_on:
+      connector:
+        condition: service_started
+    networks:
+      connector_network:
+        ipv4_address: 172.30.0.2
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  connector_network:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

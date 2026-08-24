@@ -132,7 +132,7 @@ describe('PostgresAdapter relation probes', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT url as "url", inventory_id as "__fk" FROM "images" WHERE FALSE AND (published = true)',
+      'SELECT url as "url", inventory_id as "__fk" FROM "public"."images" WHERE FALSE AND (published = true)',
     );
   });
 });
@@ -274,8 +274,25 @@ describe('PostgresAdapter relation ordering', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT url as "url", carId as "__fk" FROM "Image" WHERE carId IN (?) ORDER BY position ASC NULLS LAST',
+      'SELECT url as "url", carId as "__fk" FROM "public"."Image" WHERE carId IN (?) ORDER BY position ASC NULLS LAST',
       ['car-1'],
+    );
+  });
+
+  it('qualifies relation reads with the configured schema and table separately', async () => {
+    const adapter = createAdapterForRelationQuery();
+
+    await adapter.queryRelation({
+      schema: 'catalog',
+      table: 'product_images',
+      foreignKey: 'product_id',
+      parentIds: ['product-1'],
+      fields: { url: 'url' },
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT url as "url", product_id as "__fk" FROM "catalog"."product_images" WHERE product_id IN (?) ORDER BY product_id ASC NULLS LAST, url ASC NULLS LAST',
+      ['product-1'],
     );
   });
 
@@ -290,7 +307,7 @@ describe('PostgresAdapter relation ordering', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT url as "url", carId as "__fk" FROM "Image" WHERE carId IN (?) ORDER BY carId ASC NULLS LAST, url ASC NULLS LAST',
+      'SELECT url as "url", carId as "__fk" FROM "public"."Image" WHERE carId IN (?) ORDER BY carId ASC NULLS LAST, url ASC NULLS LAST',
       ['car-1'],
     );
   });
@@ -370,6 +387,7 @@ async function runListQuery(options: {
   page?: number;
   pageSize?: number;
   baseFilter?: string;
+  schema?: string;
 }) {
   const { db, captured } = createRecordingKnex({
     dataRows: options.dataRows ?? [],
@@ -388,6 +406,7 @@ async function runListQuery(options: {
     { column: 'price', direction: 'asc' },
     options.baseFilter ?? 'published = true',
     ['id', 'price'],
+    options.schema,
   );
 
   const countQuery = captured.find((query) => query.sql.includes('count(*)'));
@@ -403,6 +422,7 @@ async function runQueryById(options: {
   dataRows?: Record<string, unknown>[];
   id?: string;
   baseFilter?: string;
+  schema?: string;
 }) {
   const { db, captured } = createRecordingKnex({
     dataRows: options.dataRows ?? [],
@@ -419,6 +439,8 @@ async function runQueryById(options: {
     'id',
     options.id ?? '123',
     options.baseFilter ?? 'published = true',
+    undefined,
+    options.schema,
   );
 
   const query = captured[0];
@@ -439,13 +461,21 @@ describe('PostgresAdapter list count (#17420)', () => {
     const { countQuery } = await runListQuery({ count: 20 });
 
     expect(countQuery.sql).toBe(
-      'select count(*) as "count" from (select 1 from "Car" where (published = true) limit ?) as "bounded_count" limit ?',
+      'select count(*) as "count" from (select 1 from "public"."Car" where (published = true) limit ?) as "bounded_count" limit ?',
     );
     expect(countQuery.bindings).toContain(DEFAULT_COUNT_LIMIT);
     // The pre-#17420 shape: an unbounded exact count over the merchant table.
     expect(countQuery.sql).not.toBe(
       'select count(*) as "count" from "Car" where (published = true)',
     );
+  });
+
+  it('qualifies list and item reads with the configured schema', async () => {
+    const { dataQuery } = await runListQuery({ count: 1, schema: 'catalog' });
+    const itemQuery = await runQueryById({ schema: 'catalog' });
+
+    expect(dataQuery.sql).toContain('from "catalog"."Car"');
+    expect(itemQuery.sql).toContain('from "catalog"."Car"');
   });
 
   it('still applies the same filter and ILIKE search predicates to the bounded count', async () => {
@@ -553,7 +583,7 @@ describe('PostgresAdapter base filters', () => {
     });
 
     expect(query.sql).toBe(
-      "select * from \"Car\" where id = ? and (status = 'ACTIVE' OR status = 'RESERVED') limit ?",
+      'select * from "public"."Car" where id = ? and (status = \'ACTIVE\' OR status = \'RESERVED\') limit ?',
     );
     expect(query.bindings).toEqual(['123', 1]);
   });

@@ -57,7 +57,8 @@ async function run(): Promise<void> {
     }
   } else {
     // Default: start the server
-    await import('../index.js');
+    const { startConnector } = await import('../index.js');
+    await startConnector();
   }
 }
 

@@ -3,14 +3,11 @@ version: 1
 server:
   port: 4000
   host: '0.0.0.0'
-  # Optional: comma-separated trusted reverse-proxy IPs/CIDRs (e.g.
-  # '10.0.0.0/8,203.0.113.5'). Only set this if you run the connector behind
-  # your own reverse proxy — X-Forwarded-For/X-Real-IP headers are trusted
-  # for rate limiting and audit logging ONLY when the direct connection comes
-  # from an IP in this list. Leave unset if the connector is reachable
-  # directly (the default), otherwise rate limiting and audit IPs are
-  # spoofable via forged headers.
-  # trustedProxies: '10.0.0.0/8'
+  # The bundled Docker HTTPS deployment uses Caddy at this fixed internal IP.
+  # Keep this value when using docker compose; change it to your own proxy's
+  # IP/CIDR only if you replace Caddy. Forwarded headers are trusted only when
+  # the direct connection comes from this allowlist.
+  trustedProxies: '172.30.0.2'
 
 auth:
   apiKeys:
@@ -45,6 +42,8 @@ audit:
 
 resources:
   inventory:
+    # PostgreSQL schema. Omit to use public.
+    schema: 'public'
     table: 'Car'
     baseFilter: 'published = true AND "deletedAt" IS NULL'
     idColumn: 'id'
@@ -57,6 +56,9 @@ resources:
       currency: "'KRW'"
       category: "'car'"
       status: 'status' # Unmapped status reports every listing as ACTIVE
+      # Optional: one URL, a PostgreSQL text[] value, or a JSON array of URL strings.
+      # Row images come first, followed by images from relations below.
+      images: 'image_urls'
 
     # Map source-system availability terms to Kasbly's five status tokens.
     # Defaults accept ACTIVE, DRAFT, RESERVED, SOLD, and EXPIRED (case-insensitive).
@@ -95,6 +97,7 @@ resources:
 
     relations:
       images:
+        schema: 'public'
         table: 'Image'
         foreignKey: '"carId"'
         referenceKey: 'id'
@@ -103,6 +106,7 @@ resources:
         filter: "type = 'gallery' OR type = 'featured'"
         orderBy: { column: 'type', direction: 'asc' } # featured images first
       features:
+        schema: 'public'
         table: 'CarFeatures'
         foreignKey: '"carId"'
         referenceKey: 'id'

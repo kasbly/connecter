@@ -101,6 +101,30 @@ describe('AuditService', () => {
       expect.objectContaining({ err: expect.any(Error), filePath: TEST_DIR }),
       'Failed to append audit log',
     );
+    expect(svc.getHealth()).toMatchObject({
+      enabled: true,
+      ok: false,
+      error: expect.stringContaining('EISDIR'),
+    });
+
+    rmSync(TEST_DIR, { recursive: true });
+    svc.log(makeEntry());
+    await svc.flush();
+
+    expect(svc.getHealth()).toMatchObject({ enabled: true, ok: true });
+    expect(svc.getHealth().lastSuccessfulAppendAt).toEqual(expect.any(String));
+  });
+
+  it('reports disabled audit logging as healthy but disabled', () => {
+    const svc = new AuditService({
+      enabled: false,
+      filePath: TEST_FILE,
+      maxFileSizeMB: 50,
+      maxFiles: 10,
+      retentionDays: 90,
+    });
+
+    expect(svc.getHealth()).toEqual({ enabled: false, ok: true });
   });
 
   it('preserves rotation while processing queued writes', async () => {
@@ -176,6 +200,38 @@ describe('AuditService', () => {
     await svc.flush();
 
     expect(existsSync(expiredFile)).toBe(false);
+  });
+
+  it('prunes expired entries from the active log without requiring a size-triggered rotation', async () => {
+    const svc = new AuditService({
+      enabled: true,
+      filePath: TEST_FILE,
+      maxFileSizeMB: 50,
+      maxFiles: 10,
+      retentionDays: 1,
+    });
+    const expiredEntry = makeEntry({
+      path: '/inventory/expired',
+      ts: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const retainedEntry = makeEntry({ path: '/inventory/retained' });
+    writeFileSync(
+      TEST_FILE,
+      `${JSON.stringify(expiredEntry)}\n${JSON.stringify(retainedEntry)}\n`,
+      'utf8',
+    );
+
+    svc.log(makeEntry({ path: '/inventory/appended' }));
+    await svc.flush();
+
+    const entries = readFileSync(TEST_FILE, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as AuditEntry);
+    expect(entries.map((entry) => entry.path)).toEqual([
+      '/inventory/retained',
+      '/inventory/appended',
+    ]);
   });
 
   it('queries entries with pagination', async () => {

@@ -34,6 +34,14 @@ describe('suggestFieldMappings', () => {
     expect(mapped.get('category')).toBe('category');
   });
 
+  it('suggests a row-level image column as the images field', () => {
+    const suggestions = suggestFieldMappings([col('id', 'integer', true), col('image_urls')]);
+
+    expect(suggestions).toContainEqual(
+      expect.objectContaining({ columnName: 'image_urls', suggestedMapping: 'images' }),
+    );
+  });
+
   it('maps attribute columns', () => {
     const columns = [
       col('id', 'integer', true),

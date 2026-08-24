@@ -5,7 +5,11 @@ import { input, select, confirm, checkbox, password } from '@inquirer/prompts';
 import { parse } from 'dotenv';
 import * as yaml from 'js-yaml';
 import { loadConfig } from '../config/config.loader.js';
-import type { ConnectorConfig } from '../config/config.types.js';
+import type {
+  ConnectorConfig,
+  RelationConfig,
+  UnknownStatusPolicy,
+} from '../config/config.types.js';
 import { introspectDatabase } from './introspect.js';
 import {
   INVENTORY_STATUSES,
@@ -37,6 +41,7 @@ export const FIELD_MAPPING_TARGETS = [
   'category',
   'status',
   'description',
+  'images',
 ] as const;
 
 type FieldMappingTarget = (typeof FIELD_MAPPING_TARGETS)[number];
@@ -91,7 +96,10 @@ export function getFieldMappingPrompt(
   ];
 
   return {
-    message: `Which column contains the ${field}?`,
+    message:
+      field === 'images'
+        ? 'Which column contains the images? (one URL, a PostgreSQL text array, or a JSON array; e.g. ["https://example.com/photo.jpg"])'
+        : `Which column contains the ${field}?`,
     choices,
     default: suggestedColumn ?? UNMAPPED_FIELD_VALUE,
   };
@@ -158,6 +166,14 @@ export async function runWizard(): Promise<void> {
     default: existingConfig?.database.ssl ?? shouldDefaultToTls(dbHost),
   });
   const tls = await collectTlsSettings(requiresTls);
+  const dbSchema = await input({
+    message: 'PostgreSQL schema:',
+    default: existingConfig?.resources.inventory.schema ?? 'public',
+    validate: (value) =>
+      /^[A-Za-z_][A-Za-z0-9_]*$/.test(value.trim()) ||
+      'Schema must be a PostgreSQL identifier (letters, numbers, and underscores).',
+  });
+  const selectedSchema = dbSchema?.trim() || 'public';
 
   console.log('\nConnecting...');
   const connection = await introspectDatabase({
@@ -170,6 +186,7 @@ export async function runWizard(): Promise<void> {
     ssl: tls.enabled,
     sslCa: tls.ca,
     sslRejectUnauthorized: tls.rejectUnauthorized,
+    schema: selectedSchema,
   });
   const { db, result } = connection;
   if (connection.retriedWithTls) {
@@ -220,6 +237,7 @@ export async function runWizard(): Promise<void> {
 
   const fieldMappings: Partial<Record<FieldMappingTarget, string>> = {};
   let statusValues: StatusValuesConfig | undefined;
+  let unknownStatusPolicy: UnknownStatusPolicy | undefined;
   const mappedColumnNames = new Set<string>();
   for (const field of FIELD_MAPPING_TARGETS) {
     const suggestedColumn = suggestions.find(
@@ -261,6 +279,14 @@ export async function runWizard(): Promise<void> {
     mappedColumnNames.add(selectedValue);
     if (field === 'status') {
       statusValues = await collectStatusValues(db, selectedTableName, selectedValue);
+      unknownStatusPolicy = await select<UnknownStatusPolicy>({
+        message: 'How should newly observed source statuses be exposed until you map them?',
+        choices: ['DRAFT', 'RESERVED', 'SOLD', 'EXPIRED'].map((status) => ({
+          name: status,
+          value: status as UnknownStatusPolicy,
+        })),
+        default: existingInventory?.unknownStatusPolicy ?? 'DRAFT',
+      });
     }
   }
 
@@ -396,7 +422,7 @@ export async function runWizard(): Promise<void> {
     result.tables,
     result.foreignKeys,
   );
-  const relations: Record<string, unknown> = { ...existingConfig?.resources.inventory.relations };
+  const relations: Record<string, RelationConfig> = {};
 
   for (const suggestion of relationSuggestions) {
     const relTable = result.tables.find((t) => t.name === suggestion.table);
@@ -442,7 +468,8 @@ export async function runWizard(): Promise<void> {
         fieldsMap[col.name] = quoteIfNeeded(col.name);
       }
 
-      const relation: Record<string, unknown> = {
+      const relation: RelationConfig = {
+        schema: selectedSchema,
         table: suggestion.table,
         foreignKey: quoteIfNeeded(suggestion.foreignKeyColumn),
         referenceKey: quoteIfNeeded(idColumn),
@@ -512,8 +539,11 @@ export async function runWizard(): Promise<void> {
   );
 
   // Build config object
-  const fields: Record<string, string> = { ...existingConfig?.resources.inventory.fields };
-  const attributes: Record<string, string> = { ...existingConfig?.resources.inventory.attributes };
+  // Everything below is selected by this wizard, so rebuild it instead of
+  // overlaying selections onto the previous inventory mapping. This makes an
+  // explicit "No" or an empty checkbox selection remove stale configuration.
+  const fields: Record<string, string> = {};
+  const attributes: Record<string, string> = {};
 
   fields['externalId'] = quoteIfNeeded(idColumn);
   Object.assign(fields, fieldMappings);
@@ -558,13 +588,14 @@ export async function runWizard(): Promise<void> {
     resources: {
       ...existingConfig?.resources,
       inventory: {
-        ...existingConfig?.resources.inventory,
+        schema: selectedSchema,
         table: selectedTableName,
         ...(baseFilterParts.length > 0 ? { baseFilter: baseFilterParts.join(' AND ') } : {}),
         idColumn: quoteIfNeeded(idColumn),
         ...(updatedAtColumn ? { updatedAtColumn: quoteIfNeeded(updatedAtColumn) } : {}),
         fields,
         ...(statusValues ? { statusValues } : {}),
+        ...(unknownStatusPolicy ? { unknownStatusPolicy } : {}),
         ...(Object.keys(attributes).length > 0 ? { attributes } : {}),
         ...(searchableColumns.length > 0
           ? { searchableColumns: searchableColumns.map(quoteIfNeeded) }
@@ -572,7 +603,6 @@ export async function runWizard(): Promise<void> {
         ...(selectedFilters.length > 0
           ? {
               filterableColumns: {
-                ...existingConfig?.resources.inventory.filterableColumns,
                 ...Object.fromEntries(
                   selectedFilters.map((f) => [
                     f.filterName,
@@ -597,6 +627,12 @@ export async function runWizard(): Promise<void> {
         `  ${relationName}: ${columnNames.length > 0 ? columnNames.join(', ') : '(none)'}`,
       );
     }
+  }
+
+  if (existingInventory) {
+    console.log(
+      `\nInventory mapping changes:\n${formatInventoryDiff(existingInventory, config.resources.inventory)}`,
+    );
   }
 
   // Write config file
@@ -666,6 +702,26 @@ export function loadExistingSetupConfig(configPath: string, envPath: string): Co
   } finally {
     for (const name of addedNames) delete process.env[name];
   }
+}
+
+/** Format a concise YAML-style preview of changes to wizard-owned inventory mappings. */
+export function formatInventoryDiff(
+  previous: ConnectorConfig['resources']['inventory'],
+  next: ConnectorConfig['resources']['inventory'],
+): string {
+  const previousLines = yaml
+    .dump(previous, { lineWidth: 120, quoteStyle: 'double' })
+    .trimEnd()
+    .split('\n');
+  const nextLines = yaml.dump(next, { lineWidth: 120, quoteStyle: 'double' }).trimEnd().split('\n');
+  const nextLineSet = new Set(nextLines);
+  const previousLineSet = new Set(previousLines);
+  const changes = [
+    ...previousLines.filter((line) => !nextLineSet.has(line)).map((line) => `- ${line}`),
+    ...nextLines.filter((line) => !previousLineSet.has(line)).map((line) => `+ ${line}`),
+  ];
+
+  return changes.length > 0 ? changes.join('\n') : '  (no changes)';
 }
 
 function getExistingMappingSelection(

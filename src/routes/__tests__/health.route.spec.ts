@@ -1,7 +1,11 @@
 import Fastify from 'fastify';
 import { describe, expect, it, vi } from 'vitest';
 import type { DatabaseAdapter } from '../../db/adapter.interface.js';
-import { probeInventoryResource, registerHealthRoute } from '../health.route.js';
+import {
+  createResourceHealthCheck,
+  probeInventoryResource,
+  registerHealthRoute,
+} from '../health.route.js';
 
 const inventoryResource = {
   table: 'inventory',
@@ -21,7 +25,8 @@ function createHealthAdapter(healthy: boolean, resourceHealthy = true): Database
 describe('health route', () => {
   it('returns 200 when the database is connected', async () => {
     const app = Fastify();
-    registerHealthRoute(app, createHealthAdapter(true), inventoryResource);
+    const dbAdapter = createHealthAdapter(true);
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
 
     const response = await app.inject({ method: 'GET', url: '/health' });
 
@@ -30,13 +35,15 @@ describe('health route', () => {
       status: 'ok',
       database: 'connected',
       resources: 'ok',
+      audit: 'disabled',
     });
     await app.close();
   });
 
   it('returns 503 when the database is disconnected', async () => {
     const app = Fastify();
-    registerHealthRoute(app, createHealthAdapter(false), inventoryResource);
+    const dbAdapter = createHealthAdapter(false);
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
 
     const response = await app.inject({ method: 'GET', url: '/health' });
 
@@ -44,14 +51,15 @@ describe('health route', () => {
     expect(response.json()).toMatchObject({
       status: 'degraded',
       database: 'disconnected',
-      resources: 'ok',
+      resources: 'unavailable',
     });
     await app.close();
   });
 
   it('returns 503 with resource probe details when the inventory mapping is invalid', async () => {
     const app = Fastify();
-    registerHealthRoute(app, createHealthAdapter(true, false), inventoryResource);
+    const dbAdapter = createHealthAdapter(true, false);
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
 
     const response = await app.inject({ method: 'GET', url: '/health' });
 
@@ -61,6 +69,27 @@ describe('health route', () => {
       database: 'connected',
       resources: 'misconfigured',
       resourceError: expect.stringContaining('column "price" does not exist'),
+    });
+    await app.close();
+  });
+
+  it('returns 503 with audit details when enabled audit logging cannot persist', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, inventoryResource),
+      () => ({ enabled: true, ok: false, error: 'EACCES: permission denied' }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      status: 'degraded',
+      audit: 'degraded',
+      auditError: 'EACCES: permission denied',
     });
     await app.close();
   });
@@ -102,10 +131,37 @@ describe('health route', () => {
     });
   });
 
+  it('reports an observed source status that has not been mapped', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [{ id: '1', title: 'Test', price: 100, availability: 'discontinued' }],
+      total: 1,
+    });
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        fields: { ...inventoryResource.fields, status: 'availability' },
+        statusValues: { ACTIVE: ['for_sale'], SOLD: ['sold_out'] },
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'ok',
+      unknownStatusValues: ['discontinued'],
+    });
+    await app.close();
+  });
+
   it('caches a successful resource probe across health checks', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(true);
-    registerHealthRoute(app, dbAdapter, inventoryResource);
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
 
     await app.inject({ method: 'GET', url: '/health' });
     await app.inject({ method: 'GET', url: '/health' });

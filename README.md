@@ -44,8 +44,12 @@ cp connector.config.example.yml connector.config.yml
 # Development
 npm run dev
 
-# Production (Docker)
+# Production (Docker, HTTPS)
+# Before starting: set CONNECTOR_DOMAIN in .env and point that DNS name at this host.
 docker compose up -d
+
+# Verify the public, TLS-protected endpoint
+curl -fsS https://"$CONNECTOR_DOMAIN"/health
 
 # Production (Node)
 npm run build && npm start
@@ -72,13 +76,20 @@ All endpoints (except `/health`) require an `X-API-Key` header.
 
 ### `GET /health`
 
-Returns service status, database connectivity, and whether the configured inventory
-resource can be queried. The resource check is cached briefly to keep health checks
-lightweight; a failed mapping check returns HTTP 503 and includes the operator-facing
-database error in `resourceError`.
+Returns service status, database connectivity, whether the configured inventory
+resource can be queried, and audit-log persistence. The resource check is cached
+briefly to keep health checks lightweight. A failed mapping check or an enabled audit
+log that cannot write, rotate, or prune returns HTTP 503 with an operator-facing error.
 
 ```json
-{ "status": "ok", "version": "1.0.0", "database": "connected", "resources": "ok", "uptime": 42 }
+{
+  "status": "ok",
+  "version": "1.0.0",
+  "database": "connected",
+  "resources": "ok",
+  "audit": "ok",
+  "uptime": 42
+}
 ```
 
 ### `GET /inventory`
@@ -189,6 +200,8 @@ audit:
 
 resources:
   inventory:
+    # PostgreSQL schema. Omit to use public.
+    schema: 'public'
     table: 'Car'
     baseFilter: 'published = true AND "deletedAt" IS NULL'
     idColumn: 'id'
@@ -203,6 +216,9 @@ resources:
       currency: "'KRW'" # Literal value (single quotes)
       category: "'car'"
       status: 'status' # Leave unmapped only when every listing is Active
+      # Optional: one URL, a PostgreSQL text[] value, or a JSON array of URL strings.
+      # Row images come first, followed by images from relations below.
+      images: 'image_urls'
 
     # Source-system values for Kasbly's accepted status tokens.
     # Defaults accept ACTIVE, DRAFT, RESERVED, SOLD, and EXPIRED (case-insensitive).
@@ -239,6 +255,7 @@ resources:
     # Related tables fetched per item
     relations:
       images:
+        schema: 'public'
         table: 'Image'
         foreignKey: '"carId"'
         referenceKey: 'id'
@@ -247,6 +264,7 @@ resources:
         filter: "type = 'gallery' OR type = 'featured'"
         orderBy: { column: 'position', direction: 'asc' } # Stable image order
       features:
+        schema: 'public'
         table: 'CarFeatures'
         foreignKey: '"carId"'
         referenceKey: 'id'
@@ -304,15 +322,34 @@ under `statusValues.SOLD`.
 | `DB_PASSWORD`       | Yes      | Database password                                             |
 | `DB_SSL_CA`         | No       | PEM CA bundle referenced by `database.sslCa` for a private CA |
 | `CONNECTOR_API_KEY` | Yes      | API key shared with Kasbly                                    |
+| `CONNECTOR_DOMAIN`  | Docker   | Public DNS name used by the bundled HTTPS proxy               |
 | `CONFIG_PATH`       | No       | Config file path (default: `./connector.config.yml`)          |
 
-## Docker Deployment
+## Docker HTTPS Deployment
+
+The bundled Compose deployment is the supported production path. It includes Caddy, which
+terminates HTTPS, automatically obtains and renews a publicly trusted certificate, and proxies
+requests to the connector over an internal Docker network. The connector itself is not exposed on
+the host, so Kasbly must use the HTTPS URL.
+
+1. Create a public DNS `A` (and, when applicable, `AAAA`) record for the hostname you will use,
+   pointing to this server. Allow inbound TCP ports 80 and 443; Caddy uses port 80 to complete the
+   initial certificate challenge and redirects users to HTTPS.
+2. Set `CONNECTOR_DOMAIN` in `.env` to that hostname, for example
+   `CONNECTOR_DOMAIN=connector.merchant.example`.
+3. Keep `server.trustedProxies: '172.30.0.2'` in `connector.config.yml`. That is the fixed address
+   of the bundled Caddy container, so client IP forwarding remains trusted only from the proxy.
+4. Start the deployment and verify the exact URL to enter in Kasbly Cloud:
 
 ```bash
 docker compose up -d
+curl -fsS https://"$CONNECTOR_DOMAIN"/health
 ```
 
-The `docker-compose.yml` mounts `connector.config.yml` as read-only and persists audit logs in a volume. The health check hits `GET /health` every 30 seconds.
+The response must report a healthy connector before using the URL in Kasbly. Caddy stores its
+certificate state in named Docker volumes, so renewal survives container replacement. The
+`docker-compose.yml` mounts `connector.config.yml` as read-only and persists audit logs in a
+volume; its internal health check hits `GET /health` every 30 seconds.
 
 ## Security
 
@@ -324,13 +361,12 @@ The `docker-compose.yml` mounts `connector.config.yml` as read-only and persists
 
 ### Client IP and trusted proxies
 
-The connector does not trust `X-Forwarded-For`/`X-Real-IP` headers by default. Since it is
-merchant-self-hosted and typically reachable directly (no bundled reverse proxy), honoring
-forwarded headers unconditionally would let a caller spoof its IP on every request — defeating the
-rate limiter (a fresh header value lands in a fresh bucket) and forging the IP written to the audit
-log. Rate limiting and audit logging both key on the real socket peer IP unless `server.trustedProxies`
-is set to a comma-separated list of trusted proxy IPs/CIDRs, in which case forwarded headers are
-honored only when the direct connection actually comes from one of those addresses.
+The connector does not trust `X-Forwarded-For`/`X-Real-IP` headers unless
+`server.trustedProxies` is set. The bundled Docker HTTPS deployment sets this to Caddy's fixed
+internal address (`172.30.0.2`), so rate limiting and audit logging use the real client IP only for
+requests that Caddy forwarded. If you use a different proxy topology, replace that value with only
+the direct proxy IPs/CIDRs; do not use a broad network range and never trust forwarded headers for
+a directly exposed connector.
 
 ## Development
 

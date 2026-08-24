@@ -54,6 +54,9 @@ export const INVENTORY_STATUSES = ['ACTIVE', 'DRAFT', 'RESERVED', 'SOLD', 'EXPIR
 
 export type InventoryStatus = (typeof INVENTORY_STATUSES)[number];
 
+/** A safe fallback for source statuses which have not been explicitly mapped. */
+export type UnknownStatusPolicy = Exclude<InventoryStatus, 'ACTIVE'>;
+
 export type StatusValuesConfig = Partial<Record<InventoryStatus, string[]>>;
 
 export interface RelationFieldsConfig {
@@ -66,6 +69,8 @@ export interface RelationOrderByConfig {
 }
 
 export interface RelationConfig {
+  /** PostgreSQL schema containing this relation. Defaults to the public schema. */
+  schema?: string;
   table: string;
   foreignKey: string;
   referenceKey: string;
@@ -77,6 +82,8 @@ export interface RelationConfig {
 }
 
 export interface InventoryResourceConfig {
+  /** PostgreSQL schema containing the inventory table. Defaults to the public schema. */
+  schema?: string;
   table: string;
   baseFilter?: string;
   idColumn: string;
@@ -84,6 +91,8 @@ export interface InventoryResourceConfig {
   fields: Record<string, string>;
   /** Values used by the source system for each Kasbly inventory status. */
   statusValues?: StatusValuesConfig;
+  /** Non-sellable status assigned when a source value is not in statusValues. */
+  unknownStatusPolicy?: UnknownStatusPolicy;
   attributes?: Record<string, string>;
   searchableColumns?: string[];
   filterableColumns?: Record<string, FilterableColumnConfig>;

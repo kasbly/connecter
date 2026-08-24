@@ -34,6 +34,11 @@ const FIELD_PATTERNS: { target: string; patterns: RegExp[]; type: 'field' | 'att
     patterns: [/^description$/i, /^desc$/i, /^details$/i, /^body$/i],
     type: 'field',
   },
+  {
+    target: 'images',
+    patterns: [/^images?$/i, /^image_?urls?$/i, /^photos?$/i, /^photo_?urls?$/i],
+    type: 'field',
+  },
 ];
 
 // Attribute patterns — more relaxed matching

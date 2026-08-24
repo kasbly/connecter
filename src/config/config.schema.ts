@@ -67,8 +67,16 @@ const filterableColumnSchema = z.object({
   type: z.enum(['string', 'number', 'gte', 'lte']),
 });
 
+// PostgreSQL identifiers are passed to Knex as identifiers rather than SQL fragments.
+// Keep schemas and tables as separate values so a qualified name can never be treated as
+// one table identifier (for example, `catalog.products`).
+const postgresIdentifierSchema = z
+  .string()
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'must be a PostgreSQL identifier');
+
 const relationSchema = z.object({
-  table: z.string().min(1),
+  schema: postgresIdentifierSchema.default('public'),
+  table: postgresIdentifierSchema,
   foreignKey: z.string().min(1),
   referenceKey: z.string().min(1),
   fields: z.record(z.string(), z.string()),
@@ -84,7 +92,8 @@ const relationSchema = z.object({
 });
 
 const inventoryResourceSchema = z.object({
-  table: z.string().min(1),
+  schema: postgresIdentifierSchema.default('public'),
+  table: postgresIdentifierSchema,
   baseFilter: z.string().optional(),
   idColumn: z.string().min(1),
   updatedAtColumn: z.string().optional(),
@@ -104,6 +113,9 @@ const inventoryResourceSchema = z.object({
       EXPIRED: z.array(z.string().min(1)).min(1).default(defaultStatusValues.EXPIRED),
     })
     .default(defaultStatusValues),
+  // New source-system values must never become sellable without an explicit
+  // mapping. DRAFT is the conservative default for existing configurations.
+  unknownStatusPolicy: z.enum(['DRAFT', 'RESERVED', 'SOLD', 'EXPIRED']).default('DRAFT'),
   attributes: z.record(z.string(), z.string()).optional(),
   searchableColumns: z.array(z.string()).optional(),
   filterableColumns: z.record(z.string(), filterableColumnSchema).optional(),

@@ -1,0 +1,3 @@
+{$CONNECTOR_DOMAIN} {
+	reverse_proxy connector:4000
+}

@@ -29,6 +29,7 @@ export interface QueryResult {
 }
 
 export interface RelationQuery {
+  schema?: string;
   table: string;
   foreignKey: string;
   parentIds: (string | number)[];
@@ -59,6 +60,7 @@ export interface DatabaseAdapter {
     sort: SortOptions,
     baseFilter?: string,
     selectColumns?: string[],
+    schema?: string,
   ): Promise<QueryResult>;
   queryById(
     table: string,
@@ -66,6 +68,7 @@ export interface DatabaseAdapter {
     id: string,
     baseFilter?: string,
     selectColumns?: string[],
+    schema?: string,
   ): Promise<Record<string, unknown> | null>;
   queryRelation(query: RelationQuery): Promise<Map<string | number, Record<string, unknown>[]>>;
   healthCheck(): Promise<boolean>;

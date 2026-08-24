@@ -3,6 +3,7 @@ import { parse } from 'dotenv';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as yaml from 'js-yaml';
 import {
   FIELD_MAPPING_TARGETS,
   backupPrivateFile,
@@ -65,6 +66,13 @@ describe('getFieldMappingPrompt', () => {
     expect(getFieldMappingPrompt(field, ['id']).choices.map((choice) => choice.name)).not.toContain(
       'Use a fixed value for every row',
     );
+  });
+
+  it('explains the accepted image formats with a sample', () => {
+    const prompt = getFieldMappingPrompt('images', ['image_urls']);
+
+    expect(prompt.message).toContain('PostgreSQL text array');
+    expect(prompt.message).toContain('https://example.com/photo.jpg');
   });
 });
 
@@ -215,10 +223,11 @@ describe('runWizard', () => {
       '\0unmapped',
       '\0unmapped',
       'description',
+      '\0unmapped',
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
-    for (const answer of ['database.example.com', '5432', 'catalog', 'reader']) {
+    for (const answer of ['database.example.com', '5432', 'catalog', 'reader', 'merchant_data']) {
       promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
     }
     promptMocks.password.mockResolvedValueOnce('p@ss#word');
@@ -279,9 +288,170 @@ describe('runWizard', () => {
         join(directory, '.env'),
       );
       expect(config.resources.inventory.fields.price).toBe('"price"');
+      expect(config.resources.inventory.schema).toBe('merchant_data');
+      expect(config.resources.inventory.relations?.images?.schema).toBe('merchant_data');
+      expect(introspectionMocks.introspectDatabase).toHaveBeenCalledWith(
+        expect.objectContaining({ schema: 'merchant_data' }),
+      );
       expect(buildQuery({ sortBy: 'price' }, config.resources.inventory).sort.column).toBe(
         config.resources.inventory.fields.price,
       );
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('removes deselected inventory mappings when editing an existing configuration', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), { destroy: vi.fn().mockResolvedValue(undefined) });
+
+    vi.resetAllMocks();
+    writeFileSync(
+      join(directory, 'connector.config.yml'),
+      [
+        'version: 1',
+        'server:',
+        '  port: 4100',
+        '  host: 0.0.0.0',
+        '  trustedProxies: 10.0.0.0/8',
+        'auth:',
+        '  apiKeys:',
+        '    - key: ${CONNECTOR_API_KEY}',
+        '      label: kasbly-production',
+        'database:',
+        '  type: postgres',
+        '  host: ${DB_HOST}',
+        '  port: 5432',
+        '  database: ${DB_NAME}',
+        '  user: ${DB_USER}',
+        '  password: ${DB_PASSWORD}',
+        '  ssl: false',
+        'resources:',
+        '  inventory:',
+        '    schema: merchant_data',
+        '    table: products',
+        '    baseFilter: "published = true AND deleted_at IS NULL"',
+        '    idColumn: id',
+        '    fields:',
+        '      title: title',
+        '      price: price',
+        '      currency: currency',
+        '      description: description',
+        '    attributes:',
+        '      legacy_attribute: legacy_attribute',
+        '    searchableColumns: [title, description]',
+        '    filterableColumns:',
+        '      legacy_attribute: { column: legacy_attribute, type: string }',
+        '    relations:',
+        '      images:',
+        '        schema: merchant_data',
+        '        table: product_images',
+        '        foreignKey: product_id',
+        '        referenceKey: id',
+        '        fields: { url: url }',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(directory, '.env'),
+      'DB_HOST=database.example.com\nDB_NAME=catalog\nDB_USER=reader\nDB_PASSWORD=p@ss#word\nCONNECTOR_API_KEY=kc_existing\n',
+    );
+
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    for (const answer of ['database.example.com', '5432', 'catalog', 'reader', 'merchant_data']) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.confirm
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false);
+    promptMocks.checkbox
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            rowCount: 100,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'published', type: 'boolean', nullable: false, isPrimaryKey: false },
+              { name: 'deleted_at', type: 'timestamp', nullable: true, isPrimaryKey: false },
+              { name: 'legacy_attribute', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+          {
+            name: 'product_images',
+            rowCount: 200,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'product_id', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [
+          {
+            fromTable: 'product_images',
+            fromColumn: 'product_id',
+            toTable: 'products',
+            toColumn: 'id',
+          },
+        ],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      const generated = yaml.load(
+        readFileSync(join(directory, 'connector.config.yml'), 'utf-8'),
+      ) as {
+        server: { trustedProxies?: string };
+        resources: { inventory: Record<string, unknown> };
+      };
+      const inventory = generated.resources.inventory;
+      expect(
+        loadExistingSetupConfig(join(directory, 'connector.config.yml'), join(directory, '.env')),
+      ).toMatchObject({ resources: { inventory: { fields: { title: '"title"' } } } });
+      expect(generated.server.trustedProxies).toBe('10.0.0.0/8');
+      expect(inventory.fields).toEqual({
+        externalId: '"id"',
+        title: '"title"',
+        price: '"price"',
+        currency: '"currency"',
+      });
+      expect(inventory).not.toHaveProperty('baseFilter');
+      expect(inventory).not.toHaveProperty('attributes');
+      expect(inventory).not.toHaveProperty('searchableColumns');
+      expect(inventory).not.toHaveProperty('filterableColumns');
+      expect(inventory).not.toHaveProperty('relations');
     } finally {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });

@@ -4,6 +4,7 @@ import {
   getRequiredColumns,
   getSourceStatusValues,
   mapRowToInventoryItem,
+  normalizeImageUrls,
   resolveInventoryStatus,
 } from '../field-mapper.js';
 import type { InventoryResourceConfig } from '../../config/config.types.js';
@@ -139,6 +140,30 @@ describe('mapRowToInventoryItem', () => {
     ).toBe('ACTIVE');
   });
 
+  it('uses a non-sellable fallback for new source statuses until they are mapped', () => {
+    const config: InventoryResourceConfig = {
+      ...baseConfig,
+      fields: { ...baseConfig.fields, status: 'availability' },
+      statusValues: { ACTIVE: ['for_sale'], SOLD: ['sold_out'] },
+      unknownStatusPolicy: 'EXPIRED',
+    };
+
+    expect(
+      mapRowToInventoryItem(
+        { id: '1', title: 'Test', price: 100, availability: 'discontinued' },
+        config,
+        new Map(),
+      ).status,
+    ).toBe('EXPIRED');
+    expect(
+      mapRowToInventoryItem(
+        { id: '2', title: 'Test', price: 100, availability: 'backorder' },
+        { ...config, unknownStatusPolicy: undefined },
+        new Map(),
+      ).status,
+    ).toBe('DRAFT');
+  });
+
   it('uses the documented case-insensitive defaults for canonical status values', () => {
     expect(resolveInventoryStatus('sold', undefined)).toBe('SOLD');
     expect(getSourceStatusValues('SOLD', undefined)).toEqual(['SOLD', 'sold']);
@@ -166,6 +191,53 @@ describe('mapRowToInventoryItem', () => {
     const row = { id: '123', title: 'Test', price: 100 };
     const result = mapRowToInventoryItem(row, configWithRelations, relationData);
     expect(result.images).toEqual(['http://img1.jpg', 'http://img2.jpg']);
+  });
+
+  it('normalizes a single URL, PostgreSQL array, and JSON array from the inventory row', () => {
+    expect(normalizeImageUrls(' https://example.com/primary.jpg ')).toEqual([
+      'https://example.com/primary.jpg',
+    ]);
+    expect(
+      normalizeImageUrls(['https://example.com/one.jpg', '', 'https://example.com/two.jpg']),
+    ).toEqual(['https://example.com/one.jpg', 'https://example.com/two.jpg']);
+    expect(
+      normalizeImageUrls('["https://example.com/one.jpg", "https://example.com/two.jpg"]'),
+    ).toEqual(['https://example.com/one.jpg', 'https://example.com/two.jpg']);
+  });
+
+  it('places inventory-row images before related-table images', () => {
+    const config: InventoryResourceConfig = {
+      ...baseConfig,
+      fields: { ...baseConfig.fields, images: 'image_urls' },
+      relations: {
+        images: {
+          table: 'Image',
+          foreignKey: 'carId',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+        },
+      },
+    };
+    const relationData = new Map([
+      ['images', new Map([['123', [{ url: 'https://example.com/relation.jpg' }]]])],
+    ]);
+
+    const result = mapRowToInventoryItem(
+      {
+        id: '123',
+        title: 'Test',
+        price: 100,
+        image_urls: '["https://example.com/primary.jpg"]',
+      },
+      config,
+      relationData,
+    );
+
+    expect(result.images).toEqual([
+      'https://example.com/primary.jpg',
+      'https://example.com/relation.jpg',
+    ]);
   });
 
   it('groups relation rows by the configured parent reference key', () => {

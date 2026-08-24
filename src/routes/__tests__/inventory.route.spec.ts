@@ -73,6 +73,7 @@ describe('inventory routes', () => {
         description: 'description',
         currency: "'KRW'",
         category: "'car'",
+        status: "'ACTIVE'",
       },
       attributes: { makeEn: 'makeEn', year: 'year' },
       relations: {

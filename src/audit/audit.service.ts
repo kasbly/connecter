@@ -1,5 +1,14 @@
 import { existsSync, mkdirSync } from 'node:fs';
-import { appendFile, open, readdir, rename, stat, unlink } from 'node:fs/promises';
+import {
+  appendFile,
+  open,
+  readFile,
+  readdir,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, join, basename } from 'node:path';
 import type { FastifyBaseLogger } from 'fastify';
 import type { AuditConfig } from '../config/config.types.js';
@@ -32,12 +41,23 @@ export interface AuditQueryOptions {
   since?: string;
 }
 
+export interface AuditHealth {
+  enabled: boolean;
+  ok: boolean;
+  lastSuccessfulAppendAt?: string;
+  error?: string;
+}
+
 export class AuditService {
   private readonly config: AuditConfig;
   private readonly logger?: Pick<FastifyBaseLogger, 'warn'>;
   private writeQueue: Promise<void> = Promise.resolve();
   private lastPruneMs = 0;
   private hasWarnedAboutRotationTruncation = false;
+  private lastSuccessfulAppendAt: string | undefined;
+  private writeError: string | undefined;
+  private rotationError: string | undefined;
+  private pruneError: string | undefined;
 
   constructor(config: AuditConfig, logger?: Pick<FastifyBaseLogger, 'warn'>) {
     this.config = config;
@@ -58,8 +78,11 @@ export class AuditService {
         await this.rotateIfNeeded();
         const line = JSON.stringify(entry) + '\n';
         await appendFile(this.config.filePath, line, 'utf-8');
+        this.lastSuccessfulAppendAt = new Date().toISOString();
+        this.writeError = undefined;
       })
       .catch((error: unknown) => {
+        this.writeError = errorMessage(error);
         this.logger?.warn(
           { err: error, filePath: this.config.filePath },
           'Failed to append audit log',
@@ -69,6 +92,20 @@ export class AuditService {
 
   async flush(): Promise<void> {
     await this.writeQueue;
+  }
+
+  getHealth(): AuditHealth {
+    if (!this.config.enabled) return { enabled: false, ok: true };
+
+    const error = this.writeError ?? this.rotationError ?? this.pruneError;
+    return {
+      enabled: true,
+      ok: error === undefined,
+      ...(this.lastSuccessfulAppendAt
+        ? { lastSuccessfulAppendAt: this.lastSuccessfulAppendAt }
+        : {}),
+      ...(error ? { error } : {}),
+    };
   }
 
   async query(
@@ -226,25 +263,37 @@ export class AuditService {
 
         await rename(this.config.filePath, join(dir, `${base}.1`));
       }
-    } catch {
-      // Rotation failures must not prevent audit appends.
+      this.rotationError = undefined;
+    } catch (error) {
+      // Rotation failures must not prevent audit appends, but readiness must surface them.
+      if (isMissingFileError(error)) {
+        // There is nothing to rotate until the first append creates the file.
+        this.rotationError = undefined;
+      } else {
+        this.rotationError = errorMessage(error);
+        this.logger?.warn(
+          { err: error, filePath: this.config.filePath },
+          'Failed to rotate audit log',
+        );
+      }
     }
 
     // Retention is time-based, so it must not depend on a size-triggered rotation.
     const now = Date.now();
     if (now - this.lastPruneMs > 60 * 60 * 1000) {
       this.lastPruneMs = now;
-      await this.pruneOldFiles();
+      await this.pruneExpiredLogs();
     }
   }
 
-  private async pruneOldFiles(): Promise<void> {
+  private async pruneExpiredLogs(): Promise<void> {
     const dir = dirname(this.config.filePath);
     const base = basename(this.config.filePath);
     const maxAgeMs = this.config.retentionDays * 24 * 60 * 60 * 1000;
     const now = Date.now();
 
     try {
+      await this.pruneActiveFile(now, maxAgeMs);
       const files = await readdir(dir);
       for (const file of files) {
         if (file.startsWith(base + '.') && file !== base) {
@@ -255,10 +304,51 @@ export class AuditService {
           }
         }
       }
-    } catch {
-      // Silently ignore prune errors
+      this.pruneError = undefined;
+    } catch (error) {
+      this.pruneError = errorMessage(error);
+      this.logger?.warn(
+        { err: error, filePath: this.config.filePath },
+        'Failed to prune audit logs',
+      );
     }
   }
+
+  private async pruneActiveFile(now: number, maxAgeMs: number): Promise<void> {
+    const fileStats = await stat(this.config.filePath).catch((error: unknown) => {
+      if (isMissingFileError(error)) return undefined;
+      throw error;
+    });
+    if (!fileStats || !fileStats.isFile()) return;
+
+    let content: string;
+    content = await readFile(this.config.filePath, 'utf8');
+    const lines = content.split('\n');
+    const retainedLines = lines.filter((line) => !this.isExpiredAuditEntry(line, now, maxAgeMs));
+    if (retainedLines.length === lines.length) return;
+
+    const temporaryPath = join(
+      dirname(this.config.filePath),
+      `.${basename(this.config.filePath)}.retention-${process.pid}-${Date.now()}`,
+    );
+    await writeFile(temporaryPath, retainedLines.join('\n'), { encoding: 'utf8', flag: 'w' });
+    await rename(temporaryPath, this.config.filePath);
+  }
+
+  private isExpiredAuditEntry(line: string, now: number, maxAgeMs: number): boolean {
+    if (!line) return false;
+    try {
+      const timestamp = Date.parse((JSON.parse(line) as AuditEntry).ts);
+      return !Number.isNaN(timestamp) && now - timestamp > maxAgeMs;
+    } catch {
+      // Preserve malformed lines: they cannot be safely classified by age.
+      return false;
+    }
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isMissingFileError(error: unknown): boolean {
