@@ -150,6 +150,14 @@ describe('mergeEnvironmentFile', () => {
       "CONNECTOR_PORT=4100\nCUSTOM_SETTING=keep\nDB_HOST='database.internal'\nCONNECTOR_API_KEY='kc_existing'\n",
     );
   });
+
+  it('removes a retired pending key without changing unrelated operator settings', () => {
+    expect(
+      mergeEnvironmentFile('CUSTOM_SETTING=keep\nCONNECTOR_API_KEY_PENDING=kc_pending\n', {
+        CONNECTOR_API_KEY_PENDING: null,
+      }),
+    ).toBe('CUSTOM_SETTING=keep\n');
+  });
 });
 
 describe('loadExistingSetupConfig', () => {

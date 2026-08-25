@@ -137,6 +137,7 @@ export async function runWizard(): Promise<void> {
     : undefined;
   const existingEnv = hasExistingEnv ? parse(readFileSync(envPath, 'utf-8')) : {};
   const existingApiKey = existingEnv['CONNECTOR_API_KEY'];
+  const existingPendingApiKey = existingEnv['CONNECTOR_API_KEY_PENDING'];
 
   // Step 1: Database Connection
   console.log('Step 1: Database Connection');
@@ -517,26 +518,54 @@ export async function runWizard(): Promise<void> {
 
   // Step 6: Security
   console.log('\nStep 6: Security');
-  const generateKey = await confirm(
-    existingApiKey
-      ? {
-          message:
-            'Generate a new API key? This invalidates the key currently configured in Kasbly; update it in the Kasbly dashboard.',
-          default: false,
-        }
-      : { message: 'Generate API key?', default: true },
-  );
+  let currentApiKey: string;
+  let pendingApiKey: string | undefined = existingPendingApiKey;
+  let retirePreviousKey = false;
 
-  const apiKey = generateKey
-    ? `kc_${randomBytes(24).toString('hex')}`
-    : (existingApiKey ?? (await input({ message: 'Enter your API key:' })));
+  if (existingApiKey && existingPendingApiKey) {
+    retirePreviousKey = await confirm({
+      message:
+        'Retire the previous API key? Do this only after Kasbly has tested and switched to the staged key.',
+      default: false,
+    });
+    currentApiKey = retirePreviousKey ? existingPendingApiKey : existingApiKey;
+    if (retirePreviousKey) {
+      pendingApiKey = undefined;
+      console.log(
+        '✓ Retired the previous API key. The connector will accept only the current key.',
+      );
+    } else {
+      console.log(
+        '✓ Rotation remains staged. The connector accepts both current and pending keys.',
+      );
+    }
+  } else {
+    const generateKey = await confirm(
+      existingApiKey
+        ? {
+            message: 'Generate and stage a replacement API key for zero-downtime rotation?',
+            default: false,
+          }
+        : { message: 'Generate API key?', default: true },
+    );
+    const generatedOrEnteredKey = generateKey
+      ? `kc_${randomBytes(24).toString('hex')}`
+      : (existingApiKey ?? (await input({ message: 'Enter your API key:' })));
 
-  console.log(`✓ API key: ${apiKey}`);
-  console.log(
-    generateKey && existingApiKey
-      ? '⚠ This replaces the existing key. Update it in the Kasbly dashboard before restarting.\n'
-      : '⚠ Share this key with Kasbly only. Store it in your .env file.\n',
-  );
+    currentApiKey = existingApiKey ?? generatedOrEnteredKey;
+    if (existingApiKey && generateKey) pendingApiKey = generatedOrEnteredKey;
+
+    if (pendingApiKey) {
+      // Deliberately reveal only the new secret, never the retained current one.
+      console.log(`✓ New staged API key: ${pendingApiKey}`);
+      console.log(
+        '⚠ Add and test this key in Kasbly, switch Kasbly to it, then rerun setup and choose to retire the previous key.\n',
+      );
+    } else {
+      console.log(`✓ API key: ${currentApiKey}`);
+      console.log('⚠ Share this key with Kasbly only. Store it in your .env file.\n');
+    }
+  }
 
   // Build config object
   // Everything below is selected by this wizard, so rebuild it instead of
@@ -561,7 +590,12 @@ export async function runWizard(): Promise<void> {
     version: existingConfig?.version ?? 1,
     server: existingConfig?.server ?? { port: 4000, host: '0.0.0.0' },
     auth: {
-      apiKeys: [{ key: '${CONNECTOR_API_KEY}', label: 'kasbly-production' }],
+      apiKeys: [
+        { key: '${CONNECTOR_API_KEY}', label: 'kasbly-current' },
+        ...(pendingApiKey
+          ? [{ key: '${CONNECTOR_API_KEY_PENDING}', label: 'kasbly-pending' }]
+          : []),
+      ],
     },
     database: {
       ...existingConfig?.database,
@@ -650,7 +684,8 @@ export async function runWizard(): Promise<void> {
     DB_USER: dbUser,
     DB_PASSWORD: dbPassword,
     ...(tls.ca ? { DB_SSL_CA: tls.ca } : {}),
-    CONNECTOR_API_KEY: apiKey,
+    CONNECTOR_API_KEY: currentApiKey,
+    CONNECTOR_API_KEY_PENDING: pendingApiKey ?? null,
   });
   writePrivateFile(envPath, envContent);
   console.log(`✅ Environment saved to ${envPath}`);
@@ -675,13 +710,20 @@ export function backupPrivateFile(path: string, timestamp: Date = new Date()): s
 }
 
 /** Update wizard-owned env vars without dropping unrelated operator configuration. */
-export function mergeEnvironmentFile(existing: string, values: Record<string, string>): string {
+export function mergeEnvironmentFile(
+  existing: string,
+  values: Record<string, string | null>,
+): string {
   let result = existing;
   for (const [name, value] of Object.entries(values)) {
+    const pattern = new RegExp(`^\\s*${name}=.*(?:\\n|$)`, 'm');
+    if (value === null) {
+      result = result.replace(pattern, '');
+      continue;
+    }
     const line = `${name}=${serializeEnvValue(value)}`;
-    const pattern = new RegExp(`^\\s*${name}=.*$`, 'm');
     result = pattern.test(result)
-      ? result.replace(pattern, line)
+      ? result.replace(pattern, `${line}\n`)
       : `${result}${result.endsWith('\n') || !result ? '' : '\n'}${line}\n`;
   }
   return result.endsWith('\n') ? result : `${result}\n`;
