@@ -73,6 +73,14 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     )
     .map((key) => key.slice('filter.'.length));
 
+  // A free-text search without configured columns used to be silently omitted,
+  // which made a caller mistake an unfiltered catalog page for search results.
+  // Keep this capability signal in the existing response contract used for
+  // unsupported configured filters.
+  if (search?.trim() && (config.searchableColumns?.length ?? 0) === 0) {
+    ignoredFilters.push('search');
+  }
+
   if (search && search.length > MAX_SEARCH_LENGTH) {
     throw new QueryValidationError(
       `Query parameter "search" must not exceed ${MAX_SEARCH_LENGTH} characters`,

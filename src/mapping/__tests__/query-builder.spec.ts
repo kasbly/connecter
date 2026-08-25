@@ -66,6 +66,16 @@ describe('buildQuery', () => {
     expect(searchConditions[0]!.value).toBe('Hyundai');
   });
 
+  it('reports a non-empty search when no searchable columns are configured', () => {
+    const result = buildQuery(
+      { search: 'iPhone' },
+      { ...baseConfig, searchableColumns: undefined },
+    );
+
+    expect(result.conditions).toEqual([]);
+    expect(result.ignoredFilters).toEqual(['search']);
+  });
+
   it('rejects search values longer than 200 characters', () => {
     expect(() => buildQuery({ search: 'a'.repeat(201) }, baseConfig)).toThrow(
       expect.objectContaining({

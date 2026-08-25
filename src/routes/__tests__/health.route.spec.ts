@@ -158,6 +158,50 @@ describe('health route', () => {
     await app.close();
   });
 
+  it('reports a field-specific error when a mapped sample cannot satisfy the wire contract', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [{ id: '1', title: 'Test', price: 'SAR 1,250' }],
+      total: 1,
+    });
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      resources: 'misconfigured',
+      resourceError: expect.stringContaining('price'),
+    });
+    await app.close();
+  });
+
+  it('reports malformed configured image values from a sample row', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [
+        { id: '1', title: 'Test', price: 100, image_urls: '["https://example.com/a.jpg", 1]' },
+      ],
+      total: 1,
+    });
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        fields: { ...inventoryResource.fields, images: 'image_urls' },
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ resourceError: expect.stringContaining('images[1]') });
+    await app.close();
+  });
+
   it('caches a successful resource probe across health checks', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(true);

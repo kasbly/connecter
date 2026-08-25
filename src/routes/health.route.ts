@@ -8,8 +8,10 @@ import type { DatabaseAdapter } from '../db/adapter.interface.js';
 import {
   getRelationConfigs,
   getRequiredColumns,
+  mapRowToInventoryItem,
   resolveColumnValue,
   resolveInventoryStatus,
+  validateInventoryItemWireContract,
 } from '../mapping/field-mapper.js';
 
 let cachedVersion: string | null = null;
@@ -103,10 +105,10 @@ export async function probeInventoryResource(
     );
   }
 
-  await Promise.all(
+  const relationEntries = await Promise.all(
     getRelationConfigs(resourceConfig).map(async ([relationName, relationConfig]) => {
       try {
-        await dbAdapter.queryRelation({
+        const relationRows = await dbAdapter.queryRelation({
           ...((relationConfig.schema ?? resourceConfig.schema)
             ? { schema: relationConfig.schema ?? resourceConfig.schema }
             : {}),
@@ -116,6 +118,7 @@ export async function probeInventoryResource(
           fields: relationConfig.fields,
           filter: relationConfig.filter,
         });
+        return [relationName, relationRows] as const;
       } catch (error) {
         throw new Error(
           `Inventory relation "${relationName}" probe failed for table ` +
@@ -124,6 +127,22 @@ export async function probeInventoryResource(
       }
     }),
   );
+
+  // An empty catalog is valid, but a representative row must survive the
+  // exact mapping and JSON wire contract before the connector is healthy.
+  if (rows.length > 0) {
+    const relationData = new Map(relationEntries);
+    for (const row of rows) {
+      try {
+        validateInventoryItemWireContract(
+          mapRowToInventoryItem(row, resourceConfig, relationData),
+          getMappedImageValues(row, resourceConfig, relationData),
+        );
+      } catch (error) {
+        throw new Error(`Inventory resource probe failed for sample row: ${errorMessage(error)}`);
+      }
+    }
+  }
 
   const statusColumn = resourceConfig.fields['status'];
   if (!statusColumn) return [];
@@ -139,6 +158,26 @@ export async function probeInventoryResource(
       }),
     ),
   ).sort();
+}
+
+function getMappedImageValues(
+  row: Record<string, unknown>,
+  resourceConfig: InventoryResourceConfig,
+  relationData: Map<string, Map<string | number, Record<string, unknown>[]>>,
+): unknown[] {
+  const values: unknown[] = [];
+  const imageColumn = resourceConfig.fields['images'];
+  if (imageColumn) values.push(resolveColumnValue(row, imageColumn));
+
+  for (const [relationName, relationConfig] of getRelationConfigs(resourceConfig)) {
+    if (!relationConfig.imageUrlField) continue;
+    const referenceValue = resolveColumnValue(row, relationConfig.referenceKey);
+    const relationRows =
+      relationData.get(relationName)?.get(referenceValue as string | number) ?? [];
+    values.push(...relationRows.map((relationRow) => relationRow[relationConfig.imageUrlField!]));
+  }
+
+  return values;
 }
 
 export function createResourceHealthCheck(

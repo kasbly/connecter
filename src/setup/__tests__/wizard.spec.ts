@@ -18,6 +18,7 @@ import {
 } from '../wizard.js';
 import { runWizard } from '../wizard.js';
 import { buildQuery } from '../../mapping/query-builder.js';
+import { mapRowToInventoryItem } from '../../mapping/field-mapper.js';
 import { introspectDatabase } from '../introspect.js';
 
 const promptMocks = vi.hoisted(() => ({
@@ -47,6 +48,17 @@ describe('getFieldMappingPrompt', () => {
       value: 'product_title',
     });
     expect(prompt.choices).toContainEqual({ name: 'unit_price', value: 'unit_price' });
+  });
+
+  it('only offers numeric columns for price mappings', () => {
+    const prompt = getFieldMappingPrompt('price', [
+      { name: 'name', type: 'text' },
+      { name: 'formatted_price', type: 'varchar' },
+      { name: 'amount', type: 'numeric' },
+    ]);
+
+    expect(prompt.choices.map((choice) => choice.value)).toContain('amount');
+    expect(prompt.choices.map((choice) => choice.value)).not.toContain('formatted_price');
   });
 
   it.each(['currency', 'category', 'status'] as const)('offers a fixed value for %s', (field) => {
@@ -220,7 +232,12 @@ describe('runWizard', () => {
   it('writes a loadable config whose quoted fields support bare sortBy values', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
-    const db = Object.assign(vi.fn(), { destroy: vi.fn().mockResolvedValue(undefined) });
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
 
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
@@ -239,16 +256,19 @@ describe('runWizard', () => {
       promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
     }
     promptMocks.password.mockResolvedValueOnce('p@ss#word');
-    promptMocks.confirm
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true);
-    promptMocks.checkbox
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(['title', 'description'])
-      .mockResolvedValueOnce(['minPrice', 'maxPrice', 'currency'])
-      .mockResolvedValueOnce(['url']);
+    promptMocks.confirm.mockImplementation(({ message }) =>
+      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve([]);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title', 'description']);
+      }
+      if (message.startsWith('Which filters should be available')) {
+        return Promise.resolve(['minPrice', 'maxPrice', 'currency']);
+      }
+      return Promise.resolve(['url']);
+    });
     vi.mocked(introspectDatabase).mockResolvedValueOnce({
       db: db as never,
       result: {
@@ -274,10 +294,25 @@ describe('runWizard', () => {
               { name: 'sort_order', type: 'integer', nullable: false, isPrimaryKey: false },
             ],
           },
+          {
+            name: 'variant_images',
+            rowCount: 200,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'product_id', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
+            ],
+          },
         ],
         foreignKeys: [
           {
             fromTable: 'product_images',
+            fromColumn: 'product_id',
+            toTable: 'products',
+            toColumn: 'id',
+          },
+          {
+            fromTable: 'variant_images',
             fromColumn: 'product_id',
             toTable: 'products',
             toColumn: 'id',
@@ -297,7 +332,30 @@ describe('runWizard', () => {
       );
       expect(config.resources.inventory.fields.price).toBe('"price"');
       expect(config.resources.inventory.schema).toBe('merchant_data');
-      expect(config.resources.inventory.relations?.images?.schema).toBe('merchant_data');
+      expect(config.resources.inventory.relations?.product_images).toMatchObject({
+        schema: 'merchant_data',
+        imageUrlField: 'url',
+      });
+      expect(config.resources.inventory.relations?.variant_images).toMatchObject({
+        schema: 'merchant_data',
+        imageUrlField: 'url',
+      });
+      expect(
+        mapRowToInventoryItem(
+          { id: 'product-1', title: 'Product', price: 100, currency: 'SAR' },
+          config.resources.inventory,
+          new Map([
+            [
+              'product_images',
+              new Map([['product-1', [{ url: 'https://example.com/product.jpg' }]]]),
+            ],
+            [
+              'variant_images',
+              new Map([['product-1', [{ url: 'https://example.com/variant.jpg' }]]]),
+            ],
+          ]),
+        ).images,
+      ).toEqual(['https://example.com/product.jpg', 'https://example.com/variant.jpg']);
       expect(introspectionMocks.introspectDatabase).toHaveBeenCalledWith(
         expect.objectContaining({ schema: 'merchant_data' }),
       );
@@ -313,7 +371,13 @@ describe('runWizard', () => {
   it('removes deselected inventory mappings when editing an existing configuration', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
-    const db = Object.assign(vi.fn(), { destroy: vi.fn().mockResolvedValue(undefined) });
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
     vi.resetAllMocks();
     writeFileSync(
@@ -460,7 +524,11 @@ describe('runWizard', () => {
       expect(inventory).not.toHaveProperty('searchableColumns');
       expect(inventory).not.toHaveProperty('filterableColumns');
       expect(inventory).not.toHaveProperty('relations');
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining('No searchable columns are configured'),
+      );
     } finally {
+      consoleLog.mockRestore();
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
     }

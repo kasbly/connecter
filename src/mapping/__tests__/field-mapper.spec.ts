@@ -6,6 +6,7 @@ import {
   mapRowToInventoryItem,
   normalizeImageUrls,
   resolveInventoryStatus,
+  validateInventoryItemWireContract,
 } from '../field-mapper.js';
 import type { InventoryResourceConfig } from '../../config/config.types.js';
 
@@ -193,6 +194,40 @@ describe('mapRowToInventoryItem', () => {
     expect(result.images).toEqual(['http://img1.jpg', 'http://img2.jpg']);
   });
 
+  it('merges images from every named image relation', () => {
+    const configWithRelations: InventoryResourceConfig = {
+      ...baseConfig,
+      relations: {
+        product_images: {
+          table: 'ProductImage',
+          foreignKey: 'productId',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+        },
+        variant_images: {
+          table: 'VariantImage',
+          foreignKey: 'productId',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+        },
+      },
+    };
+    const relationData = new Map([
+      ['product_images', new Map([['123', [{ url: 'http://product.jpg' }]]])],
+      ['variant_images', new Map([['123', [{ url: 'http://variant.jpg' }]]])],
+    ]);
+
+    const result = mapRowToInventoryItem(
+      { id: '123', title: 'Test', price: 100 },
+      configWithRelations,
+      relationData,
+    );
+
+    expect(result.images).toEqual(['http://product.jpg', 'http://variant.jpg']);
+  });
+
   it('normalizes a single URL, PostgreSQL array, and JSON array from the inventory row', () => {
     expect(normalizeImageUrls(' https://example.com/primary.jpg ')).toEqual([
       'https://example.com/primary.jpg',
@@ -289,6 +324,62 @@ describe('mapRowToInventoryItem', () => {
     const row = { id: '123', title: 'Test', price: 100 };
     const result = mapRowToInventoryItem(row, configWithRelations, relationData);
     expect(result.attributes.features).toEqual(['ABS', 'Airbag']);
+  });
+});
+
+describe('validateInventoryItemWireContract', () => {
+  it('reports the mapped price field when JSON serialization turns NaN into null', () => {
+    expect(() =>
+      validateInventoryItemWireContract({
+        externalId: 'sku-1',
+        title: 'Coffee',
+        description: null,
+        price: Number.NaN,
+        currency: 'SAR',
+        category: '',
+        status: 'ACTIVE',
+        images: [],
+        attributes: {},
+        updatedAt: null,
+      }),
+    ).toThrow(/price/);
+  });
+
+  it('reports missing identifiers, titles, currencies, and invalid dates by field', () => {
+    expect(() =>
+      validateInventoryItemWireContract({
+        externalId: '',
+        title: '',
+        description: null,
+        price: 1,
+        currency: '',
+        category: '',
+        status: 'ACTIVE',
+        images: [],
+        attributes: {},
+        updatedAt: 'not-a-date',
+      }),
+    ).toThrow(/externalId.*title.*currency.*updatedAt/);
+  });
+
+  it('reports malformed image values even when mapping would otherwise discard them', () => {
+    expect(() =>
+      validateInventoryItemWireContract(
+        {
+          externalId: 'sku-1',
+          title: 'Coffee',
+          description: null,
+          price: 1,
+          currency: 'SAR',
+          category: '',
+          status: 'ACTIVE',
+          images: [],
+          attributes: {},
+          updatedAt: null,
+        },
+        ['["https://example.com/coffee.jpg", 42]'],
+      ),
+    ).toThrow(/images\[1\]/);
   });
 });
 

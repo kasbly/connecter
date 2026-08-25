@@ -5,6 +5,7 @@ import {
   type RelationConfig,
   type StatusValuesConfig,
 } from '../config/config.types.js';
+import { z } from 'zod';
 
 export interface ConnectorInventoryItem {
   externalId: string;
@@ -17,6 +18,90 @@ export interface ConnectorInventoryItem {
   images: string[];
   attributes: Record<string, unknown>;
   updatedAt: string | null;
+}
+
+/**
+ * Keep the standalone producer on the same strict inventory wire contract its
+ * consumers enforce. Validation happens after JSON serialization so values
+ * such as NaN cannot become a silent `null` on the wire.
+ */
+const connectorInventoryItemWireSchema = z
+  .object({
+    externalId: z.string().trim().min(1),
+    title: z.string().trim().min(1),
+    description: z.string().nullable(),
+    price: z.number().finite(),
+    currency: z.string().trim().min(1),
+    category: z.string(),
+    status: z.string(),
+    images: z.array(z.string().trim().min(1)),
+    attributes: z.record(z.string(), z.unknown()),
+    updatedAt: z
+      .string()
+      .refine((value) => Number.isFinite(Date.parse(value)), 'Invalid updatedAt date')
+      .nullable(),
+  })
+  .strict();
+
+function formatWireIssues(issues: z.core.$ZodIssue[]): string {
+  return issues
+    .map((issue) => `${issue.path.length ? issue.path.join('.') : 'response'}: ${issue.message}`)
+    .join('; ');
+}
+
+/** Validate one mapped item as it will actually be sent through JSON. */
+export function validateInventoryItemWireContract(
+  item: ConnectorInventoryItem,
+  mappedImageValues: unknown[] = [],
+): void {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(item);
+  } catch (error) {
+    throw new Error(`Inventory sample cannot be serialized: ${errorMessage(error)}`);
+  }
+
+  const parsed = connectorInventoryItemWireSchema.safeParse(JSON.parse(serialized) as unknown);
+  if (!parsed.success) {
+    throw new Error(
+      `Inventory sample violates wire contract: ${formatWireIssues(parsed.error.issues)}`,
+    );
+  }
+
+  const malformedImageFields = mappedImageValues.flatMap((value, index) =>
+    getMalformedImageValueErrors(
+      value,
+      `images${mappedImageValues.length > 1 ? `[${index}]` : ''}`,
+    ),
+  );
+  if (malformedImageFields.length > 0) {
+    throw new Error(`Inventory sample violates wire contract: ${malformedImageFields.join('; ')}`);
+  }
+}
+
+function getMalformedImageValueErrors(value: unknown, path: string): string[] {
+  if (value === null || value === undefined) return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((entry, index) =>
+      getMalformedImageValueErrors(entry, `${path}[${index}]`),
+    );
+  }
+  if (typeof value !== 'string') return [`${path}: expected a string or array of strings`];
+
+  const trimmed = value.trim();
+  if (!trimmed || !trimmed.startsWith('[')) return [];
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.flatMap((entry, index) => getMalformedImageValueErrors(entry, `${path}[${index}]`))
+      : [`${path}: JSON image value must be an array`];
+  } catch {
+    return [`${path}: invalid JSON image array`];
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 const DEFAULT_STATUS_VALUES: Required<StatusValuesConfig> = {

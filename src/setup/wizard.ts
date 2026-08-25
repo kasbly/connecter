@@ -27,6 +27,11 @@ import {
   suggestFilterableColumns,
   type FilterableColumnSuggestion,
 } from './suggest.js';
+import {
+  mapRowToInventoryItem,
+  resolveColumnValue,
+  validateInventoryItemWireContract,
+} from '../mapping/field-mapper.js';
 
 interface DatabaseTlsSettings {
   enabled: boolean;
@@ -56,6 +61,26 @@ interface FieldMappingPrompt {
   default: string;
 }
 
+interface MappingColumn {
+  name: string;
+  type: string;
+}
+
+function isCompatibleFieldColumn(field: FieldMappingTarget, type: string): boolean {
+  const normalizedType = type.trim().toLowerCase();
+  if (field === 'price') {
+    return /^(smallint|integer|bigint|decimal|numeric|real|double precision|money|float)/.test(
+      normalizedType,
+    );
+  }
+
+  if (field === 'images') {
+    return /(char|text|json|xml|array)/.test(normalizedType);
+  }
+
+  return /(char|text|json|xml|uuid|enum)/.test(normalizedType);
+}
+
 async function collectStatusValues(
   db: Awaited<ReturnType<typeof introspectDatabase>>['db'],
   table: string,
@@ -81,9 +106,15 @@ async function collectStatusValues(
 /** Build the selectable mapping choices for one standard inventory field. */
 export function getFieldMappingPrompt(
   field: FieldMappingTarget,
-  columnNames: string[],
+  columns: Array<string | MappingColumn>,
   suggestedColumn?: string,
 ): FieldMappingPrompt {
+  const columnNames = columns
+    .filter(
+      (column): column is string | MappingColumn =>
+        typeof column === 'string' || isCompatibleFieldColumn(field, column.type),
+    )
+    .map((column) => (typeof column === 'string' ? column : column.name));
   const choices: FieldMappingPrompt['choices'] = [
     { name: 'Do not map this field', value: UNMAPPED_FIELD_VALUE },
     ...(FIXED_VALUE_FIELDS.has(field)
@@ -101,7 +132,10 @@ export function getFieldMappingPrompt(
         ? 'Which column contains the images? (one URL, a PostgreSQL text array, or a JSON array; e.g. ["https://example.com/photo.jpg"])'
         : `Which column contains the ${field}?`,
     choices,
-    default: suggestedColumn ?? UNMAPPED_FIELD_VALUE,
+    default:
+      suggestedColumn && columnNames.includes(suggestedColumn)
+        ? suggestedColumn
+        : UNMAPPED_FIELD_VALUE,
   };
 }
 
@@ -248,7 +282,7 @@ export async function runWizard(): Promise<void> {
     const existingSelection = getExistingMappingSelection(existingMapping, allColumnNames);
     const prompt = getFieldMappingPrompt(
       field,
-      allColumnNames,
+      selectedTable.columns,
       existingSelection ?? suggestedColumn,
     );
     const selectedValue = await select(prompt);
@@ -348,6 +382,11 @@ export async function runWizard(): Promise<void> {
       })),
     });
   }
+  if (searchableColumns.length === 0) {
+    console.log(
+      'Warning: No searchable columns are configured. Free-text inventory searches will be reported as unsupported.',
+    );
+  }
 
   // Step 3c: Filterable Columns
   console.log('\nStep 3c: Filter Configuration');
@@ -429,11 +468,23 @@ export async function runWizard(): Promise<void> {
     const relTable = result.tables.find((t) => t.name === suggestion.table);
     if (!relTable) continue;
 
+    // Relation names are also the keys used to load relation rows at runtime. Keep
+    // a matching existing key when rerunning setup, but use the source table name
+    // for new image relations so accepting more than one cannot overwrite a
+    // previous image source.
+    const existingRelationEntry = Object.entries(
+      existingConfig?.resources.inventory.relations ?? {},
+    ).find(
+      ([, relation]) =>
+        relation.table === suggestion.table &&
+        unquoteIdentifier(relation.foreignKey) === suggestion.foreignKeyColumn,
+    );
+    const relationName = existingRelationEntry?.[0] ?? suggestion.table;
+    const existingRelation = existingRelationEntry?.[1];
+
     const addRelation = await confirm({
       message: `Add relation: ${suggestion.table} (${suggestion.relationType}, FK: ${suggestion.foreignKeyColumn})?`,
-      default:
-        Boolean(existingConfig?.resources.inventory.relations?.[suggestion.relationType]) ||
-        suggestion.confidence !== 'low',
+      default: Boolean(existingRelation) || suggestion.confidence !== 'low',
     });
 
     if (addRelation) {
@@ -454,12 +505,7 @@ export async function runWizard(): Promise<void> {
         choices: selectableColumns.map((col) => ({
           name: col.name,
           value: col.name,
-          checked:
-            Boolean(
-              existingConfig?.resources.inventory.relations?.[suggestion.relationType]?.fields[
-                col.name
-              ],
-            ) || col.name === defaultColumn?.name,
+          checked: Boolean(existingRelation?.fields[col.name]) || col.name === defaultColumn?.name,
         })),
       });
       const selectedColumnNames = new Set(selectedColumns);
@@ -491,9 +537,7 @@ export async function runWizard(): Promise<void> {
           const defaultDirection = /^is_?primary$/i.test(orderColumn.name) ? 'desc' : 'asc';
           const useOrder = await confirm({
             message: `Order images by ${orderColumn.name}?`,
-            default: Boolean(
-              existingConfig?.resources.inventory.relations?.[suggestion.relationType]?.orderBy,
-            ),
+            default: Boolean(existingRelation?.orderBy),
           });
           if (useOrder) {
             relation['orderBy'] = {
@@ -512,7 +556,7 @@ export async function runWizard(): Promise<void> {
         }
       }
 
-      relations[suggestion.relationType === 'images' ? 'images' : suggestion.table] = relation;
+      relations[relationName] = relation;
     }
   }
 
@@ -658,7 +702,7 @@ export async function runWizard(): Promise<void> {
       const relationFields = (relationConfig as { fields: Record<string, string> }).fields;
       const columnNames = Object.keys(relationFields);
       console.log(
-        `  ${relationName}: ${columnNames.length > 0 ? columnNames.join(', ') : '(none)'}`,
+        `  ${relationName} (${relationConfig.table}): ${columnNames.length > 0 ? columnNames.join(', ') : '(none)'}`,
       );
     }
   }
@@ -667,6 +711,38 @@ export async function runWizard(): Promise<void> {
     console.log(
       `\nInventory mapping changes:\n${formatInventoryDiff(existingInventory, config.resources.inventory)}`,
     );
+  }
+
+  // Validate a real mapped row before persisting a setup that would otherwise
+  // look healthy until Kasbly consumes it. Empty tables remain valid: there is
+  // no sample row to disprove the mapping yet.
+  try {
+    const sampleRow = await db.withSchema(selectedSchema).table(selectedTableName).first();
+    if (sampleRow) {
+      validateInventoryItemWireContract(
+        mapRowToInventoryItem(
+          sampleRow as Record<string, unknown>,
+          config.resources.inventory,
+          new Map(),
+        ),
+        config.resources.inventory.fields['images']
+          ? [
+              resolveColumnValue(
+                sampleRow as Record<string, unknown>,
+                config.resources.inventory.fields['images'],
+              ),
+            ]
+          : [],
+      );
+    }
+  } catch (error) {
+    console.error(
+      `Cannot save configuration: inventory sample violates the wire contract: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    await db.destroy();
+    return;
   }
 
   // Write config file
@@ -773,6 +849,10 @@ function getExistingMappingSelection(
   if (!value || value.startsWith("'")) return undefined;
   const unquoted = value.match(/^"((?:[^"]|"")*)"$/)?.[1]?.replaceAll('""', '"') ?? value;
   return columnNames.includes(unquoted) ? unquoted : undefined;
+}
+
+function unquoteIdentifier(value: string): string {
+  return value.match(/^"((?:[^"]|"")*)"$/)?.[1]?.replaceAll('""', '"') ?? value;
 }
 
 function getFixedConfigValue(value: string | undefined): string | undefined {
