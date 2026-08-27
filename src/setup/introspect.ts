@@ -105,9 +105,15 @@ export async function introspectDatabase(options: DbConnectOptions): Promise<{
 }
 
 function createDatabaseClient(options: DbConnectOptions): Knex {
+  // Pin the search path to the schema the operator selected so an unqualified table
+  // reference anywhere in setup resolves against it instead of failing (or, worse,
+  // silently reading a same-named table in public).
+  const searchPath = options.schema?.trim() || 'public';
+
   return knex({
     client: options.type === 'postgres' ? 'pg' : 'mysql2',
     connection: createDatabaseConnectionOptions(options),
+    ...(options.type === 'postgres' ? { searchPath: [searchPath] } : {}),
   });
 }
 

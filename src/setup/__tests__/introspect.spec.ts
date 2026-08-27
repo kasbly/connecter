@@ -110,6 +110,7 @@ describe('introspectDatabase', () => {
 
     const result = await introspectDatabase({ ...connection, schema: 'catalog' });
 
+    expect(knexMock).toHaveBeenCalledWith(expect.objectContaining({ searchPath: ['catalog'] }));
     expect(db.raw).toHaveBeenNthCalledWith(
       2,
       'SELECT tablename FROM pg_tables WHERE schemaname = ? ORDER BY tablename',

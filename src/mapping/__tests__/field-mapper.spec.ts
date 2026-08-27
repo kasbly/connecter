@@ -141,6 +141,27 @@ describe('mapRowToInventoryItem', () => {
     ).toBe('ACTIVE');
   });
 
+  it('reports every listing as ACTIVE when fields.status is not mapped at all', () => {
+    // baseConfig has no `status` key: the configuration the README and
+    // connector.config.example.yml tell merchants to use when their whole
+    // catalog is live. An absent mapping is that assertion, not source drift.
+    expect(baseConfig.fields['status']).toBeUndefined();
+    expect(
+      mapRowToInventoryItem({ id: '1', title: 'Test', price: 100 }, baseConfig, new Map()).status,
+    ).toBe('ACTIVE');
+
+    // The row may still carry a status column the config never mapped, and the
+    // unknown-status policy governs mapped columns only — neither may pull an
+    // unmapped catalog back to a non-sellable token.
+    expect(
+      mapRowToInventoryItem(
+        { id: '2', title: 'Test', price: 100, status: 'draft' },
+        { ...baseConfig, unknownStatusPolicy: 'EXPIRED' },
+        new Map(),
+      ).status,
+    ).toBe('ACTIVE');
+  });
+
   it('uses a non-sellable fallback for new source statuses until they are mapped', () => {
     const config: InventoryResourceConfig = {
       ...baseConfig,
@@ -163,6 +184,15 @@ describe('mapRowToInventoryItem', () => {
         new Map(),
       ).status,
     ).toBe('DRAFT');
+    // A mapped column that is NULL on a row is drift too, not the "everything is
+    // active" declaration an entirely absent mapping makes.
+    expect(
+      mapRowToInventoryItem(
+        { id: '3', title: 'Test', price: 100, availability: null },
+        config,
+        new Map(),
+      ).status,
+    ).toBe('EXPIRED');
   });
 
   it('uses the documented case-insensitive defaults for canonical status values', () => {

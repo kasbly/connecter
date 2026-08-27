@@ -2,6 +2,7 @@ import knex, { type Knex } from 'knex';
 import type { DatabaseConfig } from '../config/config.types.js';
 import type {
   DatabaseAdapter,
+  DistinctValuesQuery,
   QueryCondition,
   PaginationOptions,
   SortOptions,
@@ -328,6 +329,35 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
 
     return result;
+  }
+
+  /**
+   * De-duplicates one column over a bounded slice of the table.
+   *
+   * The de-duplication deliberately runs inside a `LIMIT`ed subquery for the
+   * same reason the list count does (#17420): a bare `SELECT DISTINCT status
+   * FROM cars` has to read every row of the merchant's production table before
+   * it can emit its first value. `scanLimit` keeps the diagnostic cheap and
+   * predictable — this runs behind the unauthenticated, 30s-cached `/health`
+   * probe — while still seeing orders of magnitude more rows than the single
+   * sample row the probe maps.
+   *
+   * `column` and `baseFilter` are column expressions from the merchant's own
+   * config file, the same trust level as the select list in {@link query}.
+   * The two bounds are bound parameters, never interpolated.
+   */
+  async distinctValues(query: DistinctValuesQuery): Promise<unknown[]> {
+    const db = this.getDb();
+    const where = query.baseFilter ? ` WHERE (${query.baseFilter})` : '';
+    const sampled =
+      `SELECT ${query.column} AS "value" ` +
+      `FROM ${qualifiedTable(query.schema, query.table)}${where} LIMIT ?`;
+    const result = await db.raw<{ rows: { value: unknown }[] }>(
+      `SELECT DISTINCT "value" FROM (${sampled}) AS "sampled_rows" LIMIT ?`,
+      [query.scanLimit, query.limit],
+    );
+
+    return (result?.rows ?? []).map((row) => row.value);
   }
 
   async healthCheck(): Promise<boolean> {

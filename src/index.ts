@@ -7,7 +7,7 @@ import type { ConnectorConfig } from './config/config.types.js';
 import type { DatabaseAdapter } from './db/adapter.interface.js';
 import { loadConfig } from './config/config.loader.js';
 import { createDatabaseAdapter } from './db/adapter.factory.js';
-import { createResourceHealthCheck } from './routes/health.route.js';
+import { createResourceHealthCheck, formatUnknownStatusWarning } from './routes/health.route.js';
 import { buildApp, type AppDeps } from './server.js';
 
 const DEFAULT_CONFIG_PATH = resolve('connector.config.yml');
@@ -86,6 +86,13 @@ export async function startConnector(
       if (!resourceHealth.ok) {
         console.error('Inventory resource probe failed:', resourceHealth.error);
       }
+      // Unmapped source statuses leave the resource healthy on purpose, so
+      // this is the only chance the operator gets to hear about them (#23293).
+      const unknownStatusWarning = formatUnknownStatusWarning(
+        resourceHealth.unknownStatusValues ?? [],
+        config.resources.inventory.unknownStatusPolicy,
+      );
+      if (unknownStatusWarning) console.warn(unknownStatusWarning);
     })
     .catch((error: unknown) => {
       console.error('Database connection unavailable; health will report degraded:', error);

@@ -55,7 +55,10 @@ resources:
       price: 'price'
       currency: "'KRW'"
       category: "'car'"
-      status: 'status' # Unmapped status reports every listing as ACTIVE
+      # Omit this line only when every listing is Active: an unmapped status
+      # field reports every listing as ACTIVE. Once mapped, a source value that
+      # statusValues below does not recognize falls back to unknownStatusPolicy.
+      status: 'status'
       # Optional: one URL, a PostgreSQL text[] value, or a JSON array of URL strings.
       # Row images come first, followed by images from relations below.
       images: 'image_urls'

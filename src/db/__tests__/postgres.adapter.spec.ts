@@ -137,6 +137,35 @@ describe('PostgresAdapter relation probes', () => {
   });
 });
 
+describe('PostgresAdapter distinct status probe', () => {
+  beforeEach(() => {
+    knexMock.mockClear();
+    rawMock.mockClear();
+  });
+
+  it('de-duplicates inside a bounded subquery instead of scanning the whole table', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+    rawMock.mockResolvedValueOnce({ rows: [{ value: 'for_sale' }, { value: 'under_offer' }] });
+
+    const values = await adapter.distinctValues({
+      table: 'cars',
+      column: 'availability',
+      limit: 50,
+      scanLimit: 5000,
+      baseFilter: 'published = true',
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT DISTINCT "value" FROM (SELECT availability AS "value" ' +
+        'FROM "public"."cars" WHERE (published = true) LIMIT ?) AS "sampled_rows" LIMIT ?',
+      [5000, 50],
+    );
+    expect(values).toEqual(['for_sale', 'under_offer']);
+  });
+});
+
 describe('PostgresAdapter statement timeout', () => {
   beforeEach(() => {
     knexMock.mockClear();

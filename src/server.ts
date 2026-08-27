@@ -6,6 +6,7 @@ import { createApiKeyGuard } from './auth/api-key.guard.js';
 import { AuditService } from './audit/audit.service.js';
 import { getClientIp } from './middleware/client-ip.js';
 import { buildRateLimitOptions } from './middleware/rate-limiter.js';
+import { UNMAPPED_STATUS_FALLBACK } from './mapping/field-mapper.js';
 import {
   createResourceHealthCheck,
   registerHealthRoute,
@@ -41,9 +42,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
 
   if (!config.resources.inventory.fields['status']) {
     app.log.warn(
-      `Inventory status is not mapped; every listing will be reported as ${
-        config.resources.inventory.unknownStatusPolicy ?? 'DRAFT'
-      }. Map resources.inventory.fields.status to expose availability.`,
+      `Inventory status is not mapped; every listing will be reported as ${UNMAPPED_STATUS_FALLBACK}. ` +
+        'Map resources.inventory.fields.status if some listings are not available.',
     );
   }
 

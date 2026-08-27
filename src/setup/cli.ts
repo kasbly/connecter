@@ -4,6 +4,7 @@ import 'dotenv/config';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { access } from 'node:fs/promises';
+import type { UnknownStatusPolicy } from '../config/config.types.js';
 
 export function getCliCommand(args: readonly string[]): 'setup' | 'validate' | 'start' {
   if (args[0] === 'setup') return 'setup';
@@ -11,10 +12,26 @@ export function getCliCommand(args: readonly string[]): 'setup' | 'validate' | '
   return 'start';
 }
 
-export async function validateConnectorConfig(configPath: string): Promise<void> {
+export interface ConnectorValidationResult {
+  /** Source status values the probe saw that no `statusValues` entry maps. */
+  unknownStatusValues: string[];
+  /** Status every listing carrying one of those values is reported as. */
+  unknownStatusPolicy: UnknownStatusPolicy;
+}
+
+/**
+ * Runs the same probe `/health` runs, and reports what it found. Discarding the
+ * probe's result here is how a merchant could add a source status value and be
+ * told "probe passed" while those listings silently stopped being sellable
+ * (#23293).
+ */
+export async function validateConnectorConfig(
+  configPath: string,
+): Promise<ConnectorValidationResult> {
   const { loadConfig } = await import('../config/config.loader.js');
   const { createDatabaseAdapter } = await import('../db/adapter.factory.js');
-  const { probeInventoryResource } = await import('../routes/health.route.js');
+  const { formatUnknownStatusWarning, probeInventoryResource } =
+    await import('../routes/health.route.js');
   try {
     await access(configPath);
   } catch {
@@ -22,13 +39,21 @@ export async function validateConnectorConfig(configPath: string): Promise<void>
   }
 
   const config = loadConfig(configPath);
+  const inventoryResource = config.resources.inventory;
   const dbAdapter = createDatabaseAdapter(config.database);
+  let unknownStatusValues: string[];
   try {
     await dbAdapter.connect();
-    await probeInventoryResource(dbAdapter, config.resources.inventory);
+    unknownStatusValues = await probeInventoryResource(dbAdapter, inventoryResource);
   } finally {
     await dbAdapter.disconnect();
   }
+
+  const unknownStatusPolicy = inventoryResource.unknownStatusPolicy ?? 'DRAFT';
+  const warning = formatUnknownStatusWarning(unknownStatusValues, unknownStatusPolicy);
+  if (warning) console.warn(`Warning: ${warning}`);
+
+  return { unknownStatusValues, unknownStatusPolicy };
 }
 
 async function run(): Promise<void> {

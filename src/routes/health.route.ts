@@ -3,7 +3,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FastifyInstance } from 'fastify';
 import type { AuditHealth } from '../audit/audit.service.js';
-import type { InventoryResourceConfig } from '../config/config.types.js';
+import type { InventoryResourceConfig, UnknownStatusPolicy } from '../config/config.types.js';
 import type { DatabaseAdapter } from '../db/adapter.interface.js';
 import {
   getRelationConfigs,
@@ -32,6 +32,18 @@ function getVersion(): string {
 
 const startTime = Date.now();
 const RESOURCE_PROBE_TTL_MS = 30_000;
+
+/** Most distinct source status values one probe reports (#23293). */
+export const UNKNOWN_STATUS_VALUE_LIMIT = 50;
+
+/**
+ * Most rows the distinct-status probe may read. The probe runs behind the
+ * unauthenticated, 30s-cached `/health` endpoint, so it stays a bounded sample
+ * rather than a full scan of the merchant's production table — but a sample
+ * this wide answers "which source values are unmapped" independently of row
+ * order, which reading the single mapped sample row never could.
+ */
+export const UNKNOWN_STATUS_SCAN_LIMIT = 5_000;
 
 export interface ResourceHealth {
   ok: boolean;
@@ -147,17 +159,77 @@ export async function probeInventoryResource(
   const statusColumn = resourceConfig.fields['status'];
   if (!statusColumn) return [];
 
+  const observedStatuses = await probeStatusValues(dbAdapter, resourceConfig, statusColumn, rows);
+
   return Array.from(
     new Set(
-      rows.flatMap((row) => {
-        const value = resolveColumnValue(row, statusColumn);
+      observedStatuses.flatMap((value) => {
         const normalizedValue = value === null || value === undefined ? '' : String(value).trim();
         return normalizedValue && !resolveInventoryStatus(value, resourceConfig.statusValues)
           ? [normalizedValue]
           : [];
       }),
     ),
-  ).sort();
+  )
+    .sort()
+    .slice(0, UNKNOWN_STATUS_VALUE_LIMIT);
+}
+
+/**
+ * Collects the source status values the merchant's catalog actually uses.
+ *
+ * The sampled row alone is not evidence: a catalog where 8,000 of 10,000 rows
+ * carry a newly introduced `under_offer` reports nothing unless the single
+ * lowest-id row happens to carry it (#23293). Ask the adapter for the distinct
+ * values instead, and keep the sampled row's value in the answer so this is
+ * always a superset of what the previous behaviour saw.
+ */
+async function probeStatusValues(
+  dbAdapter: DatabaseAdapter,
+  resourceConfig: InventoryResourceConfig,
+  statusColumn: string,
+  sampledRows: Record<string, unknown>[],
+): Promise<unknown[]> {
+  const sampledStatuses = sampledRows.map((row) => resolveColumnValue(row, statusColumn));
+  if (!dbAdapter.distinctValues) return sampledStatuses;
+
+  try {
+    const distinctStatuses = await dbAdapter.distinctValues({
+      ...(resourceConfig.schema ? { schema: resourceConfig.schema } : {}),
+      table: resourceConfig.table,
+      column: statusColumn,
+      limit: UNKNOWN_STATUS_VALUE_LIMIT,
+      scanLimit: UNKNOWN_STATUS_SCAN_LIMIT,
+      ...(resourceConfig.baseFilter ? { baseFilter: resourceConfig.baseFilter } : {}),
+    });
+    return [...sampledStatuses, ...distinctStatuses];
+  } catch {
+    // This query is a diagnostic, not a health signal — the status column
+    // itself is already exercised by the sample query above, which does fail
+    // the probe. Never turn a healthy resource unhealthy over the diagnostic.
+    return sampledStatuses;
+  }
+}
+
+/**
+ * One operator-facing line naming the unmapped source status values and what
+ * the connector does with them, or `null` when every value is mapped. Shared
+ * by `npm run validate` and the startup log so neither can stay silent while
+ * listings are quietly withheld from customers.
+ */
+export function formatUnknownStatusWarning(
+  unknownStatusValues: readonly string[],
+  unknownStatusPolicy: UnknownStatusPolicy | undefined,
+): string | null {
+  if (unknownStatusValues.length === 0) return null;
+
+  const values = unknownStatusValues.map((value) => JSON.stringify(value)).join(', ');
+  return (
+    `Unmapped inventory status values found in the source: ${values}. ` +
+    `Every listing carrying one of them is reported as ${unknownStatusPolicy ?? 'DRAFT'} ` +
+    'and is never offered to customers. ' +
+    'Map them under resources.inventory.statusValues.'
+  );
 }
 
 function getMappedImageValues(

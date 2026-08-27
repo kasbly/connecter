@@ -8,6 +8,7 @@ import {
   FIELD_MAPPING_TARGETS,
   backupPrivateFile,
   getFieldMappingPrompt,
+  isPublicHostname,
   loadExistingSetupConfig,
   mergeEnvironmentFile,
   quoteIfNeeded,
@@ -119,6 +120,19 @@ describe('shouldDefaultToTls', () => {
   it('defaults to TLS for a remote database host', () => {
     expect(shouldDefaultToTls('postgres.example.com')).toBe(true);
   });
+});
+
+describe('isPublicHostname', () => {
+  it('accepts a bare DNS name', () => {
+    expect(isPublicHostname('connector.merchant.example')).toBe(true);
+  });
+
+  it.each(['https://connector.merchant.example', 'connector.merchant.example:443', '', '   '])(
+    'rejects %j, which Caddy cannot serve a certificate for',
+    (value) => {
+      expect(isPublicHostname(value)).toBe(false);
+    },
+  );
 });
 
 describe('writePrivateFile', () => {
@@ -252,7 +266,16 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
-    for (const answer of ['database.example.com', '5432', 'catalog', 'reader', 'merchant_data']) {
+    // Step 6 asks which proxy fronts the connector; take the bundled Caddy.
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'merchant_data',
+      'connector.merchant.example',
+    ]) {
       promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
     }
     promptMocks.password.mockResolvedValueOnce('p@ss#word');
@@ -332,6 +355,13 @@ describe('runWizard', () => {
       );
       expect(config.resources.inventory.fields.price).toBe('"price"');
       expect(config.resources.inventory.schema).toBe('merchant_data');
+      // The bundled `docker compose up -d` the wizard recommends cannot resolve
+      // without CONNECTOR_DOMAIN, and attributes every request to Caddy without
+      // trustedProxies, so a fresh run has to emit both.
+      expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN']).toBe(
+        'connector.merchant.example',
+      );
+      expect(config.server.trustedProxies).toBe('172.30.0.2');
       expect(config.resources.inventory.relations?.product_images).toMatchObject({
         schema: 'merchant_data',
         imageUrlField: 'url',
@@ -428,7 +458,7 @@ describe('runWizard', () => {
     );
     writeFileSync(
       join(directory, '.env'),
-      'DB_HOST=database.example.com\nDB_NAME=catalog\nDB_USER=reader\nDB_PASSWORD=p@ss#word\nCONNECTOR_API_KEY=kc_existing\n',
+      'DB_HOST=database.example.com\nDB_NAME=catalog\nDB_USER=reader\nDB_PASSWORD=p@ss#word\nCONNECTOR_API_KEY=kc_existing\nCONNECTOR_DOMAIN=connector.merchant.example\n',
     );
 
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
@@ -444,7 +474,17 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
-    for (const answer of ['database.example.com', '5432', 'catalog', 'reader', 'merchant_data']) {
+    // This rerun replaces Caddy, so it keeps the proxy allowlist it already has.
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('custom'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'merchant_data',
+      'connector.merchant.example',
+      '10.0.0.0/8',
+    ]) {
       promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
     }
     promptMocks.confirm
@@ -513,6 +553,29 @@ describe('runWizard', () => {
         loadExistingSetupConfig(join(directory, 'connector.config.yml'), join(directory, '.env')),
       ).toMatchObject({ resources: { inventory: { fields: { title: '"title"' } } } });
       expect(generated.server.trustedProxies).toBe('10.0.0.0/8');
+      // A rerun offers what the operator already deployed with, rather than
+      // resetting the connector to the bundled-Caddy defaults.
+      expect(promptMocks.select).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining('reverse proxy'),
+          default: 'custom',
+        }),
+      );
+      expect(promptMocks.input).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining('Trusted proxy'),
+          default: '10.0.0.0/8',
+        }),
+      );
+      expect(promptMocks.input).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining('Public DNS name'),
+          default: 'connector.merchant.example',
+        }),
+      );
+      expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN']).toBe(
+        'connector.merchant.example',
+      );
       expect(inventory.fields).toEqual({
         externalId: '"id"',
         title: '"title"',
@@ -526,6 +589,138 @@ describe('runWizard', () => {
       expect(inventory).not.toHaveProperty('relations');
       expect(consoleLog).toHaveBeenCalledWith(
         expect.stringContaining('No searchable columns are configured'),
+      );
+      // Leaving status unmapped makes the whole catalog ACTIVE, and no config key
+      // records that choice, so the wizard has to say it out loud.
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'No status column mapped: every listing will be reported as ACTIVE',
+        ),
+      );
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('maps a status column in a non-public schema without an unqualified read', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    vi.resetAllMocks();
+
+    // 30 distinct values: more than the wizard will ask about in one session.
+    const distinctStatusValues = Array.from(
+      { length: 30 },
+      (_, index) => `status-${String(index).padStart(2, '0')}`,
+    );
+    const pluck = vi.fn().mockResolvedValue(distinctStatusValues);
+    const whereNotNull = vi.fn(() => ({ pluck }));
+    const distinct = vi.fn(() => ({ whereNotNull }));
+    const table = vi.fn(() => ({ distinct, first: vi.fn().mockResolvedValue(null) }));
+    const withSchema = vi.fn(() => ({ table }));
+    const db = Object.assign(
+      // A bare db(table) call resolves against the default search path, which is
+      // exactly the failure this run must not reproduce.
+      vi.fn(() => {
+        throw new Error('relation "products" does not exist');
+      }),
+      { destroy: vi.fn().mockResolvedValue(undefined), withSchema },
+    );
+
+    const statusAnswers = new Map<string, string>([
+      ['status-00', 'ACTIVE'],
+      ['status-01', '\0unmapped'],
+    ]);
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('products');
+      if (message.startsWith('How should newly observed')) return Promise.resolve('DRAFT');
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      const statusValueMatch = /^Which Kasbly status matches "(.+)"\?$/.exec(message);
+      if (statusValueMatch) {
+        return Promise.resolve(statusAnswers.get(statusValueMatch[1]!) ?? 'DRAFT');
+      }
+      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+      if (fieldMatch && ['title', 'price', 'currency', 'status'].includes(fieldMatch[1]!)) {
+        return Promise.resolve(fieldMatch[1]);
+      }
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog_db');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('catalog');
+      if (message.startsWith('Public DNS name')) {
+        return Promise.resolve('connector.merchant.example');
+      }
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(message.startsWith('Which columns should be searchable') ? ['title'] : []),
+    );
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            rowCount: 100,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'status', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      // The distinct-values read is schema-qualified, so the bare-call trap never fires.
+      expect(db).not.toHaveBeenCalled();
+      expect(withSchema).toHaveBeenCalledWith('catalog');
+      expect(table).toHaveBeenCalledWith('products');
+      expect(distinct).toHaveBeenCalledWith('status');
+      expect(whereNotNull).toHaveBeenCalledWith('status');
+
+      // Setup completes: the config is written, not lost to a thrown error.
+      const generated = yaml.load(
+        readFileSync(join(directory, 'connector.config.yml'), 'utf-8'),
+      ) as { resources: { inventory: Record<string, unknown> } };
+      const inventory = generated.resources.inventory;
+      expect(inventory['schema']).toBe('catalog');
+      expect(inventory['unknownStatusPolicy']).toBe('DRAFT');
+
+      // Bounded prompting: 25 of the 30 values are offered, one of them left unmapped.
+      const statusPrompts = promptMocks.select.mock.calls.filter((call: unknown[]) =>
+        String((call[0] as { message?: string })?.message ?? '').startsWith(
+          'Which Kasbly status matches',
+        ),
+      );
+      expect(statusPrompts).toHaveLength(25);
+      const statusValues = inventory['statusValues'] as Record<string, string[]>;
+      expect(statusValues['ACTIVE']).toEqual(['status-00']);
+      expect(statusValues['DRAFT']).toHaveLength(23);
+      expect(statusValues['DRAFT']).not.toContain('status-01');
+      expect(statusValues['DRAFT']).not.toContain('status-25');
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining('the remaining 5 use the unknown-status policy'),
       );
     } finally {
       consoleLog.mockRestore();

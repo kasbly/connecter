@@ -38,6 +38,18 @@ export interface RelationQuery {
   orderBy?: SortOptions;
 }
 
+export interface DistinctValuesQuery {
+  schema?: string;
+  table: string;
+  /** Column expression from the resource mapping, e.g. `status` or `"listingStatus"`. */
+  column: string;
+  /** Hard ceiling on how many distinct values are returned. */
+  limit: number;
+  /** Hard ceiling on how many rows the scan may read before de-duplicating. */
+  scanLimit: number;
+  baseFilter?: string;
+}
+
 export interface TableInfo {
   name: string;
   columns: ColumnInfo[];
@@ -71,6 +83,13 @@ export interface DatabaseAdapter {
     schema?: string,
   ): Promise<Record<string, unknown> | null>;
   queryRelation(query: RelationQuery): Promise<Map<string | number, Record<string, unknown>[]>>;
+  /**
+   * Bounded `SELECT DISTINCT` over one column, used by the inventory resource
+   * probe to report source status values the merchant has not mapped
+   * (#23293). Optional: a caller must fall back to the rows it already sampled
+   * when an adapter cannot answer it.
+   */
+  distinctValues?(query: DistinctValuesQuery): Promise<unknown[]>;
   healthCheck(): Promise<boolean>;
   introspect(): Promise<TableInfo[]>;
 }

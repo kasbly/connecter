@@ -30,6 +30,7 @@ import {
 import {
   mapRowToInventoryItem,
   resolveColumnValue,
+  UNMAPPED_STATUS_FALLBACK,
   validateInventoryItemWireContract,
 } from '../mapping/field-mapper.js';
 
@@ -81,22 +82,53 @@ function isCompatibleFieldColumn(field: FieldMappingTarget, type: string): boole
   return /(char|text|json|xml|uuid|enum)/.test(normalizedType);
 }
 
+/**
+ * How many distinct source status values the wizard asks about. A high-cardinality
+ * column would otherwise present one unanswerable prompt per value with no way out
+ * but Ctrl-C, which discards the whole session. Anything past the cap — and anything
+ * explicitly left unmapped — is covered by `unknownStatusPolicy`.
+ */
+export const STATUS_VALUE_PROMPT_LIMIT = 25;
+
 async function collectStatusValues(
   db: Awaited<ReturnType<typeof introspectDatabase>>['db'],
+  schema: string,
   table: string,
   column: string,
 ): Promise<StatusValuesConfig> {
-  const values = await db(table).distinct(column).whereNotNull(column).pluck(column);
+  // Schema-qualified: the client's search_path does not necessarily contain the
+  // schema the operator selected, so a bare table reference cannot be resolved.
+  const values = (await db
+    .withSchema(schema)
+    .table(table)
+    .distinct(column)
+    .whereNotNull(column)
+    .pluck(column)) as unknown[];
+  const distinctValues = Array.from(new Set(values.map((value) => String(value)))).sort();
+  const presentedValues = distinctValues.slice(0, STATUS_VALUE_PROMPT_LIMIT);
+  const skippedCount = distinctValues.length - presentedValues.length;
+  if (skippedCount > 0) {
+    console.log(
+      `\n"${column}" has ${distinctValues.length} distinct values. Mapping the first ${presentedValues.length}; the remaining ${skippedCount} use the unknown-status policy chosen next.`,
+    );
+  }
   const statusValues: StatusValuesConfig = {};
 
-  for (const value of Array.from(new Set(values.map(String))).sort()) {
-    const status = await select<InventoryStatus>({
+  for (const value of presentedValues) {
+    const status = await select<InventoryStatus | typeof UNMAPPED_FIELD_VALUE>({
       message: `Which Kasbly status matches "${value}"?`,
-      choices: INVENTORY_STATUSES.map((inventoryStatus) => ({
-        name: inventoryStatus,
-        value: inventoryStatus,
-      })),
+      choices: [
+        ...INVENTORY_STATUSES.map((inventoryStatus) => ({
+          name: inventoryStatus,
+          value: inventoryStatus as InventoryStatus | typeof UNMAPPED_FIELD_VALUE,
+        })),
+        {
+          name: 'Leave unmapped (use the unknown-status policy)',
+          value: UNMAPPED_FIELD_VALUE as InventoryStatus | typeof UNMAPPED_FIELD_VALUE,
+        },
+      ],
     });
+    if (status === UNMAPPED_FIELD_VALUE) continue;
     (statusValues[status] ??= []).push(value);
   }
 
@@ -145,6 +177,55 @@ export function toConfigLiteral(value: string): string {
 
 export function shouldDefaultToTls(host: string): boolean {
   return !['localhost', '127.0.0.1', '::1'].includes(host.trim().toLowerCase());
+}
+
+/**
+ * Fixed internal address of the Caddy container in the bundled Compose
+ * deployment (`docker-compose.yml`). Trusting exactly this address keeps
+ * forwarded client IPs — and therefore per-IP rate limiting and the audit
+ * trail — honest for the deployment the wizard tells the operator to run.
+ */
+const BUNDLED_PROXY_ADDRESS = '172.30.0.2';
+
+/** Reject a value that is a URL or a host:port rather than a bare DNS name. */
+export function isPublicHostname(value: string): boolean {
+  return /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/.test(
+    value.trim(),
+  );
+}
+
+/**
+ * The connector reads forwarded headers only from this allowlist, so the value
+ * has to match the proxy actually deployed in front of it. `undefined` means no
+ * proxy: the raw socket peer is used, which is the fail-closed default.
+ */
+async function collectTrustedProxies(existing: string | undefined): Promise<string | undefined> {
+  const topology = await select({
+    message: 'Which reverse proxy will sit in front of the connector?',
+    choices: [
+      {
+        name: `The bundled Docker HTTPS proxy — Caddy at ${BUNDLED_PROXY_ADDRESS} (recommended)`,
+        value: 'bundled' as const,
+      },
+      { name: 'A different proxy (enter its IPs/CIDRs)', value: 'custom' as const },
+      { name: 'None — the connector is exposed directly', value: 'none' as const },
+    ],
+    default:
+      existing === undefined || existing === BUNDLED_PROXY_ADDRESS
+        ? ('bundled' as const)
+        : ('custom' as const),
+  });
+
+  if (topology === 'none') return undefined;
+  if (topology === 'bundled') return BUNDLED_PROXY_ADDRESS;
+
+  const proxies = await input({
+    message: 'Trusted proxy IPs/CIDRs (comma-separated):',
+    default: existing === BUNDLED_PROXY_ADDRESS ? undefined : existing,
+    validate: (value) =>
+      value.trim() ? true : 'Enter the direct proxy IPs/CIDRs, or choose "None" instead.',
+  });
+  return proxies.trim();
 }
 
 export async function runWizard(): Promise<void> {
@@ -287,7 +368,17 @@ export async function runWizard(): Promise<void> {
     );
     const selectedValue = await select(prompt);
 
-    if (selectedValue === UNMAPPED_FIELD_VALUE) continue;
+    if (selectedValue === UNMAPPED_FIELD_VALUE) {
+      // No config key records "there is no status column", so the one chance the
+      // operator gets to learn what an unmapped status means is right here.
+      if (field === 'status') {
+        console.log(
+          `\nNo status column mapped: every listing will be reported as ${UNMAPPED_STATUS_FALLBACK}. ` +
+            'Map a status column if some listings are not available.',
+        );
+      }
+      continue;
+    }
     if (selectedValue === FIXED_VALUE_FIELD_VALUE) {
       const fixedValue =
         field === 'status'
@@ -313,7 +404,15 @@ export async function runWizard(): Promise<void> {
     fieldMappings[field] = quoteIfNeeded(selectedValue);
     mappedColumnNames.add(selectedValue);
     if (field === 'status') {
-      statusValues = await collectStatusValues(db, selectedTableName, selectedValue);
+      const collected = await collectStatusValues(
+        db,
+        selectedSchema,
+        selectedTableName,
+        selectedValue,
+      );
+      // Every value left unmapped means there is nothing to write; omitting the key
+      // keeps the generated config free of an empty block that reads as a mapping.
+      statusValues = Object.keys(collected).length > 0 ? collected : undefined;
       unknownStatusPolicy = await select<UnknownStatusPolicy>({
         message: 'How should newly observed source statuses be exposed until you map them?',
         choices: ['DRAFT', 'RESERVED', 'SOLD', 'EXPIRED'].map((status) => ({
@@ -611,6 +710,21 @@ export async function runWizard(): Promise<void> {
     }
   }
 
+  // Both values below are required by the deployment this wizard ends by
+  // recommending: `docker compose up -d` refuses to resolve without
+  // CONNECTOR_DOMAIN, and without trustedProxies every request behind the
+  // bundled proxy is attributed to Caddy's internal address.
+  const connectorDomain = (
+    await input({
+      message: 'Public DNS name for this connector (its A/AAAA record must point at this host):',
+      default: existingEnv['CONNECTOR_DOMAIN'],
+      validate: (value) =>
+        isPublicHostname(value) ||
+        'Enter a DNS name such as connector.merchant.example — no scheme, port, or path.',
+    })
+  ).trim();
+  const trustedProxies = await collectTrustedProxies(existingConfig?.server.trustedProxies);
+
   // Build config object
   // Everything below is selected by this wizard, so rebuild it instead of
   // overlaying selections onto the previous inventory mapping. This makes an
@@ -632,7 +746,13 @@ export async function runWizard(): Promise<void> {
   const config = {
     ...existingConfig,
     version: existingConfig?.version ?? 1,
-    server: existingConfig?.server ?? { port: 4000, host: '0.0.0.0' },
+    server: {
+      port: existingConfig?.server.port ?? 4000,
+      host: existingConfig?.server.host ?? '0.0.0.0',
+      // Rebuilt rather than passed through, so choosing "None" this run also
+      // drops a trustedProxies value a previous run wrote.
+      ...(trustedProxies ? { trustedProxies } : {}),
+    },
     auth: {
       apiKeys: [
         { key: '${CONNECTOR_API_KEY}', label: 'kasbly-current' },
@@ -762,11 +882,14 @@ export async function runWizard(): Promise<void> {
     ...(tls.ca ? { DB_SSL_CA: tls.ca } : {}),
     CONNECTOR_API_KEY: currentApiKey,
     CONNECTOR_API_KEY_PENDING: pendingApiKey ?? null,
+    CONNECTOR_DOMAIN: connectorDomain,
   });
   writePrivateFile(envPath, envContent);
   console.log(`✅ Environment saved to ${envPath}`);
 
-  console.log('\n   Start the connector: docker compose up -d\n');
+  console.log('\n   Start the connector: docker compose up -d');
+  console.log(`   Verify the public endpoint: curl -fsS https://${connectorDomain}/health`);
+  console.log(`   Give Kasbly this URL: https://${connectorDomain}\n`);
 
   await db.destroy();
 }

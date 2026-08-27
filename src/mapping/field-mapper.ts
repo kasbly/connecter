@@ -112,6 +112,14 @@ const DEFAULT_STATUS_VALUES: Required<StatusValuesConfig> = {
   EXPIRED: ['EXPIRED', 'expired'],
 };
 
+/**
+ * Status reported when `fields.status` is not mapped at all. An absent mapping is
+ * the merchant asserting "every listing is active" — that is what the README and
+ * the example config promise — whereas an unrecognized value from a mapped column
+ * is source drift and stays governed by `unknownStatusPolicy`.
+ */
+export const UNMAPPED_STATUS_FALLBACK: InventoryStatus = 'ACTIVE';
+
 /** Resolve a source-system status to Kasbly's closed inventory-status vocabulary. */
 export function resolveInventoryStatus(
   value: unknown,
@@ -204,12 +212,15 @@ export function mapRowToInventoryItem(
     price: Number(fields['price'] ?? 0),
     currency: String(fields['currency'] ?? ''),
     category: String(fields['category'] ?? ''),
-    // Treat a missing or newly introduced source value as non-sellable until
-    // the merchant explicitly maps it in statusValues.
-    status:
-      resolveInventoryStatus(fields['status'], config.statusValues) ??
-      config.unknownStatusPolicy ??
-      'DRAFT',
+    // A config with no `fields.status` at all declares the whole catalog live, so
+    // it maps to ACTIVE. Once a status column IS mapped, a missing or newly
+    // introduced source value stays non-sellable until the merchant maps it in
+    // statusValues.
+    status: config.fields['status']
+      ? (resolveInventoryStatus(fields['status'], config.statusValues) ??
+        config.unknownStatusPolicy ??
+        'DRAFT')
+      : UNMAPPED_STATUS_FALLBACK,
     images,
     attributes,
     updatedAt,

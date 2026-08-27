@@ -28,7 +28,7 @@ npm ci
 npm run setup
 ```
 
-The wizard connects to your database, introspects tables/columns/foreign keys, and auto-generates `connector.config.yml` + `.env` with sensible defaults.
+The wizard connects to your database, introspects tables/columns/foreign keys, and auto-generates `connector.config.yml` + `.env` with sensible defaults. It also asks for the public DNS name and the reverse proxy in front of the connector, so the generated files carry the `CONNECTOR_DOMAIN` and `server.trustedProxies` values the bundled Docker deployment needs — `docker compose up -d` runs unchanged afterwards.
 
 ### 2. Manual Setup
 
@@ -298,7 +298,12 @@ Kasbly accepts these inventory status tokens: `ACTIVE`, `DRAFT`, `RESERVED`, `SO
 the source system's vocabulary. The defaults recognize each token in either uppercase or lowercase;
 add source-specific values such as `for_sale`, `under_offer`, or `backorder` to the corresponding
 list. When `fields.status` is not mapped, the connector logs a startup warning and reports every
-listing as `ACTIVE`.
+listing as `ACTIVE`: an absent mapping is read as "this catalog is entirely live".
+
+Once a status column **is** mapped, a source value that none of the `statusValues` lists recognize
+is treated as drift rather than a declaration. Those rows are reported as `unknownStatusPolicy`
+(default `DRAFT`) and stay out of customer-facing search until you add the value to `statusValues`.
+`/health` names any such values under `unknownStatusValues`.
 
 Status filters use the same mapping: `filter.status=SOLD` queries every source value configured
 under `statusValues.SOLD`.
@@ -336,9 +341,12 @@ the host, so Kasbly must use the HTTPS URL.
    pointing to this server. Allow inbound TCP ports 80 and 443; Caddy uses port 80 to complete the
    initial certificate challenge and redirects users to HTTPS.
 2. Set `CONNECTOR_DOMAIN` in `.env` to that hostname, for example
-   `CONNECTOR_DOMAIN=connector.merchant.example`.
+   `CONNECTOR_DOMAIN=connector.merchant.example`. `npm run setup` prompts for it and writes it for
+   you; set it by hand only on the manual path.
 3. Keep `server.trustedProxies: '172.30.0.2'` in `connector.config.yml`. That is the fixed address
    of the bundled Caddy container, so client IP forwarding remains trusted only from the proxy.
+   `npm run setup` writes that value when you pick the bundled proxy, and preserves whatever you
+   already have on a rerun.
 4. Start the deployment and verify the exact URL to enter in Kasbly Cloud:
 
 ```bash
