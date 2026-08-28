@@ -129,10 +129,11 @@ describe('PostgresAdapter relation probes', () => {
       parentIds: [],
       fields: { url: 'url' },
       filter: 'published = true',
+      orderBy: { column: 'position', direction: 'asc' },
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT url as "url", inventory_id as "__fk" FROM "public"."images" WHERE FALSE AND (published = true)',
+      'SELECT url as "url", inventory_id as "__fk" FROM "public"."images" WHERE FALSE AND (published = true) ORDER BY position ASC NULLS LAST',
     );
   });
 });

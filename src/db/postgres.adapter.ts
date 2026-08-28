@@ -288,11 +288,15 @@ export class PostgresAdapter implements DatabaseAdapter {
 
     // The startup resource probe deliberately calls this with an empty parent ID
     // list when the inventory table has no rows. Still prepare a read-only query
-    // so PostgreSQL validates the relation table, fields, foreign key, and filter.
+    // so PostgreSQL validates the relation table, fields, foreign key, filter,
+    // and orderBy column.
     if (query.parentIds.length === 0) {
       let sql = `SELECT ${selectParts.join(', ')} FROM ${qualifiedTable(query.schema, query.table)} WHERE FALSE`;
       if (query.filter) {
         sql += ` AND (${query.filter})`;
+      }
+      if (query.orderBy) {
+        sql += ` ORDER BY ${buildOrderByClause(query.orderBy)}`;
       }
       await db.raw(sql);
       return result;

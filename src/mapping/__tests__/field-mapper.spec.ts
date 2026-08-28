@@ -103,6 +103,33 @@ describe('mapRowToInventoryItem', () => {
     expect(result.description).toBeNull();
   });
 
+  it('does not coerce a NULL or missing price to 0', () => {
+    const nullPrice = mapRowToInventoryItem(
+      { id: '1', title: 'Test', price: null },
+      baseConfig,
+      new Map(),
+    );
+    const missingPrice = mapRowToInventoryItem({ id: '1', title: 'Test' }, baseConfig, new Map());
+
+    expect(nullPrice.price).not.toBe(0);
+    expect(Number.isFinite(nullPrice.price)).toBe(false);
+    expect(missingPrice.price).not.toBe(0);
+    expect(Number.isFinite(missingPrice.price)).toBe(false);
+    expect(() => validateInventoryItemWireContract(nullPrice)).toThrow(/price/);
+    expect(() => validateInventoryItemWireContract(missingPrice)).toThrow(/price/);
+  });
+
+  it('keeps an explicit 0 price as a finite 0', () => {
+    const result = mapRowToInventoryItem(
+      { id: '1', title: 'Test', price: 0 },
+      baseConfig,
+      new Map(),
+    );
+
+    expect(result.price).toBe(0);
+    expect(() => validateInventoryItemWireContract(result)).not.toThrow();
+  });
+
   it('keeps mapping when the configured currency column is null for a row', () => {
     const config = {
       ...baseConfig,

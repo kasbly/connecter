@@ -6,6 +6,7 @@ import type { AuditHealth } from '../audit/audit.service.js';
 import type { InventoryResourceConfig, UnknownStatusPolicy } from '../config/config.types.js';
 import type { DatabaseAdapter } from '../db/adapter.interface.js';
 import {
+  getMappedImageValues,
   getRelationConfigs,
   getRequiredColumns,
   mapRowToInventoryItem,
@@ -13,6 +14,7 @@ import {
   resolveInventoryStatus,
   validateInventoryItemWireContract,
 } from '../mapping/field-mapper.js';
+import { getDefaultSort } from '../mapping/query-builder.js';
 
 let cachedVersion: string | null = null;
 
@@ -90,6 +92,9 @@ export async function probeInventoryResource(
     ]),
   );
   let rows: Record<string, unknown>[];
+  // Same default sort as GET /inventory so /health and Kasbly Test connection
+  // inspect the same listing (#23588).
+  const sampleSort = getDefaultSort(resourceConfig);
 
   try {
     ({ rows } = resourceConfig.schema
@@ -97,7 +102,7 @@ export async function probeInventoryResource(
           resourceConfig.table,
           [],
           { page: 1, pageSize: 1 },
-          { column: resourceConfig.idColumn, direction: 'asc' },
+          sampleSort,
           resourceConfig.baseFilter,
           selectColumns,
           resourceConfig.schema,
@@ -106,7 +111,7 @@ export async function probeInventoryResource(
           resourceConfig.table,
           [],
           { page: 1, pageSize: 1 },
-          { column: resourceConfig.idColumn, direction: 'asc' },
+          sampleSort,
           resourceConfig.baseFilter,
           selectColumns,
         ));
@@ -129,6 +134,7 @@ export async function probeInventoryResource(
           parentIds: getReferenceValues(rows, relationConfig.referenceKey),
           fields: relationConfig.fields,
           filter: relationConfig.filter,
+          orderBy: relationConfig.orderBy,
         });
         return [relationName, relationRows] as const;
       } catch (error) {
@@ -180,7 +186,7 @@ export async function probeInventoryResource(
  *
  * The sampled row alone is not evidence: a catalog where 8,000 of 10,000 rows
  * carry a newly introduced `under_offer` reports nothing unless the single
- * lowest-id row happens to carry it (#23293). Ask the adapter for the distinct
+ * sampled row happens to carry it (#23293). Ask the adapter for the distinct
  * values instead, and keep the sampled row's value in the answer so this is
  * always a superset of what the previous behaviour saw.
  */
@@ -230,26 +236,6 @@ export function formatUnknownStatusWarning(
     'and is never offered to customers. ' +
     'Map them under resources.inventory.statusValues.'
   );
-}
-
-function getMappedImageValues(
-  row: Record<string, unknown>,
-  resourceConfig: InventoryResourceConfig,
-  relationData: Map<string, Map<string | number, Record<string, unknown>[]>>,
-): unknown[] {
-  const values: unknown[] = [];
-  const imageColumn = resourceConfig.fields['images'];
-  if (imageColumn) values.push(resolveColumnValue(row, imageColumn));
-
-  for (const [relationName, relationConfig] of getRelationConfigs(resourceConfig)) {
-    if (!relationConfig.imageUrlField) continue;
-    const referenceValue = resolveColumnValue(row, relationConfig.referenceKey);
-    const relationRows =
-      relationData.get(relationName)?.get(referenceValue as string | number) ?? [];
-    values.push(...relationRows.map((relationRow) => relationRow[relationConfig.imageUrlField!]));
-  }
-
-  return values;
 }
 
 export function createResourceHealthCheck(

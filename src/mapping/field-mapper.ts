@@ -104,6 +104,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Coerce a mapped price. `Number(null ?? 0)` is 0, which is legal on the wire
+ * and would quote an unpriced listing as free. NULL/missing/non-finite values
+ * must fail the same contract empty title/currency already fail.
+ */
+function toFinitePrice(value: unknown): number {
+  if (value === null || value === undefined) return Number.NaN;
+  const price = Number(value);
+  return Number.isFinite(price) ? price : Number.NaN;
+}
+
 const DEFAULT_STATUS_VALUES: Required<StatusValuesConfig> = {
   ACTIVE: ['ACTIVE', 'active'],
   DRAFT: ['DRAFT', 'draft'],
@@ -209,7 +220,7 @@ export function mapRowToInventoryItem(
     externalId,
     title: String(fields['title'] ?? ''),
     description: typeof fields['description'] === 'string' ? fields['description'] : null,
-    price: Number(fields['price'] ?? 0),
+    price: toFinitePrice(fields['price']),
     currency: String(fields['currency'] ?? ''),
     category: String(fields['category'] ?? ''),
     // A config with no `fields.status` at all declares the whole catalog live, so
@@ -313,4 +324,25 @@ export function getRequiredColumns(config: InventoryResourceConfig): string[] {
   }
 
   return Array.from(columns);
+}
+
+/** Raw configured image values for wire-contract checks that mapping would drop. */
+export function getMappedImageValues(
+  row: Record<string, unknown>,
+  resourceConfig: InventoryResourceConfig,
+  relationData: Map<string, Map<string | number, Record<string, unknown>[]>>,
+): unknown[] {
+  const values: unknown[] = [];
+  const imageColumn = resourceConfig.fields['images'];
+  if (imageColumn) values.push(resolveColumnValue(row, imageColumn));
+
+  for (const [relationName, relationConfig] of getRelationConfigs(resourceConfig)) {
+    if (!relationConfig.imageUrlField) continue;
+    const referenceValue = resolveColumnValue(row, relationConfig.referenceKey);
+    const relationRows =
+      relationData.get(relationName)?.get(referenceValue as string | number) ?? [];
+    values.push(...relationRows.map((relationRow) => relationRow[relationConfig.imageUrlField!]));
+  }
+
+  return values;
 }

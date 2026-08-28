@@ -57,6 +57,18 @@ function normalizeSortColumn(columnExpr: string): string {
   return quotedColumnMatch ? quotedColumnMatch[1]! : trimmedColumnExpr;
 }
 
+/**
+ * Default GET /inventory sort: `updatedAt DESC` when configured, otherwise
+ * `id DESC`. `/health` and `npm run validate` must sample this same order so
+ * they inspect the listing Kasbly's Test connection reads (#23588).
+ */
+export function getDefaultSort(config: InventoryResourceConfig): SortOptions {
+  return {
+    column: config.updatedAtColumn ?? config.idColumn,
+    direction: 'desc',
+  };
+}
+
 export function buildQuery(params: RawQueryParams, config: InventoryResourceConfig): ParsedQuery {
   const conditions: QueryCondition[] = [];
   const pageParam = getSingleQueryValue(params, 'page');
@@ -105,15 +117,15 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   // allowlist, rather than maintaining a second list that could drift from the config.
   // Anything else — including SQL injection payloads — silently falls back to the default
   // sort column instead of ever reaching raw SQL.
-  const defaultSortColumn = config.updatedAtColumn ?? config.idColumn;
+  const defaultSort = getDefaultSort(config);
   const allowedSortColumns = new Map(
     getRequiredColumns(config).map((column) => [normalizeSortColumn(column), column]),
   );
   const sortBy =
     requestedSortBy !== undefined
-      ? (allowedSortColumns.get(normalizeSortColumn(requestedSortBy)) ?? defaultSortColumn)
-      : defaultSortColumn;
-  const sortDirection = requestedSortDirection === 'asc' ? ('asc' as const) : ('desc' as const);
+      ? (allowedSortColumns.get(normalizeSortColumn(requestedSortBy)) ?? defaultSort.column)
+      : defaultSort.column;
+  const sortDirection = requestedSortDirection === 'asc' ? ('asc' as const) : defaultSort.direction;
 
   // Search across searchable columns
   // Split search into individual terms — each term must match at least one searchable column (AND between terms, OR between columns per term)

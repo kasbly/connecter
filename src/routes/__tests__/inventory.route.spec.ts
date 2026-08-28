@@ -257,6 +257,63 @@ describe('inventory routes', () => {
     await app.close();
   });
 
+  it('GET /inventory omits rows that violate the wire contract and keeps valid siblings', async () => {
+    const mockAdapter = createMockDbAdapter({
+      query: vi.fn().mockResolvedValue({
+        rows: [
+          { id: '1', name: 'Widget', price: 9.99, updatedAt: '2026-01-01T00:00:00Z' },
+          { id: '2', name: 'Gadget', price: 'TBD', updatedAt: '2026-01-02T00:00:00Z' },
+          { id: '3', name: null, price: 19.99, updatedAt: '2026-01-03T00:00:00Z' },
+        ],
+        total: 3,
+      }),
+    });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const response = await app.inject({ method: 'GET', url: '/inventory' });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { items: { externalId: string }[]; total: number };
+    expect(body.total).toBe(3);
+    expect(body.items).toEqual([expect.objectContaining({ externalId: '1', title: 'Widget' })]);
+
+    await app.close();
+  });
+
+  it('GET /inventory/:id returns 502 when the mapped item violates the wire contract', async () => {
+    const mockAdapter = createMockDbAdapter({
+      queryById: vi.fn().mockResolvedValue({
+        id: '42',
+        name: 'Test Item',
+        price: 'TBD',
+        updatedAt: '2026-02-01T00:00:00Z',
+      }),
+    });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/inventory/42',
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({
+      error: expect.stringContaining('price'),
+    });
+
+    await app.close();
+  });
+
   it('GET /inventory/:id returns 404 for missing item', async () => {
     const mockAdapter = createMockDbAdapter({
       queryById: vi.fn().mockResolvedValue(null),

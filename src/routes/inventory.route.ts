@@ -15,9 +15,12 @@ import {
 } from '../mapping/query-builder.js';
 import {
   mapRowToInventoryItem,
+  getMappedImageValues,
   getRelationConfigs,
   getRequiredColumns,
   resolveColumnValue,
+  validateInventoryItemWireContract,
+  type ConnectorInventoryItem,
 } from '../mapping/field-mapper.js';
 import type { ResourceHealthCheck } from './health.route.js';
 
@@ -31,6 +34,20 @@ function isUncoercibleValueError(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const code = Reflect.get(error, 'code');
   return code === '22P02' || code === '22003';
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function mapValidatedInventoryItem(
+  row: Record<string, unknown>,
+  resourceConfig: InventoryResourceConfig,
+  relationData: Map<string, Map<string | number, Record<string, unknown>[]>>,
+): ConnectorInventoryItem {
+  const item = mapRowToInventoryItem(row, resourceConfig, relationData);
+  validateInventoryItemWireContract(item, getMappedImageValues(row, resourceConfig, relationData));
+  return item;
 }
 
 export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDeps): void {
@@ -111,7 +128,20 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
         }
       }
 
-      const items = rows.map((row) => mapRowToInventoryItem(row, resourceConfig, relationData));
+      const items: ConnectorInventoryItem[] = [];
+      for (const row of rows) {
+        try {
+          items.push(mapValidatedInventoryItem(row, resourceConfig, relationData));
+        } catch (error) {
+          request.log.warn(
+            {
+              externalId: String(resolveColumnValue(row, resourceConfig.idColumn) ?? ''),
+              error: errorMessage(error),
+            },
+            'Omitting inventory item that violates the wire contract',
+          );
+        }
+      }
 
       const result = {
         items,
@@ -195,11 +225,13 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
         }
       }
 
-      const item = mapRowToInventoryItem(row, resourceConfig, relationData);
-
-      (request as FastifyRequest & { auditItems?: number }).auditItems = 1;
-
-      return item;
+      try {
+        const item = mapValidatedInventoryItem(row, resourceConfig, relationData);
+        (request as FastifyRequest & { auditItems?: number }).auditItems = 1;
+        return item;
+      } catch (error) {
+        return reply.code(502).send({ error: errorMessage(error) });
+      }
     },
   );
 }

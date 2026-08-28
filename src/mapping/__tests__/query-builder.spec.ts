@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildQuery, splitConditions } from '../query-builder.js';
+import { buildQuery, getDefaultSort, splitConditions } from '../query-builder.js';
 import type { InventoryResourceConfig } from '../../config/config.types.js';
 
 const baseConfig: InventoryResourceConfig = {
@@ -18,11 +18,25 @@ const baseConfig: InventoryResourceConfig = {
   },
 };
 
+describe('getDefaultSort', () => {
+  it('uses updatedAt DESC when configured', () => {
+    expect(getDefaultSort(baseConfig)).toEqual({ column: 'updatedAt', direction: 'desc' });
+  });
+
+  it('uses id DESC when updatedAt is not configured', () => {
+    expect(getDefaultSort({ ...baseConfig, updatedAtColumn: undefined })).toEqual({
+      column: 'id',
+      direction: 'desc',
+    });
+  });
+});
+
 describe('buildQuery', () => {
   it('returns default pagination and sort', () => {
     const result = buildQuery({}, baseConfig);
     expect(result.pagination).toEqual({ page: 1, pageSize: 20 });
     expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc' });
+    expect(result.sort).toEqual(getDefaultSort(baseConfig));
     expect(result.conditions).toEqual([]);
   });
 

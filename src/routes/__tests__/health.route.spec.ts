@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { describe, expect, it, vi } from 'vitest';
 import type { DatabaseAdapter } from '../../db/adapter.interface.js';
+import { buildQuery } from '../../mapping/query-builder.js';
 import {
   UNKNOWN_STATUS_SCAN_LIMIT,
   UNKNOWN_STATUS_VALUE_LIMIT,
@@ -111,6 +112,7 @@ describe('health route', () => {
           foreignKey: 'inventory_id',
           referenceKey: 'id',
           fields: { url: 'url' },
+          orderBy: { column: 'position', direction: 'asc' as const },
         },
       },
     };
@@ -121,7 +123,7 @@ describe('health route', () => {
       'inventory',
       [],
       { page: 1, pageSize: 1 },
-      { column: 'id', direction: 'asc' },
+      { column: 'id', direction: 'desc' },
       'published = true',
       expect.arrayContaining(['id', 'title', 'price', 'sku', 'condition']),
     );
@@ -131,6 +133,7 @@ describe('health route', () => {
       parentIds: [],
       fields: { url: 'url' },
       filter: undefined,
+      orderBy: { column: 'position', direction: 'asc' },
     });
   });
 
@@ -217,6 +220,24 @@ describe('health route', () => {
     });
 
     expect(unknownStatusValues).toEqual(['discontinued']);
+  });
+
+  it('samples the same default sort GET /inventory uses without sortBy', async () => {
+    const dbAdapter = createHealthAdapter(true);
+    const resource = { ...inventoryResource, updatedAtColumn: 'updated_at' };
+
+    await probeInventoryResource(dbAdapter, resource);
+
+    const listSort = buildQuery({ page: '1', pageSize: '1' }, resource).sort;
+    expect(listSort).toEqual({ column: 'updated_at', direction: 'desc' });
+    expect(dbAdapter.query).toHaveBeenCalledWith(
+      'inventory',
+      [],
+      { page: 1, pageSize: 1 },
+      listSort,
+      undefined,
+      expect.any(Array),
+    );
   });
 
   it('reports a field-specific error when a mapped sample cannot satisfy the wire contract', async () => {
