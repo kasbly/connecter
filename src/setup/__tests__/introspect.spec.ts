@@ -8,6 +8,7 @@ import {
   createDatabaseConnectionOptions,
   introspectDatabase,
   isTlsRequiredError,
+  SETUP_STATEMENT_TIMEOUT_MS,
   type DbConnectOptions,
 } from '../introspect.js';
 
@@ -78,6 +79,42 @@ describe('introspectDatabase', () => {
       }),
     );
     expect(result.retriedWithTls).toBe(true);
+  });
+
+  it('uses a read-only PostgreSQL pool with a statement timeout', async () => {
+    const db = {
+      raw: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] }),
+    };
+    knexMock.mockReturnValueOnce(db);
+
+    await introspectDatabase(connection);
+
+    const knexOptions = knexMock.mock.calls[0]![0] as {
+      pool: {
+        afterCreate: (
+          conn: { query: (sql: string, cb: (error: unknown) => void) => void },
+          done: (error: unknown) => void,
+        ) => void;
+      };
+    };
+    const query = vi.fn((_sql: string, callback: (error: unknown) => void) => callback(null));
+    const done = vi.fn();
+    knexOptions.pool.afterCreate({ query }, done);
+
+    expect(query).toHaveBeenNthCalledWith(
+      1,
+      'SET default_transaction_read_only = ON',
+      expect.any(Function),
+    );
+    expect(query).toHaveBeenNthCalledWith(
+      2,
+      `SET statement_timeout = ${SETUP_STATEMENT_TIMEOUT_MS}`,
+      done,
+    );
   });
 
   it('introspects tables, keys, and relations in the selected schema', async () => {

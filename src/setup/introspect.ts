@@ -1,5 +1,7 @@
 import knex, { type Knex } from 'knex';
 
+export const SETUP_STATEMENT_TIMEOUT_MS = 10_000;
+
 export interface IntrospectedTable {
   name: string;
   rowCount: number;
@@ -113,7 +115,25 @@ function createDatabaseClient(options: DbConnectOptions): Knex {
   return knex({
     client: options.type === 'postgres' ? 'pg' : 'mysql2',
     connection: createDatabaseConnectionOptions(options),
-    ...(options.type === 'postgres' ? { searchPath: [searchPath] } : {}),
+    ...(options.type === 'postgres'
+      ? {
+          searchPath: [searchPath],
+          pool: {
+            afterCreate: (
+              conn: { query: (sql: string, cb: (err: unknown) => void) => void },
+              done: (err: unknown) => void,
+            ) => {
+              conn.query('SET default_transaction_read_only = ON', (err) => {
+                if (err) {
+                  done(err);
+                  return;
+                }
+                conn.query(`SET statement_timeout = ${SETUP_STATEMENT_TIMEOUT_MS}`, done);
+              });
+            },
+          },
+        }
+      : {}),
   });
 }
 

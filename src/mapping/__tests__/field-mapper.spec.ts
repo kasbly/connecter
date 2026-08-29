@@ -119,6 +119,17 @@ describe('mapRowToInventoryItem', () => {
     expect(() => validateInventoryItemWireContract(missingPrice)).toThrow(/price/);
   });
 
+  it('rejects locale-formatted PostgreSQL money values as invalid prices', () => {
+    const result = mapRowToInventoryItem(
+      { id: '1', title: 'Test', price: '$1,234.56' },
+      baseConfig,
+      new Map(),
+    );
+
+    expect(Number.isFinite(result.price)).toBe(false);
+    expect(() => validateInventoryItemWireContract(result)).toThrow(/price/);
+  });
+
   it('keeps an explicit 0 price as a finite 0', () => {
     const result = mapRowToInventoryItem(
       { id: '1', title: 'Test', price: 0 },
@@ -143,6 +154,27 @@ describe('mapRowToInventoryItem', () => {
     );
 
     expect(result.currency).toBe('');
+  });
+
+  it('rejects object-valued title and currency fields instead of stringifying them', () => {
+    const config = {
+      ...baseConfig,
+      fields: { ...baseConfig.fields, currency: 'currency' },
+    };
+    const result = mapRowToInventoryItem(
+      {
+        id: '1',
+        title: { en: '2024 Hyundai Sonata', ar: 'هيونداي سوناتا 2024' },
+        price: 100,
+        currency: { code: 'SAR' },
+      },
+      config,
+      new Map(),
+    );
+
+    expect(result.title).toBe('');
+    expect(result.currency).toBe('');
+    expect(() => validateInventoryItemWireContract(result)).toThrow(/title.*currency/);
   });
 
   it('maps configured source statuses to Kasbly status tokens', () => {

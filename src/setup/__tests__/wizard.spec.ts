@@ -14,6 +14,8 @@ import {
   quoteIfNeeded,
   serializeEnvValue,
   shouldDefaultToTls,
+  STATUS_VALUE_PROMPT_LIMIT,
+  STATUS_VALUE_SCAN_LIMIT,
   toConfigLiteral,
   writePrivateFile,
 } from '../wizard.js';
@@ -21,6 +23,8 @@ import { runWizard } from '../wizard.js';
 import { buildQuery } from '../../mapping/query-builder.js';
 import { mapRowToInventoryItem } from '../../mapping/field-mapper.js';
 import { introspectDatabase } from '../introspect.js';
+import { createDatabaseAdapter } from '../../db/adapter.factory.js';
+import { probeInventoryResource } from '../../routes/health.route.js';
 
 const promptMocks = vi.hoisted(() => ({
   checkbox: vi.fn(),
@@ -31,9 +35,26 @@ const promptMocks = vi.hoisted(() => ({
 }));
 
 const introspectionMocks = vi.hoisted(() => ({ introspectDatabase: vi.fn() }));
+const resourceProbeMocks = vi.hoisted(() => {
+  const adapter = {
+    connect: vi.fn().mockResolvedValue(undefined),
+    disconnect: vi.fn().mockResolvedValue(undefined),
+  };
+  return {
+    adapter,
+    createDatabaseAdapter: vi.fn(() => adapter),
+    probeInventoryResource: vi.fn().mockResolvedValue([]),
+  };
+});
 
 vi.mock('@inquirer/prompts', () => promptMocks);
 vi.mock('../introspect.js', () => introspectionMocks);
+vi.mock('../../db/adapter.factory.js', () => ({
+  createDatabaseAdapter: resourceProbeMocks.createDatabaseAdapter,
+}));
+vi.mock('../../routes/health.route.js', () => ({
+  probeInventoryResource: resourceProbeMocks.probeInventoryResource,
+}));
 
 describe('getFieldMappingPrompt', () => {
   it('offers every column and preselects the matching suggestion', () => {
@@ -56,10 +77,41 @@ describe('getFieldMappingPrompt', () => {
       { name: 'name', type: 'text' },
       { name: 'formatted_price', type: 'varchar' },
       { name: 'amount', type: 'numeric' },
+      { name: 'legacy_price', type: 'money' },
     ]);
 
     expect(prompt.choices.map((choice) => choice.value)).toContain('amount');
     expect(prompt.choices.map((choice) => choice.value)).not.toContain('formatted_price');
+    expect(prompt.choices.map((choice) => choice.value)).not.toContain('legacy_price');
+  });
+
+  it('does not offer UUID columns for status mappings', () => {
+    const prompt = getFieldMappingPrompt('status', [
+      { name: 'id', type: 'uuid' },
+      { name: 'availability', type: 'varchar' },
+    ]);
+
+    expect(prompt.choices.map((choice) => choice.value)).not.toContain('id');
+    expect(prompt.choices.map((choice) => choice.value)).toContain('availability');
+  });
+
+  it.each(['title', 'currency', 'category', 'status'] as const)(
+    'does not offer JSON columns for %s mappings',
+    (field) => {
+      const prompt = getFieldMappingPrompt(field, [
+        { name: 'localized', type: 'jsonb' },
+        { name: 'plain_text', type: 'text' },
+      ]);
+
+      expect(prompt.choices.map((choice) => choice.value)).not.toContain('localized');
+      expect(prompt.choices.map((choice) => choice.value)).toContain('plain_text');
+    },
+  );
+
+  it('continues to offer JSON columns for image mappings', () => {
+    const prompt = getFieldMappingPrompt('images', [{ name: 'image_urls', type: 'jsonb' }]);
+
+    expect(prompt.choices.map((choice) => choice.value)).toContain('image_urls');
   });
 
   it.each(['currency', 'category', 'status'] as const)('offers a fixed value for %s', (field) => {
@@ -392,6 +444,25 @@ describe('runWizard', () => {
       expect(buildQuery({ sortBy: 'price' }, config.resources.inventory).sort.column).toBe(
         config.resources.inventory.fields.price,
       );
+      expect(createDatabaseAdapter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          host: 'database.example.com',
+          database: 'catalog',
+          user: 'reader',
+          password: 'p@ss#word',
+        }),
+      );
+      expect(probeInventoryResource).toHaveBeenCalledWith(
+        resourceProbeMocks.adapter,
+        expect.objectContaining({
+          schema: 'merchant_data',
+          table: 'products',
+          fields: config.resources.inventory.fields,
+          relations: config.resources.inventory.relations,
+        }),
+      );
+      expect(resourceProbeMocks.adapter.connect).toHaveBeenCalledOnce();
+      expect(resourceProbeMocks.adapter.disconnect).toHaveBeenCalledOnce();
     } finally {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
@@ -409,7 +480,7 @@ describe('runWizard', () => {
     });
     const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
-    vi.resetAllMocks();
+    vi.clearAllMocks();
     writeFileSync(
       join(directory, 'connector.config.yml'),
       [
@@ -609,26 +680,23 @@ describe('runWizard', () => {
     const previousDirectory = process.cwd();
     const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
-    vi.resetAllMocks();
+    vi.clearAllMocks();
 
     // 30 distinct values: more than the wizard will ask about in one session.
     const distinctStatusValues = Array.from(
       { length: 30 },
       (_, index) => `status-${String(index).padStart(2, '0')}`,
     );
-    const pluck = vi.fn().mockResolvedValue(distinctStatusValues);
-    const whereNotNull = vi.fn(() => ({ pluck }));
-    const distinct = vi.fn(() => ({ whereNotNull }));
-    const table = vi.fn(() => ({ distinct, first: vi.fn().mockResolvedValue(null) }));
+    const first = vi.fn().mockResolvedValue(null);
+    const table = vi.fn(() => ({ first }));
     const withSchema = vi.fn(() => ({ table }));
-    const db = Object.assign(
-      // A bare db(table) call resolves against the default search path, which is
-      // exactly the failure this run must not reproduce.
-      vi.fn(() => {
-        throw new Error('relation "products" does not exist');
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      raw: vi.fn().mockResolvedValue({
+        rows: distinctStatusValues.map((value) => ({ value })),
       }),
-      { destroy: vi.fn().mockResolvedValue(undefined), withSchema },
-    );
+      withSchema,
+    });
 
     const statusAnswers = new Map<string, string>([
       ['status-00', 'ACTIVE'],
@@ -692,12 +760,17 @@ describe('runWizard', () => {
       process.chdir(directory);
       await runWizard();
 
-      // The distinct-values read is schema-qualified, so the bare-call trap never fires.
-      expect(db).not.toHaveBeenCalled();
-      expect(withSchema).toHaveBeenCalledWith('catalog');
-      expect(table).toHaveBeenCalledWith('products');
-      expect(distinct).toHaveBeenCalledWith('status');
-      expect(whereNotNull).toHaveBeenCalledWith('status');
+      expect(db.raw).toHaveBeenCalledWith(
+        expect.stringContaining('SELECT DISTINCT "value" FROM (SELECT ?? AS "value"'),
+        [
+          'status',
+          'catalog',
+          'products',
+          'status',
+          STATUS_VALUE_SCAN_LIMIT,
+          STATUS_VALUE_PROMPT_LIMIT,
+        ],
+      );
 
       // Setup completes: the config is written, not lost to a thrown error.
       const generated = yaml.load(

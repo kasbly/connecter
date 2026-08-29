@@ -115,6 +115,16 @@ function toFinitePrice(value: unknown): number {
   return Number.isFinite(price) ? price : Number.NaN;
 }
 
+/**
+ * Keep object-valued database fields from being silently serialized as
+ * "[object Object]". Empty strings then fail the inventory wire contract with
+ * the same field-specific error as a missing mapped value.
+ */
+function toMappedString(value: unknown): string {
+  if (value === null || value === undefined || typeof value === 'object') return '';
+  return String(value);
+}
+
 const DEFAULT_STATUS_VALUES: Required<StatusValuesConfig> = {
   ACTIVE: ['ACTIVE', 'active'],
   DRAFT: ['DRAFT', 'draft'],
@@ -218,10 +228,10 @@ export function mapRowToInventoryItem(
 
   return {
     externalId,
-    title: String(fields['title'] ?? ''),
+    title: toMappedString(fields['title']),
     description: typeof fields['description'] === 'string' ? fields['description'] : null,
     price: toFinitePrice(fields['price']),
-    currency: String(fields['currency'] ?? ''),
+    currency: toMappedString(fields['currency']),
     category: String(fields['category'] ?? ''),
     // A config with no `fields.status` at all declares the whole catalog live, so
     // it maps to ACTIVE. Once a status column IS mapped, a missing or newly

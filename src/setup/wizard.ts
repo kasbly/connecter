@@ -27,12 +27,9 @@ import {
   suggestFilterableColumns,
   type FilterableColumnSuggestion,
 } from './suggest.js';
-import {
-  mapRowToInventoryItem,
-  resolveColumnValue,
-  UNMAPPED_STATUS_FALLBACK,
-  validateInventoryItemWireContract,
-} from '../mapping/field-mapper.js';
+import { UNMAPPED_STATUS_FALLBACK } from '../mapping/field-mapper.js';
+import { createDatabaseAdapter } from '../db/adapter.factory.js';
+import { probeInventoryResource } from '../routes/health.route.js';
 
 interface DatabaseTlsSettings {
   enabled: boolean;
@@ -70,7 +67,7 @@ interface MappingColumn {
 function isCompatibleFieldColumn(field: FieldMappingTarget, type: string): boolean {
   const normalizedType = type.trim().toLowerCase();
   if (field === 'price') {
-    return /^(smallint|integer|bigint|decimal|numeric|real|double precision|money|float)/.test(
+    return /^(smallint|integer|bigint|decimal|numeric|real|double precision|float)/.test(
       normalizedType,
     );
   }
@@ -79,7 +76,11 @@ function isCompatibleFieldColumn(field: FieldMappingTarget, type: string): boole
     return /(char|text|json|xml|array)/.test(normalizedType);
   }
 
-  return /(char|text|json|xml|uuid|enum)/.test(normalizedType);
+  if (field === 'title' || field === 'currency' || field === 'category' || field === 'status') {
+    return /(char|text|xml|enum)/.test(normalizedType);
+  }
+
+  return /(char|text|json|xml|enum)/.test(normalizedType);
 }
 
 /**
@@ -89,6 +90,7 @@ function isCompatibleFieldColumn(field: FieldMappingTarget, type: string): boole
  * explicitly left unmapped — is covered by `unknownStatusPolicy`.
  */
 export const STATUS_VALUE_PROMPT_LIMIT = 25;
+export const STATUS_VALUE_SCAN_LIMIT = 5_000;
 
 async function collectStatusValues(
   db: Awaited<ReturnType<typeof introspectDatabase>>['db'],
@@ -96,14 +98,13 @@ async function collectStatusValues(
   table: string,
   column: string,
 ): Promise<StatusValuesConfig> {
-  // Schema-qualified: the client's search_path does not necessarily contain the
-  // schema the operator selected, so a bare table reference cannot be resolved.
-  const values = (await db
-    .withSchema(schema)
-    .table(table)
-    .distinct(column)
-    .whereNotNull(column)
-    .pluck(column)) as unknown[];
+  // Keep the distinct operation outside a bounded subquery. A bare DISTINCT must
+  // inspect the complete merchant table before returning any values.
+  const result = await db.raw<{ rows: Array<{ value: unknown }> }>(
+    'SELECT DISTINCT "value" FROM (SELECT ?? AS "value" FROM ??.?? WHERE ?? IS NOT NULL LIMIT ?) AS "sampled_rows" LIMIT ?',
+    [column, schema, table, column, STATUS_VALUE_SCAN_LIMIT, STATUS_VALUE_PROMPT_LIMIT],
+  );
+  const values = result.rows.map((row) => row.value);
   const distinctValues = Array.from(new Set(values.map((value) => String(value)))).sort();
   const presentedValues = distinctValues.slice(0, STATUS_VALUE_PROMPT_LIMIT);
   const skippedCount = distinctValues.length - presentedValues.length;
@@ -833,28 +834,20 @@ export async function runWizard(): Promise<void> {
     );
   }
 
-  // Validate a real mapped row before persisting a setup that would otherwise
-  // look healthy until Kasbly consumes it. Empty tables remain valid: there is
-  // no sample row to disprove the mapping yet.
+  // Validate through the same adapter and probe that `/health`, `validate`, and
+  // Kasbly's Test connection use. This keeps setup's sample row, filtering,
+  // ordering, relation reads, and wire-contract validation in lockstep.
+  const validationAdapter = createDatabaseAdapter({
+    ...config.database,
+    host: dbHost,
+    database: dbName,
+    user: dbUser,
+    password: dbPassword,
+    ...(tls.ca ? { sslCa: tls.ca } : {}),
+  });
   try {
-    const sampleRow = await db.withSchema(selectedSchema).table(selectedTableName).first();
-    if (sampleRow) {
-      validateInventoryItemWireContract(
-        mapRowToInventoryItem(
-          sampleRow as Record<string, unknown>,
-          config.resources.inventory,
-          new Map(),
-        ),
-        config.resources.inventory.fields['images']
-          ? [
-              resolveColumnValue(
-                sampleRow as Record<string, unknown>,
-                config.resources.inventory.fields['images'],
-              ),
-            ]
-          : [],
-      );
-    }
+    await validationAdapter.connect();
+    await probeInventoryResource(validationAdapter, config.resources.inventory);
   } catch (error) {
     console.error(
       `Cannot save configuration: inventory sample violates the wire contract: ${
@@ -863,6 +856,8 @@ export async function runWizard(): Promise<void> {
     );
     await db.destroy();
     return;
+  } finally {
+    await validationAdapter.disconnect();
   }
 
   // Write config file
