@@ -4,7 +4,8 @@ import { getRequiredColumns, getSourceStatusValues } from './field-mapper.js';
 
 const MAX_PAGE_SIZE = 100;
 const MAX_PAGE_OFFSET = 100_000;
-const DEFAULT_PAGE_SIZE = 20;
+/** Default number of listings returned by GET /inventory. */
+export const DEFAULT_PAGE_SIZE = 20;
 const MAX_SEARCH_LENGTH = 200;
 const MAX_SEARCH_TERMS = 10;
 

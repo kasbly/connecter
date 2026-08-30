@@ -14,7 +14,7 @@ import {
   resolveInventoryStatus,
   validateInventoryItemWireContract,
 } from '../mapping/field-mapper.js';
-import { getDefaultSort } from '../mapping/query-builder.js';
+import { DEFAULT_PAGE_SIZE, getDefaultSort } from '../mapping/query-builder.js';
 
 let cachedVersion: string | null = null;
 
@@ -73,9 +73,9 @@ function getReferenceValues(
 }
 
 /**
- * Runs the smallest read-only query that exercises the configured inventory
+ * Runs a bounded read-only query that exercises the configured inventory
  * mapping. It is shared by startup validation and `/health` so a ready
- * connector has proved it can read its merchant's inventory resource.
+ * connector has proved it can read a normal inventory page from the merchant.
  */
 export async function probeInventoryResource(
   dbAdapter: DatabaseAdapter,
@@ -101,7 +101,7 @@ export async function probeInventoryResource(
       ? await dbAdapter.query(
           resourceConfig.table,
           [],
-          { page: 1, pageSize: 1 },
+          { page: 1, pageSize: DEFAULT_PAGE_SIZE },
           sampleSort,
           resourceConfig.baseFilter,
           selectColumns,
@@ -110,7 +110,7 @@ export async function probeInventoryResource(
       : await dbAdapter.query(
           resourceConfig.table,
           [],
-          { page: 1, pageSize: 1 },
+          { page: 1, pageSize: DEFAULT_PAGE_SIZE },
           sampleSort,
           resourceConfig.baseFilter,
           selectColumns,
@@ -146,8 +146,8 @@ export async function probeInventoryResource(
     }),
   );
 
-  // An empty catalog is valid, but a representative row must survive the
-  // exact mapping and JSON wire contract before the connector is healthy.
+  // An empty catalog is valid, but every row in a normal page must survive
+  // the exact mapping and JSON wire contract before the connector is healthy.
   if (rows.length > 0) {
     const relationData = new Map(relationEntries);
     for (const row of rows) {

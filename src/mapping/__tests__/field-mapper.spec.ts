@@ -156,10 +156,10 @@ describe('mapRowToInventoryItem', () => {
     expect(result.currency).toBe('');
   });
 
-  it('rejects object-valued title and currency fields instead of stringifying them', () => {
+  it('rejects object-valued title, currency, and category fields instead of stringifying them', () => {
     const config = {
       ...baseConfig,
-      fields: { ...baseConfig.fields, currency: 'currency' },
+      fields: { ...baseConfig.fields, currency: 'currency', category: 'category' },
     };
     const result = mapRowToInventoryItem(
       {
@@ -167,6 +167,7 @@ describe('mapRowToInventoryItem', () => {
         title: { en: '2024 Hyundai Sonata', ar: 'هيونداي سوناتا 2024' },
         price: 100,
         currency: { code: 'SAR' },
+        category: { en: 'SUV', ar: 'رياضية' },
       },
       config,
       new Map(),
@@ -174,6 +175,7 @@ describe('mapRowToInventoryItem', () => {
 
     expect(result.title).toBe('');
     expect(result.currency).toBe('');
+    expect(result.category).toBe('');
     expect(() => validateInventoryItemWireContract(result)).toThrow(/title.*currency/);
   });
 

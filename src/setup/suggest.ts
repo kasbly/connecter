@@ -10,6 +10,7 @@ export interface FieldSuggestion {
 export interface RelationSuggestion {
   table: string;
   foreignKeyColumn: string;
+  toColumn: string;
   relationType: 'images' | 'features' | 'generic';
   confidence: 'high' | 'medium' | 'low';
 }
@@ -167,6 +168,7 @@ export function suggestRelations(
       suggestions.push({
         table: fk.fromTable,
         foreignKeyColumn: fk.fromColumn,
+        toColumn: fk.toColumn,
         relationType: 'images',
         confidence: 'high',
       });
@@ -175,6 +177,7 @@ export function suggestRelations(
       suggestions.push({
         table: fk.fromTable,
         foreignKeyColumn: fk.fromColumn,
+        toColumn: fk.toColumn,
         relationType: 'features',
         confidence: 'low',
       });
@@ -182,6 +185,7 @@ export function suggestRelations(
       suggestions.push({
         table: fk.fromTable,
         foreignKeyColumn: fk.fromColumn,
+        toColumn: fk.toColumn,
         relationType: 'generic',
         confidence: 'low',
       });

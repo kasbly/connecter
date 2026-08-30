@@ -164,6 +164,7 @@ describe('suggestRelations', () => {
 
     const suggestions = suggestRelations('Car', tables, fks);
     expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]).toMatchObject({ foreignKeyColumn: 'carId', toColumn: 'id' });
     expect(suggestions[0]!.relationType).toBe('images');
     expect(suggestions[0]!.confidence).toBe('high');
   });

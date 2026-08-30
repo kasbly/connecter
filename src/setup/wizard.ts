@@ -619,7 +619,7 @@ export async function runWizard(): Promise<void> {
         schema: selectedSchema,
         table: suggestion.table,
         foreignKey: quoteIfNeeded(suggestion.foreignKeyColumn),
-        referenceKey: quoteIfNeeded(idColumn),
+        referenceKey: quoteIfNeeded(suggestion.toColumn ?? idColumn),
         fields: fieldsMap,
       };
 

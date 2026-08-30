@@ -122,7 +122,7 @@ describe('health route', () => {
     expect(dbAdapter.query).toHaveBeenCalledWith(
       'inventory',
       [],
-      { page: 1, pageSize: 1 },
+      { page: 1, pageSize: 20 },
       { column: 'id', direction: 'desc' },
       'published = true',
       expect.arrayContaining(['id', 'title', 'price', 'sku', 'condition']),
@@ -222,7 +222,7 @@ describe('health route', () => {
     expect(unknownStatusValues).toEqual(['discontinued']);
   });
 
-  it('samples the same default sort GET /inventory uses without sortBy', async () => {
+  it('samples a full default inventory page using the same sort as GET /inventory', async () => {
     const dbAdapter = createHealthAdapter(true);
     const resource = { ...inventoryResource, updatedAtColumn: 'updated_at' };
 
@@ -233,19 +233,22 @@ describe('health route', () => {
     expect(dbAdapter.query).toHaveBeenCalledWith(
       'inventory',
       [],
-      { page: 1, pageSize: 1 },
+      { page: 1, pageSize: 20 },
       listSort,
       undefined,
       expect.any(Array),
     );
   });
 
-  it('reports a field-specific error when a mapped sample cannot satisfy the wire contract', async () => {
+  it('reports a field-specific error when any sampled row cannot satisfy the wire contract', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(true);
     vi.mocked(dbAdapter.query).mockResolvedValueOnce({
-      rows: [{ id: '1', title: 'Test', price: 'SAR 1,250' }],
-      total: 1,
+      rows: [
+        { id: '1', title: 'Valid listing', price: 1250 },
+        { id: '2', title: 'Invalid listing', price: 'SAR 1,250' },
+      ],
+      total: 2,
     });
     registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
 

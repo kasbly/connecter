@@ -353,6 +353,7 @@ describe('runWizard', () => {
             rowCount: 100,
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
               { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
               { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
               { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
@@ -364,7 +365,7 @@ describe('runWizard', () => {
             rowCount: 200,
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
-              { name: 'product_id', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'product_sku', type: 'text', nullable: false, isPrimaryKey: false },
               { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
               { name: 'sort_order', type: 'integer', nullable: false, isPrimaryKey: false },
             ],
@@ -382,9 +383,9 @@ describe('runWizard', () => {
         foreignKeys: [
           {
             fromTable: 'product_images',
-            fromColumn: 'product_id',
+            fromColumn: 'product_sku',
             toTable: 'products',
-            toColumn: 'id',
+            toColumn: 'sku',
           },
           {
             fromTable: 'variant_images',
@@ -417,6 +418,8 @@ describe('runWizard', () => {
       expect(config.resources.inventory.relations?.product_images).toMatchObject({
         schema: 'merchant_data',
         imageUrlField: 'url',
+        foreignKey: '"product_sku"',
+        referenceKey: '"sku"',
       });
       expect(config.resources.inventory.relations?.variant_images).toMatchObject({
         schema: 'merchant_data',
@@ -424,12 +427,12 @@ describe('runWizard', () => {
       });
       expect(
         mapRowToInventoryItem(
-          { id: 'product-1', title: 'Product', price: 100, currency: 'SAR' },
+          { id: 'product-1', sku: 'sonata-2024', title: 'Product', price: 100, currency: 'SAR' },
           config.resources.inventory,
           new Map([
             [
               'product_images',
-              new Map([['product-1', [{ url: 'https://example.com/product.jpg' }]]]),
+              new Map([['sonata-2024', [{ url: 'https://example.com/product.jpg' }]]]),
             ],
             [
               'variant_images',

@@ -232,7 +232,7 @@ export function mapRowToInventoryItem(
     description: typeof fields['description'] === 'string' ? fields['description'] : null,
     price: toFinitePrice(fields['price']),
     currency: toMappedString(fields['currency']),
-    category: String(fields['category'] ?? ''),
+    category: toMappedString(fields['category']),
     // A config with no `fields.status` at all declares the whole catalog live, so
     // it maps to ACTIVE. Once a status column IS mapped, a missing or newly
     // introduced source value stays non-sellable until the merchant maps it in
