@@ -291,6 +291,32 @@ describe('suggestFilterableColumns', () => {
     );
   });
 
+  it.each(['integer', 'USER-DEFINED'])(
+    'suggests a mapped %s status as the status filter',
+    (type) => {
+      const suggestions = suggestFilterableColumns(
+        [col('id', 'integer', true), col('status', type)],
+        [
+          {
+            columnName: 'status',
+            suggestedMapping: 'status',
+            confidence: 'high' as const,
+            mappingType: 'field' as const,
+          },
+        ],
+        [],
+      );
+
+      expect(suggestions).toEqual([
+        expect.objectContaining({
+          columnName: 'status',
+          filterName: 'status',
+          filterType: 'string',
+        }),
+      ]);
+    },
+  );
+
   it('skips free-text columns like title and description', () => {
     const columns = [col('id', 'integer', true), col('title', 'text'), col('description', 'text')];
     const fieldMappings = [

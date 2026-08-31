@@ -11,6 +11,8 @@ export interface IntrospectedTable {
 export interface IntrospectedColumn {
   name: string;
   type: string;
+  /** PostgreSQL's underlying type name, which identifies user-defined enums. */
+  udtName?: string;
   nullable: boolean;
   isPrimaryKey: boolean;
 }
@@ -153,10 +155,11 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
       rows: {
         column_name: string;
         data_type: string;
+        udt_name: string;
         is_nullable: string;
       }[];
     }>(
-      `SELECT column_name, data_type, is_nullable
+      `SELECT column_name, data_type, udt_name, is_nullable
        FROM information_schema.columns
        WHERE table_name = ? AND table_schema = ?
        ORDER BY ordinal_position`,
@@ -180,6 +183,7 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
     const columns: IntrospectedColumn[] = columnRows.rows.map((col) => ({
       name: col.column_name,
       type: col.data_type,
+      ...(col.udt_name ? { udtName: col.udt_name } : {}),
       nullable: col.is_nullable === 'YES',
       isPrimaryKey: pkColumns.has(col.column_name),
     }));

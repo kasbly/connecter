@@ -308,6 +308,22 @@ export function suggestFilterableColumns(
     const isNumeric = NUMERIC_TYPES.has(col.type.toLowerCase());
     const isText = TEXT_TYPES.has(col.type.toLowerCase());
 
+    // Kasbly always requests ACTIVE inventory. A mapped source-status column
+    // must therefore be exposed as the canonical `status` filter, including
+    // PostgreSQL enums and integer status codes.
+    if (mappedName === 'status') {
+      if (!usedFilterNames.has('status')) {
+        suggestions.push({
+          columnName: col.name,
+          filterName: 'status',
+          filterType: 'string',
+          confidence: 'high',
+        });
+        usedFilterNames.add('status');
+      }
+      continue;
+    }
+
     if (isNumeric) {
       const filterNameSuffix = mappedName.charAt(0).toUpperCase() + mappedName.slice(1);
       const minFilterName = `min${filterNameSuffix}`;

@@ -149,6 +149,36 @@ describe('buildQuery', () => {
     });
   });
 
+  it('enforces ACTIVE without ignoring it when every listing is implicitly active', () => {
+    const result = buildQuery(
+      { 'filter.status': 'ACTIVE' },
+      { ...baseConfig, fields: { title: 'title', price: 'price' } },
+    );
+
+    expect(result.conditions).toEqual([]);
+    expect(result.ignoredFilters).not.toContain('status');
+  });
+
+  it('returns no rows for a non-ACTIVE filter on an implicitly active catalogue', () => {
+    const result = buildQuery(
+      { 'filter.status': 'SOLD' },
+      { ...baseConfig, fields: { title: 'title', price: 'price' } },
+    );
+
+    expect(result.conditions).toContainEqual({ column: '1', operator: '=', value: 0 });
+    expect(result.ignoredFilters).not.toContain('status');
+  });
+
+  it('treats a literal ACTIVE status mapping as an enforced fixed status', () => {
+    const result = buildQuery(
+      { 'filter.status': 'ACTIVE' },
+      { ...baseConfig, fields: { ...baseConfig.fields, status: "'ACTIVE'" } },
+    );
+
+    expect(result.conditions).toEqual([]);
+    expect(result.ignoredFilters).not.toContain('status');
+  });
+
   it('generates filter conditions for number type', () => {
     const result = buildQuery({ 'filter.year': '2024' }, baseConfig);
     expect(result.conditions).toContainEqual({

@@ -62,10 +62,11 @@ interface FieldMappingPrompt {
 interface MappingColumn {
   name: string;
   type: string;
+  udtName?: string;
 }
 
-function isCompatibleFieldColumn(field: FieldMappingTarget, type: string): boolean {
-  const normalizedType = type.trim().toLowerCase();
+function isCompatibleFieldColumn(field: FieldMappingTarget, column: MappingColumn): boolean {
+  const normalizedType = column.type.trim().toLowerCase();
   if (field === 'price') {
     return /^(smallint|integer|bigint|decimal|numeric|real|double precision|float)/.test(
       normalizedType,
@@ -76,7 +77,16 @@ function isCompatibleFieldColumn(field: FieldMappingTarget, type: string): boole
     return /(char|text|json|xml|array)/.test(normalizedType);
   }
 
-  if (field === 'title' || field === 'currency' || field === 'category' || field === 'status') {
+  if (field === 'status') {
+    // PostgreSQL reports enum columns as USER-DEFINED, with the enum name in
+    // udt_name. Integer status codes are common in older catalogues too.
+    return (
+      /(char|text|xml|enum|smallint|integer)/.test(normalizedType) ||
+      (normalizedType === 'user-defined' && Boolean(column.udtName?.trim()))
+    );
+  }
+
+  if (field === 'title' || field === 'currency' || field === 'category') {
     return /(char|text|xml|enum)/.test(normalizedType);
   }
 
@@ -145,7 +155,7 @@ export function getFieldMappingPrompt(
   const columnNames = columns
     .filter(
       (column): column is string | MappingColumn =>
-        typeof column === 'string' || isCompatibleFieldColumn(field, column.type),
+        typeof column === 'string' || isCompatibleFieldColumn(field, column),
     )
     .map((column) => (typeof column === 'string' ? column : column.name));
   const choices: FieldMappingPrompt['choices'] = [
@@ -513,9 +523,11 @@ export async function runWizard(): Promise<void> {
       choices: filterSuggestions.map((f) => ({
         name: `${f.filterName} (${f.columnName}, ${f.filterType})`,
         value: f.filterName,
-        checked: existingConfig
-          ? Boolean(existingConfig.resources.inventory.filterableColumns?.[f.filterName])
-          : true,
+        checked:
+          (f.filterName === 'status' && Boolean(fieldMappings.status)) ||
+          (existingConfig
+            ? Boolean(existingConfig.resources.inventory.filterableColumns?.[f.filterName])
+            : true),
       })),
     });
     const selectedNames = new Set(filterChoiceNames);

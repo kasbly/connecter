@@ -125,8 +125,8 @@ describe('introspectDatabase', () => {
         .mockResolvedValueOnce({ rows: [{ tablename: 'products' }] })
         .mockResolvedValueOnce({
           rows: [
-            { column_name: 'id', data_type: 'uuid', is_nullable: 'NO' },
-            { column_name: 'title', data_type: 'text', is_nullable: 'NO' },
+            { column_name: 'id', data_type: 'uuid', udt_name: 'uuid', is_nullable: 'NO' },
+            { column_name: 'title', data_type: 'text', udt_name: 'text', is_nullable: 'NO' },
           ],
         })
         .mockResolvedValueOnce({ rows: [{ column_name: 'id' }] })
@@ -167,8 +167,8 @@ describe('introspectDatabase', () => {
           name: 'products',
           rowCount: 12,
           columns: [
-            { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
-            { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+            { name: 'id', type: 'uuid', udtName: 'uuid', nullable: false, isPrimaryKey: true },
+            { name: 'title', type: 'text', udtName: 'text', nullable: false, isPrimaryKey: false },
           ],
         },
       ],

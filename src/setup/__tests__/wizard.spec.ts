@@ -95,6 +95,19 @@ describe('getFieldMappingPrompt', () => {
     expect(prompt.choices.map((choice) => choice.value)).toContain('availability');
   });
 
+  it('offers PostgreSQL enums and integer status codes', () => {
+    const prompt = getFieldMappingPrompt('status', [
+      { name: 'state', type: 'USER-DEFINED', udtName: 'listing_state' },
+      { name: 'status_code', type: 'smallint' },
+      { name: 'id', type: 'uuid' },
+    ]);
+
+    expect(prompt.choices.map((choice) => choice.value)).toEqual(
+      expect.arrayContaining(['state', 'status_code']),
+    );
+    expect(prompt.choices.map((choice) => choice.value)).not.toContain('id');
+  });
+
   it.each(['title', 'currency', 'category', 'status'] as const)(
     'does not offer JSON columns for %s mappings',
     (field) => {

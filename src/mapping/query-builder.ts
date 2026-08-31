@@ -58,6 +58,11 @@ function normalizeSortColumn(columnExpr: string): string {
   return quotedColumnMatch ? quotedColumnMatch[1]! : trimmedColumnExpr;
 }
 
+function isFixedActiveStatus(config: InventoryResourceConfig): boolean {
+  const statusField = config.fields.status;
+  return statusField === undefined || /^'ACTIVE'$/i.test(statusField.trim());
+}
+
 /**
  * Default GET /inventory sort: `updatedAt DESC` when configured, otherwise
  * `id DESC`. `/health` and `npm run validate` must sample this same order so
@@ -78,8 +83,14 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   const updatedSince = getSingleQueryValue(params, 'updatedSince');
   const requestedSortBy = getSingleQueryValue(params, 'sortBy');
   const requestedSortDirection = getSingleQueryValue(params, 'sortDirection');
+  const statusFilter = getSingleQueryValue(params, 'filter.status');
+  const fixedActiveStatus = isFixedActiveStatus(config);
 
   const configuredFilterKeys = new Set(Object.keys(config.filterableColumns ?? {}));
+  // An unmapped (or literal ACTIVE) status declares that every row is ACTIVE.
+  // It therefore enforces ACTIVE without a source column, rather than ignoring
+  // the customer-facing filter.
+  if (fixedActiveStatus && statusFilter) configuredFilterKeys.add('status');
   const ignoredFilters = Object.keys(params)
     .filter(
       (key) => key.startsWith('filter.') && !configuredFilterKeys.has(key.slice('filter.'.length)),
@@ -161,6 +172,14 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
       operator: '>=',
       value: new Date(updatedSince).toISOString(),
     });
+  }
+
+  if (fixedActiveStatus && statusFilter) {
+    if (statusFilter !== 'ACTIVE') {
+      // A fixed-active catalogue has no rows in any other status. Use a
+      // constant false predicate so both the page and total query stay empty.
+      conditions.push({ column: '1', operator: '=', value: 0 });
+    }
   }
 
   // Dynamic filters from filterableColumns config. Unknown keys are reported
