@@ -4,6 +4,7 @@ export const SETUP_STATEMENT_TIMEOUT_MS = 10_000;
 
 export interface IntrospectedTable {
   name: string;
+  kind: 'table' | 'view' | 'materialized view';
   rowCount: number;
   columns: IntrospectedColumn[];
 }
@@ -140,35 +141,115 @@ function createDatabaseClient(options: DbConnectOptions): Knex {
 }
 
 async function introspectTables(db: Knex, schema: string): Promise<IntrospectedTable[]> {
-  const tableRows = await db.raw<{ rows: { tablename: string }[] }>(
-    `SELECT tablename FROM pg_tables WHERE schemaname = ? ORDER BY tablename`,
-    [schema],
+  const tableRows = await db.raw<{
+    rows: { name: string; kind: IntrospectedTable['kind'] }[];
+  }>(
+    `SELECT table_name AS name,
+            CASE table_type
+              WHEN 'BASE TABLE' THEN 'table'
+              ELSE 'view'
+            END AS kind
+     FROM information_schema.tables
+     WHERE table_schema = ? AND table_type IN ('BASE TABLE', 'VIEW')
+     UNION ALL
+     SELECT matviewname AS name, 'materialized view' AS kind
+     FROM pg_matviews
+     WHERE schemaname = ?
+     ORDER BY name`,
+    [schema, schema],
   );
 
   const tables: IntrospectedTable[] = [];
 
   for (const tableRow of tableRows.rows) {
-    const tableName = tableRow.tablename;
+    const tableName = tableRow.name;
 
-    // Get columns
-    const columnRows = await db.raw<{
+    // `information_schema` deliberately excludes materialized views. Keep its
+    // privilege-aware path for tables and ordinary views, but read a materialized
+    // view directly from the PostgreSQL catalogs.
+    const columnRows: {
       rows: {
         column_name: string;
         data_type: string;
         udt_name: string;
         is_nullable: string;
       }[];
-    }>(
-      `SELECT column_name, data_type, udt_name, is_nullable
+    } =
+      tableRow.kind === 'materialized view'
+        ? await db.raw<{
+            rows: {
+              column_name: string;
+              data_type: string;
+              udt_name: string;
+              is_nullable: string;
+            }[];
+          }>(
+            `SELECT a.attname AS column_name,
+                    CASE WHEN t.typtype = 'e' THEN 'USER-DEFINED'
+                         ELSE pg_catalog.format_type(a.atttypid, a.atttypmod)
+                    END AS data_type,
+                    t.typname AS udt_name,
+                    CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable
+             FROM pg_attribute a
+             JOIN pg_class c ON c.oid = a.attrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_type t ON t.oid = a.atttypid
+             WHERE c.relkind = 'm'
+               AND c.relname = ?
+               AND n.nspname = ?
+               AND a.attnum > 0
+               AND NOT a.attisdropped
+             ORDER BY a.attnum`,
+            [tableName, schema],
+          )
+        : await db.raw<{
+            rows: {
+              column_name: string;
+              data_type: string;
+              udt_name: string;
+              is_nullable: string;
+            }[];
+          }>(
+            `SELECT column_name, data_type, udt_name, is_nullable
        FROM information_schema.columns
        WHERE table_name = ? AND table_schema = ?
        ORDER BY ordinal_position`,
-      [tableName, schema],
-    );
+            [tableName, schema],
+          );
 
-    // Get primary key columns
-    const pkRows = await db.raw<{ rows: { column_name: string }[] }>(
-      `SELECT kcu.column_name
+    // Materialized views cannot have a primary-key constraint. A valid,
+    // non-partial unique index is the closest equivalent and is the index
+    // PostgreSQL itself requires for concurrent refreshes.
+    const pkRows =
+      tableRow.kind === 'materialized view'
+        ? await db.raw<{ rows: { column_name: string }[] }>(
+            `WITH materialized_view AS (
+               SELECT c.oid
+               FROM pg_class c
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE c.relkind = 'm' AND c.relname = ? AND n.nspname = ?
+             ), unique_index AS (
+               SELECT i.indexrelid, i.indrelid, i.indnkeyatts
+               FROM pg_index i
+               JOIN materialized_view m ON m.oid = i.indrelid
+               WHERE i.indisunique
+                 AND i.indisvalid
+                 AND i.indpred IS NULL
+                 AND i.indexprs IS NULL
+               ORDER BY i.indnkeyatts, i.indexrelid
+               LIMIT 1
+             )
+             SELECT a.attname AS column_name
+             FROM unique_index i
+             JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS key(attnum, ordinal_position)
+               ON TRUE
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum
+             WHERE key.ordinal_position <= i.indnkeyatts
+             ORDER BY key.ordinal_position`,
+            [tableName, schema],
+          )
+        : await db.raw<{ rows: { column_name: string }[] }>(
+            `SELECT kcu.column_name
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu
          ON tc.constraint_name = kcu.constraint_name
@@ -176,8 +257,8 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
        WHERE tc.constraint_type = 'PRIMARY KEY'
          AND tc.table_name = ?
        AND tc.table_schema = ?`,
-      [tableName, schema],
-    );
+            [tableName, schema],
+          );
     const pkColumns = new Set(pkRows.rows.map((r) => r.column_name));
 
     const columns: IntrospectedColumn[] = columnRows.rows.map((col) => ({
@@ -197,7 +278,7 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
     );
     const rowCount = Math.max(0, Number(countResult.rows[0]?.estimate ?? 0));
 
-    tables.push({ name: tableName, rowCount, columns });
+    tables.push({ name: tableName, kind: tableRow.kind, rowCount, columns });
   }
 
   return tables;

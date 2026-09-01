@@ -38,7 +38,10 @@ const testConfig: InventoryResourceConfig = {
 };
 
 const connectorInventoryFixturePath = fileURLToPath(
-  new URL('../../../../../contracts/connector-inventory-response.json', import.meta.url),
+  new URL(
+    '../../../../../packages/ai/src/tools/connectors/__contracts__/inventory-response.json',
+    import.meta.url,
+  ),
 );
 const connectorInventoryFixture = JSON.parse(readFileSync(connectorInventoryFixturePath, 'utf8'));
 

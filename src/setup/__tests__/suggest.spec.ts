@@ -151,9 +151,10 @@ describe('suggestSoftDeleteColumn', () => {
 describe('suggestRelations', () => {
   it('identifies image tables', () => {
     const tables: IntrospectedTable[] = [
-      { name: 'Car', rowCount: 100, columns: [col('id', 'integer', true)] },
+      { name: 'Car', kind: 'table', rowCount: 100, columns: [col('id', 'integer', true)] },
       {
         name: 'Image',
+        kind: 'table',
         rowCount: 1000,
         columns: [col('id', 'integer', true), col('carId', 'integer'), col('url', 'text')],
       },
@@ -171,9 +172,10 @@ describe('suggestRelations', () => {
 
   it('identifies small feature tables', () => {
     const tables: IntrospectedTable[] = [
-      { name: 'Car', rowCount: 100, columns: [col('id', 'integer', true)] },
+      { name: 'Car', kind: 'table', rowCount: 100, columns: [col('id', 'integer', true)] },
       {
         name: 'CarFeature',
+        kind: 'table',
         rowCount: 500,
         columns: [col('id', 'integer', true), col('carId', 'integer'), col('name', 'text')],
       },
@@ -189,7 +191,9 @@ describe('suggestRelations', () => {
   });
 
   it('returns empty when no foreign keys point to table', () => {
-    const tables: IntrospectedTable[] = [{ name: 'Car', rowCount: 100, columns: [col('id')] }];
+    const tables: IntrospectedTable[] = [
+      { name: 'Car', kind: 'table', rowCount: 100, columns: [col('id')] },
+    ];
     const suggestions = suggestRelations('Car', tables, []);
     expect(suggestions).toEqual([]);
   });

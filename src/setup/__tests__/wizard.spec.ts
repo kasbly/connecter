@@ -308,7 +308,47 @@ describe('serializeEnvValue', () => {
 });
 
 describe('runWizard', () => {
-  it('writes a loadable config whose quoted fields support bare sortBy values', async () => {
+  it('refuses an empty schema before showing the inventory-object selector', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = { destroy: vi.fn().mockResolvedValue(undefined) };
+
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      throw new Error(`Unexpected select prompt: ${message}`);
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('catalog');
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockResolvedValue(false);
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: { tables: [], foreignKeys: [] },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await expect(runWizard()).rejects.toThrow(
+        'No tables or views in schema catalog — pick another schema.',
+      );
+      expect(db.destroy).toHaveBeenCalledOnce();
+      expect(promptMocks.select).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Which table contains your products/inventory?' }),
+      );
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('writes a loadable config from a materialized view whose quoted fields support bare sortBy values', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
     const db = Object.assign(vi.fn(), {
@@ -363,6 +403,7 @@ describe('runWizard', () => {
         tables: [
           {
             name: 'products',
+            kind: 'materialized view',
             rowCount: 100,
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
@@ -371,10 +412,13 @@ describe('runWizard', () => {
               { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
               { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
               { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'makeEn', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'year', type: 'integer', nullable: true, isPrimaryKey: false },
             ],
           },
           {
             name: 'product_images',
+            kind: 'table',
             rowCount: 200,
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
@@ -385,6 +429,7 @@ describe('runWizard', () => {
           },
           {
             name: 'variant_images',
+            kind: 'table',
             rowCount: 200,
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
@@ -421,6 +466,7 @@ describe('runWizard', () => {
       );
       expect(config.resources.inventory.fields.price).toBe('"price"');
       expect(config.resources.inventory.schema).toBe('merchant_data');
+      expect(config.resources.inventory).not.toHaveProperty('attributes');
       // The bundled `docker compose up -d` the wizard recommends cannot resolve
       // without CONNECTOR_DOMAIN, and attributes every request to Caddy without
       // trustedProxies, so a fresh run has to emit both.
@@ -457,6 +503,14 @@ describe('runWizard', () => {
       expect(introspectionMocks.introspectDatabase).toHaveBeenCalledWith(
         expect.objectContaining({ schema: 'merchant_data' }),
       );
+      expect(promptMocks.select).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Which table contains your products/inventory?',
+          choices: expect.arrayContaining([
+            { name: 'products (materialized view, 100 rows)', value: 'products' },
+          ]),
+        }),
+      );
       expect(buildQuery({ sortBy: 'price' }, config.resources.inventory).sort.column).toBe(
         config.resources.inventory.fields.price,
       );
@@ -480,6 +534,54 @@ describe('runWizard', () => {
       expect(resourceProbeMocks.adapter.connect).toHaveBeenCalledOnce();
       expect(resourceProbeMocks.adapter.disconnect).toHaveBeenCalledOnce();
     } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a materialized view with no readable columns before field mapping', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = { destroy: vi.fn().mockResolvedValue(undefined) };
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('inventory');
+      throw new Error(`Unexpected select prompt: ${message}`);
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('catalog');
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockResolvedValue(false);
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [{ name: 'inventory', kind: 'materialized view', rowCount: 12000, columns: [] }],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      expect(consoleError).toHaveBeenCalledWith(
+        'Cannot save configuration: this materialized view has no readable columns — grant SELECT or pick another object.',
+      );
+      expect(db.destroy).toHaveBeenCalledOnce();
+      expect(promptMocks.select).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: expect.stringContaining('Which column contains') }),
+      );
+    } finally {
+      consoleError.mockRestore();
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
     }
@@ -529,6 +631,8 @@ describe('runWizard', () => {
         '      currency: currency',
         '      description: description',
         '    attributes:',
+        '      make: "makeEn"',
+        '      year: year',
         '      legacy_attribute: legacy_attribute',
         '    searchableColumns: [title, description]',
         '    filterableColumns:',
@@ -591,6 +695,7 @@ describe('runWizard', () => {
         tables: [
           {
             name: 'products',
+            kind: 'table',
             rowCount: 100,
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
@@ -600,11 +705,14 @@ describe('runWizard', () => {
               { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
               { name: 'published', type: 'boolean', nullable: false, isPrimaryKey: false },
               { name: 'deleted_at', type: 'timestamp', nullable: true, isPrimaryKey: false },
+              { name: 'makeEn', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'year', type: 'integer', nullable: true, isPrimaryKey: false },
               { name: 'legacy_attribute', type: 'text', nullable: true, isPrimaryKey: false },
             ],
           },
           {
             name: 'product_images',
+            kind: 'table',
             rowCount: 200,
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
@@ -671,6 +779,15 @@ describe('runWizard', () => {
       });
       expect(inventory).not.toHaveProperty('baseFilter');
       expect(inventory).not.toHaveProperty('attributes');
+      expect(promptMocks.checkbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining('Select additional columns'),
+          choices: expect.arrayContaining([
+            expect.objectContaining({ name: 'makeEn', value: 'makeEn', checked: true }),
+            expect.objectContaining({ name: 'year', value: 'year', checked: true }),
+          ]),
+        }),
+      );
       expect(inventory).not.toHaveProperty('searchableColumns');
       expect(inventory).not.toHaveProperty('filterableColumns');
       expect(inventory).not.toHaveProperty('relations');
@@ -756,6 +873,7 @@ describe('runWizard', () => {
         tables: [
           {
             name: 'products',
+            kind: 'table',
             rowCount: 100,
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },

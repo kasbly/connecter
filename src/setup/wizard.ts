@@ -321,14 +321,19 @@ export async function runWizard(): Promise<void> {
     tls.rejectUnauthorized = true;
     console.log('Plaintext connection was rejected; retried with verified TLS.');
   }
-  console.log(`✓ Connected! Found ${result.tables.length} tables.\n`);
+  console.log(`✓ Connected! Found ${result.tables.length} tables or views.\n`);
+
+  if (result.tables.length === 0) {
+    await db.destroy();
+    throw new Error(`No tables or views in schema ${selectedSchema} — pick another schema.`);
+  }
 
   // Step 2: Select Inventory Table
   console.log('Step 2: Select Your Inventory Table');
   const tableChoices = result.tables
     .sort((a, b) => b.rowCount - a.rowCount)
     .map((t) => ({
-      name: `${t.name} (${t.rowCount.toLocaleString()} rows)`,
+      name: `${t.name} (${t.kind}, ${t.rowCount.toLocaleString()} rows)`,
       value: t.name,
     }));
 
@@ -344,9 +349,22 @@ export async function runWizard(): Promise<void> {
 
   const selectedTable = result.tables.find((t) => t.name === selectedTableName)!;
 
+  if (selectedTable.columns.length === 0) {
+    console.error(
+      `Cannot save configuration: this ${selectedTable.kind} has no readable columns — grant SELECT or pick another object.`,
+    );
+    await db.destroy();
+    return;
+  }
+
   // Step 3: Field Mapping
   console.log('\nStep 3: Field Mapping');
   const suggestions = suggestFieldMappings(selectedTable.columns);
+  const suggestedAttributes = new Map(
+    suggestions
+      .filter((suggestion) => suggestion.mappingType === 'attribute')
+      .map((suggestion) => [suggestion.columnName, suggestion.suggestedMapping]),
+  );
   const existingInventory = existingConfig?.resources.inventory;
   const idColumn =
     getExistingMappingSelection(
@@ -465,7 +483,12 @@ export async function runWizard(): Promise<void> {
       choices: unmappedColumns.map((name) => ({
         name,
         value: name,
-        checked: Boolean(existingConfig?.resources.inventory.attributes?.[name]),
+        checked:
+          suggestedAttributes.has(name) ||
+          Boolean(existingConfig?.resources.inventory.attributes?.[name]) ||
+          Boolean(
+            existingConfig?.resources.inventory.attributes?.[suggestedAttributes.get(name) ?? ''],
+          ),
       })),
     });
   }
@@ -747,13 +770,8 @@ export async function runWizard(): Promise<void> {
 
   fields['externalId'] = quoteIfNeeded(idColumn);
   Object.assign(fields, fieldMappings);
-  for (const s of suggestions) {
-    if (s.mappingType === 'attribute' && !mappedColumnNames.has(s.columnName)) {
-      attributes[s.suggestedMapping] = quoteIfNeeded(s.columnName);
-    }
-  }
   for (const attrName of additionalAttributes) {
-    attributes[attrName] = quoteIfNeeded(attrName);
+    attributes[suggestedAttributes.get(attrName) ?? attrName] = quoteIfNeeded(attrName);
   }
 
   const config = {

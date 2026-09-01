@@ -122,7 +122,7 @@ describe('introspectDatabase', () => {
       raw: vi
         .fn()
         .mockResolvedValueOnce(undefined)
-        .mockResolvedValueOnce({ rows: [{ tablename: 'products' }] })
+        .mockResolvedValueOnce({ rows: [{ name: 'products', kind: 'table' }] })
         .mockResolvedValueOnce({
           rows: [
             { column_name: 'id', data_type: 'uuid', udt_name: 'uuid', is_nullable: 'NO' },
@@ -150,8 +150,8 @@ describe('introspectDatabase', () => {
     expect(knexMock).toHaveBeenCalledWith(expect.objectContaining({ searchPath: ['catalog'] }));
     expect(db.raw).toHaveBeenNthCalledWith(
       2,
-      'SELECT tablename FROM pg_tables WHERE schemaname = ? ORDER BY tablename',
-      ['catalog'],
+      expect.stringContaining('FROM information_schema.tables'),
+      ['catalog', 'catalog'],
     );
     expect(db.raw).toHaveBeenNthCalledWith(
       3,
@@ -165,6 +165,7 @@ describe('introspectDatabase', () => {
       tables: [
         {
           name: 'products',
+          kind: 'table',
           rowCount: 12,
           columns: [
             { name: 'id', type: 'uuid', udtName: 'uuid', nullable: false, isPrimaryKey: true },
@@ -175,6 +176,129 @@ describe('introspectDatabase', () => {
       foreignKeys: [
         { fromTable: 'images', fromColumn: 'product_id', toTable: 'products', toColumn: 'id' },
       ],
+    });
+  });
+
+  it('returns a view when it is the schema’s only inventory object', async () => {
+    const db = {
+      raw: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ rows: [{ name: 'published_products', kind: 'view' }] })
+        .mockResolvedValueOnce({
+          rows: [
+            { column_name: 'id', data_type: 'uuid', is_nullable: 'NO' },
+            { column_name: 'title', data_type: 'text', is_nullable: 'NO' },
+          ],
+        })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ estimate: '12' }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    knexMock.mockReturnValueOnce(db);
+
+    const result = await introspectDatabase({ ...connection, schema: 'catalog' });
+
+    expect(db.raw).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("table_type IN ('BASE TABLE', 'VIEW')"),
+      ['catalog', 'catalog'],
+    );
+    expect(db.raw).toHaveBeenNthCalledWith(2, expect.stringContaining('FROM pg_matviews'), [
+      'catalog',
+      'catalog',
+    ]);
+    expect(result.result).toEqual({
+      tables: [
+        {
+          name: 'published_products',
+          kind: 'view',
+          rowCount: 12,
+          columns: [
+            { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: false },
+            { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+          ],
+        },
+      ],
+      foreignKeys: [],
+    });
+  });
+
+  it('reads materialized-view columns and a unique index from PostgreSQL catalogs', async () => {
+    const db = {
+      raw: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ rows: [{ name: 'inventory', kind: 'materialized view' }] })
+        .mockResolvedValueOnce({
+          rows: [
+            { column_name: 'id', data_type: 'uuid', udt_name: 'uuid', is_nullable: 'NO' },
+            { column_name: 'title', data_type: 'text', udt_name: 'text', is_nullable: 'NO' },
+            {
+              column_name: 'price',
+              data_type: 'numeric',
+              udt_name: 'numeric',
+              is_nullable: 'NO',
+            },
+            {
+              column_name: 'currency',
+              data_type: 'character varying',
+              udt_name: 'varchar',
+              is_nullable: 'YES',
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ rows: [{ column_name: 'id' }] })
+        .mockResolvedValueOnce({ rows: [{ estimate: '12000' }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    knexMock.mockReturnValueOnce(db);
+
+    const result = await introspectDatabase({ ...connection, schema: 'catalog' });
+
+    expect(db.raw).toHaveBeenNthCalledWith(3, expect.stringContaining('FROM pg_attribute a'), [
+      'inventory',
+      'catalog',
+    ]);
+    expect(db.raw).toHaveBeenNthCalledWith(4, expect.stringContaining('FROM pg_index i'), [
+      'inventory',
+      'catalog',
+    ]);
+    expect(result.result).toEqual({
+      tables: [
+        {
+          name: 'inventory',
+          kind: 'materialized view',
+          rowCount: 12000,
+          columns: [
+            { name: 'id', type: 'uuid', udtName: 'uuid', nullable: false, isPrimaryKey: true },
+            {
+              name: 'title',
+              type: 'text',
+              udtName: 'text',
+              nullable: false,
+              isPrimaryKey: false,
+            },
+            {
+              name: 'price',
+              type: 'numeric',
+              udtName: 'numeric',
+              nullable: false,
+              isPrimaryKey: false,
+            },
+            {
+              name: 'currency',
+              type: 'character varying',
+              udtName: 'varchar',
+              nullable: true,
+              isPrimaryKey: false,
+            },
+          ],
+        },
+      ],
+      foreignKeys: [],
     });
   });
 });
