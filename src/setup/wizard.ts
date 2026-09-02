@@ -25,6 +25,7 @@ import {
   suggestRelations,
   suggestSearchableColumns,
   suggestFilterableColumns,
+  isTextColumn,
   type FilterableColumnSuggestion,
 } from './suggest.js';
 import { UNMAPPED_STATUS_FALLBACK } from '../mapping/field-mapper.js';
@@ -87,7 +88,7 @@ function isCompatibleFieldColumn(field: FieldMappingTarget, column: MappingColum
   }
 
   if (field === 'title' || field === 'currency' || field === 'category') {
-    return /(char|text|xml|enum)/.test(normalizedType);
+    return isTextColumn(column) || /(xml|enum)/.test(normalizedType);
   }
 
   return /(char|text|json|xml|enum)/.test(normalizedType);
@@ -179,6 +180,25 @@ export function getFieldMappingPrompt(
       suggestedColumn && columnNames.includes(suggestedColumn)
         ? suggestedColumn
         : UNMAPPED_FIELD_VALUE,
+  };
+}
+
+/** Build the required unique-listing-id prompt; never invent a column that is not on the table. */
+export function getIdColumnPrompt(
+  columns: Array<{ name: string }>,
+  suggestedColumn?: string | null,
+): { message: string; choices: Array<{ name: string; value: string }>; default?: string } {
+  const columnNames = columns.map((column) => column.name);
+  const defaultColumn =
+    suggestedColumn && columnNames.includes(suggestedColumn) ? suggestedColumn : undefined;
+
+  return {
+    message: 'Which column is the unique listing id?',
+    choices: columnNames.map((columnName) => ({
+      name: columnName === defaultColumn ? `${columnName} (suggested)` : columnName,
+      value: columnName,
+    })),
+    ...(defaultColumn ? { default: defaultColumn } : {}),
   };
 }
 
@@ -366,13 +386,20 @@ export async function runWizard(): Promise<void> {
       .map((suggestion) => [suggestion.columnName, suggestion.suggestedMapping]),
   );
   const existingInventory = existingConfig?.resources.inventory;
-  const idColumn =
+  const suggestedId =
     getExistingMappingSelection(
       existingInventory?.idColumn,
       selectedTable.columns.map((column) => column.name),
-    ) ??
-    suggestIdColumn(selectedTable.columns) ??
-    'id';
+    ) ?? suggestIdColumn(selectedTable.columns);
+  const idPrompt = getIdColumnPrompt(selectedTable.columns, suggestedId);
+  const idColumn = await select(idPrompt);
+  if (!selectedTable.columns.some((column) => column.name === idColumn)) {
+    console.error(
+      `Cannot save configuration: unique listing id "${idColumn}" is not a column on this ${selectedTable.kind}.`,
+    );
+    await db.destroy();
+    return;
+  }
   const updatedAtColumn =
     getExistingMappingSelection(
       existingInventory?.updatedAtColumn,
@@ -497,7 +524,7 @@ export async function runWizard(): Promise<void> {
   console.log('\nStep 3b: Search Configuration');
   const searchSuggestions = suggestSearchableColumns(selectedTable.columns);
   const allTextColumns = selectedTable.columns
-    .filter((c) => ['text', 'character varying', 'varchar'].includes(c.type.toLowerCase()))
+    .filter(isTextColumn)
     .filter((c) => !c.isPrimaryKey)
     .map((c) => c.name);
   const suggestedSearchNames = new Set(searchSuggestions.map((s) => s.columnName));

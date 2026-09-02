@@ -212,7 +212,7 @@ export interface FilterableColumnSuggestion {
 }
 
 // Text-like DB types that make sense for ILIKE search
-const TEXT_TYPES = new Set([
+export const TEXT_TYPES = new Set([
   'text',
   'character varying',
   'varchar',
@@ -221,6 +221,19 @@ const TEXT_TYPES = new Set([
   'name',
   'citext',
 ]);
+
+/**
+ * Whether PostgreSQL can safely apply ILIKE to an introspected column. Tables
+ * and views report citext as USER-DEFINED, while materialized views report its
+ * formatted type directly.
+ */
+export function isTextColumn(column: Pick<IntrospectedColumn, 'type' | 'udtName'>): boolean {
+  const type = column.type.trim().toLowerCase();
+  return (
+    TEXT_TYPES.has(type) ||
+    (type === 'user-defined' && column.udtName?.trim().toLowerCase() === 'citext')
+  );
+}
 
 // Columns likely useful for text search
 const SEARCHABLE_PATTERNS: RegExp[] = [
@@ -264,7 +277,7 @@ export function suggestSearchableColumns(
 
   for (const col of columns) {
     if (col.isPrimaryKey) continue;
-    if (!TEXT_TYPES.has(col.type.toLowerCase())) continue;
+    if (!isTextColumn(col)) continue;
 
     const matchesPattern = SEARCHABLE_PATTERNS.some((p) => p.test(col.name));
     if (matchesPattern) {
@@ -306,7 +319,7 @@ export function suggestFilterableColumns(
     if (!mappedName) continue;
 
     const isNumeric = NUMERIC_TYPES.has(col.type.toLowerCase());
-    const isText = TEXT_TYPES.has(col.type.toLowerCase());
+    const isText = isTextColumn(col);
 
     // Kasbly always requests ACTIVE inventory. A mapped source-status column
     // must therefore be exposed as the canonical `status` filter, including

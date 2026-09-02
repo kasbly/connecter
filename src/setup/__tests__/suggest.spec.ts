@@ -232,6 +232,17 @@ describe('suggestSearchableColumns', () => {
     expect(names).not.toContain('id');
     expect(names).toContain('title');
   });
+
+  it('suggests citext columns reported as user-defined by information_schema', () => {
+    const columns = [
+      col('id', 'integer', true),
+      { ...col('title', 'USER-DEFINED'), udtName: 'citext' },
+    ];
+
+    expect(suggestSearchableColumns(columns).map((suggestion) => suggestion.columnName)).toEqual([
+      'title',
+    ]);
+  });
 });
 
 describe('suggestFilterableColumns', () => {

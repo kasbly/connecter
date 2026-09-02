@@ -8,6 +8,7 @@ import {
   FIELD_MAPPING_TARGETS,
   backupPrivateFile,
   getFieldMappingPrompt,
+  getIdColumnPrompt,
   isPublicHostname,
   loadExistingSetupConfig,
   mergeEnvironmentFile,
@@ -108,6 +109,16 @@ describe('getFieldMappingPrompt', () => {
     expect(prompt.choices.map((choice) => choice.value)).not.toContain('id');
   });
 
+  it('offers citext columns reported as user-defined for text field mappings', () => {
+    const prompt = getFieldMappingPrompt('title', [
+      { name: 'title', type: 'USER-DEFINED', udtName: 'citext' },
+      { name: 'metadata', type: 'jsonb' },
+    ]);
+
+    expect(prompt.choices.map((choice) => choice.value)).toContain('title');
+    expect(prompt.choices.map((choice) => choice.value)).not.toContain('metadata');
+  });
+
   it.each(['title', 'currency', 'category', 'status'] as const)(
     'does not offer JSON columns for %s mappings',
     (field) => {
@@ -151,6 +162,47 @@ describe('getFieldMappingPrompt', () => {
 
     expect(prompt.message).toContain('PostgreSQL text array');
     expect(prompt.message).toContain('https://example.com/photo.jpg');
+  });
+});
+
+describe('getIdColumnPrompt', () => {
+  it('offers every column and preselects the matching suggestion', () => {
+    const prompt = getIdColumnPrompt([{ name: 'sku' }, { name: 'id' }, { name: 'title' }], 'id');
+
+    expect(prompt.message).toBe('Which column is the unique listing id?');
+    expect(prompt.default).toBe('id');
+    expect(prompt.choices).toEqual([
+      { name: 'sku', value: 'sku' },
+      { name: 'id (suggested)', value: 'id' },
+      { name: 'title', value: 'title' },
+    ]);
+    expect(prompt.choices.map((choice) => choice.name)).not.toContain('Do not map this field');
+  });
+
+  it('omits a default when there is no suggested column', () => {
+    const prompt = getIdColumnPrompt(
+      [{ name: 'sku' }, { name: 'title' }, { name: 'price' }, { name: 'currency' }],
+      null,
+    );
+
+    expect(prompt.default).toBeUndefined();
+    expect(prompt.choices.map((choice) => choice.value)).toEqual([
+      'sku',
+      'title',
+      'price',
+      'currency',
+    ]);
+    expect(prompt.choices.map((choice) => choice.value)).not.toContain('id');
+  });
+
+  it('never invents an id choice or default when that column is not on the table', () => {
+    const prompt = getIdColumnPrompt([{ name: 'sku' }, { name: 'title' }], 'id');
+
+    expect(prompt.default).toBeUndefined();
+    expect(prompt.choices).toEqual([
+      { name: 'sku', value: 'sku' },
+      { name: 'title', value: 'title' },
+    ]);
   });
 });
 
@@ -360,6 +412,7 @@ describe('runWizard', () => {
 
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
     for (const answer of [
       'title',
       'price',
@@ -408,7 +461,7 @@ describe('runWizard', () => {
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
               { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
-              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'title', type: 'character', nullable: false, isPrimaryKey: false },
               { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
               { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
               { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
@@ -511,6 +564,14 @@ describe('runWizard', () => {
           ]),
         }),
       );
+      expect(promptMocks.checkbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Which columns should be searchable? (full-text search)',
+          choices: expect.arrayContaining([
+            expect.objectContaining({ name: 'title', value: 'title' }),
+          ]),
+        }),
+      );
       expect(buildQuery({ sortBy: 'price' }, config.resources.inventory).sort.column).toBe(
         config.resources.inventory.fields.price,
       );
@@ -533,6 +594,114 @@ describe('runWizard', () => {
       );
       expect(resourceProbeMocks.adapter.connect).toHaveBeenCalledOnce();
       expect(resourceProbeMocks.adapter.disconnect).toHaveBeenCalledOnce();
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('writes the operator-chosen unique listing id for a view with no id column', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('available_products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('sku'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'merchant_data',
+      'connector.merchant.example',
+    ]) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.password.mockResolvedValueOnce('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }) =>
+      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve([]);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title']);
+      }
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'available_products',
+            kind: 'view',
+            rowCount: 40,
+            columns: [
+              { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      const generated = yaml.load(
+        readFileSync(join(directory, 'connector.config.yml'), 'utf-8'),
+      ) as {
+        resources: { inventory: { idColumn: string; fields: Record<string, string> } };
+      };
+      const inventory = generated.resources.inventory;
+      expect(inventory.idColumn).toBe('"sku"');
+      expect(inventory.fields.externalId).toBe('"sku"');
+      expect(inventory.fields).toMatchObject({
+        title: '"title"',
+        price: '"price"',
+        currency: '"currency"',
+      });
+      expect(promptMocks.select).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Which column is the unique listing id?',
+          choices: [
+            { name: 'sku', value: 'sku' },
+            { name: 'title', value: 'title' },
+            { name: 'price', value: 'price' },
+            { name: 'currency', value: 'currency' },
+          ],
+        }),
+      );
+      const idColumnPrompt = promptMocks.select.mock.calls.find(
+        (call) =>
+          (call[0] as { message?: string } | undefined)?.message ===
+          'Which column is the unique listing id?',
+      )?.[0] as { default?: string } | undefined;
+      expect(idColumnPrompt?.default).toBeUndefined();
     } finally {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
@@ -654,6 +823,7 @@ describe('runWizard', () => {
 
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
     for (const answer of [
       'title',
       'price',
@@ -838,6 +1008,9 @@ describe('runWizard', () => {
     promptMocks.select.mockImplementation(({ message }: { message: string }) => {
       if (message.startsWith('Database type')) return Promise.resolve('postgres');
       if (message.startsWith('Which table contains')) return Promise.resolve('products');
+      if (message.startsWith('Which column is the unique listing id')) {
+        return Promise.resolve('id');
+      }
       if (message.startsWith('How should newly observed')) return Promise.resolve('DRAFT');
       if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
       const statusValueMatch = /^Which Kasbly status matches "(.+)"\?$/.exec(message);
