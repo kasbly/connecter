@@ -52,6 +52,20 @@ export interface ResourceHealth {
   error?: string;
   /** Source statuses seen by the probe that need an explicit mapping. */
   unknownStatusValues?: string[];
+  /**
+   * externalIds of sampled rows that fail the JSON wire contract (e.g. a NULL
+   * price) and are withheld from customers rather than served. The resource
+   * stays `ok: true` as long as at least one sampled row is valid — GET
+   * /inventory already skips exactly these rows and serves the rest (#24913).
+   */
+  wireContractViolationIds?: string[];
+}
+
+export interface InventoryResourceProbeResult {
+  /** Source statuses seen by the probe that need an explicit mapping. */
+  unknownStatusValues: string[];
+  /** externalIds of sampled rows withheld for violating the wire contract. */
+  wireContractViolationIds: string[];
 }
 
 export type ResourceHealthCheck = () => Promise<ResourceHealth>;
@@ -80,7 +94,7 @@ function getReferenceValues(
 export async function probeInventoryResource(
   dbAdapter: DatabaseAdapter,
   resourceConfig: InventoryResourceConfig,
-): Promise<string[]> {
+): Promise<InventoryResourceProbeResult> {
   // Search and configured filters do not need to be selected for a normal
   // inventory response, but they are column expressions the resource can use.
   // Include them in the probe so startup catches those latent mapping errors.
@@ -146,10 +160,16 @@ export async function probeInventoryResource(
     }),
   );
 
-  // An empty catalog is valid, but every row in a normal page must survive
-  // the exact mapping and JSON wire contract before the connector is healthy.
+  // An empty catalog is valid. A sampled page where every row fails the exact
+  // mapping and JSON wire contract signals a broken mapping (e.g. price
+  // pointed at a text column) and fails the resource. A page where only some
+  // rows fail is a data problem with those specific listings — GET /inventory
+  // already skips them and serves the rest, so the probe reports them as an
+  // advisory instead of taking the whole resource offline (#24913).
+  let wireContractViolationIds: string[] = [];
   if (rows.length > 0) {
     const relationData = new Map(relationEntries);
+    const violations: { externalId: string; error: string }[] = [];
     for (const row of rows) {
       try {
         validateInventoryItemWireContract(
@@ -157,17 +177,26 @@ export async function probeInventoryResource(
           getMappedImageValues(row, resourceConfig, relationData),
         );
       } catch (error) {
-        throw new Error(`Inventory resource probe failed for sample row: ${errorMessage(error)}`);
+        violations.push({
+          externalId: String(resolveColumnValue(row, resourceConfig.idColumn) ?? ''),
+          error: errorMessage(error),
+        });
       }
     }
+
+    if (violations.length === rows.length) {
+      throw new Error(`Inventory resource probe failed for sample row: ${violations[0]!.error}`);
+    }
+
+    wireContractViolationIds = violations.map((violation) => violation.externalId);
   }
 
   const statusColumn = resourceConfig.fields['status'];
-  if (!statusColumn) return [];
+  if (!statusColumn) return { unknownStatusValues: [], wireContractViolationIds };
 
   const observedStatuses = await probeStatusValues(dbAdapter, resourceConfig, statusColumn, rows);
 
-  return Array.from(
+  const unknownStatusValues = Array.from(
     new Set(
       observedStatuses.flatMap((value) => {
         const normalizedValue = value === null || value === undefined ? '' : String(value).trim();
@@ -179,6 +208,8 @@ export async function probeInventoryResource(
   )
     .sort()
     .slice(0, UNKNOWN_STATUS_VALUE_LIMIT);
+
+  return { unknownStatusValues, wireContractViolationIds };
 }
 
 /**
@@ -238,6 +269,25 @@ export function formatUnknownStatusWarning(
   );
 }
 
+/**
+ * One operator-facing line naming the sampled listings withheld for violating
+ * the wire contract, or `null` when every sampled row is valid. Shared by the
+ * setup wizard's pre-save probe and `npm run validate` so a bad row is a
+ * visible warning rather than a silent block (#24913).
+ */
+export function formatWireContractViolationWarning(
+  wireContractViolationIds: readonly string[],
+): string | null {
+  if (wireContractViolationIds.length === 0) return null;
+
+  const ids = wireContractViolationIds.map((id) => JSON.stringify(id)).join(', ');
+  return (
+    `Inventory sample rows violate the wire contract and are withheld from customers: ${ids}. ` +
+    'Fix the source data for these listings (e.g. a missing price); ' +
+    'the rest of the catalog is served normally.'
+  );
+}
+
 export function createResourceHealthCheck(
   dbAdapter: DatabaseAdapter,
   resourceConfig: InventoryResourceConfig,
@@ -253,9 +303,10 @@ export function createResourceHealthCheck(
 
     if (!resourceProbeInFlight) {
       resourceProbeInFlight = probeInventoryResource(dbAdapter, resourceConfig)
-        .then((unknownStatusValues) => ({
+        .then(({ unknownStatusValues, wireContractViolationIds }) => ({
           ok: true,
           ...(unknownStatusValues.length > 0 ? { unknownStatusValues } : {}),
+          ...(wireContractViolationIds.length > 0 ? { wireContractViolationIds } : {}),
         }))
         .catch((error: unknown) => ({ ok: false, error: errorMessage(error) }))
         .then((health) => {
@@ -298,6 +349,9 @@ export function registerHealthRoute(
         : {}),
       ...(resourceHealth?.unknownStatusValues?.length
         ? { unknownStatusValues: resourceHealth.unknownStatusValues }
+        : {}),
+      ...(resourceHealth?.wireContractViolationIds?.length
+        ? { wireContractViolationIds: resourceHealth.wireContractViolationIds }
         : {}),
       uptime: uptimeSeconds,
     };

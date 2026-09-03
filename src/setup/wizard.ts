@@ -30,7 +30,10 @@ import {
 } from './suggest.js';
 import { UNMAPPED_STATUS_FALLBACK } from '../mapping/field-mapper.js';
 import { createDatabaseAdapter } from '../db/adapter.factory.js';
-import { probeInventoryResource } from '../routes/health.route.js';
+import {
+  formatWireContractViolationWarning,
+  probeInventoryResource,
+} from '../routes/health.route.js';
 
 interface DatabaseTlsSettings {
   enabled: boolean;
@@ -110,18 +113,21 @@ async function collectStatusValues(
   column: string,
 ): Promise<StatusValuesConfig> {
   // Keep the distinct operation outside a bounded subquery. A bare DISTINCT must
-  // inspect the complete merchant table before returning any values.
+  // inspect the complete merchant table before returning any values. Fetch one value
+  // more than the wizard will prompt for: that extra row is the only evidence that
+  // the column overflows the cap, and without it the warning below can never fire.
   const result = await db.raw<{ rows: Array<{ value: unknown }> }>(
     'SELECT DISTINCT "value" FROM (SELECT ?? AS "value" FROM ??.?? WHERE ?? IS NOT NULL LIMIT ?) AS "sampled_rows" LIMIT ?',
-    [column, schema, table, column, STATUS_VALUE_SCAN_LIMIT, STATUS_VALUE_PROMPT_LIMIT],
+    [column, schema, table, column, STATUS_VALUE_SCAN_LIMIT, STATUS_VALUE_PROMPT_LIMIT + 1],
   );
   const values = result.rows.map((row) => row.value);
   const distinctValues = Array.from(new Set(values.map((value) => String(value)))).sort();
   const presentedValues = distinctValues.slice(0, STATUS_VALUE_PROMPT_LIMIT);
-  const skippedCount = distinctValues.length - presentedValues.length;
-  if (skippedCount > 0) {
+  // The query stops one past the cap, so the true distinct count is unknown here —
+  // report the overflow as a lower bound rather than inventing a total.
+  if (distinctValues.length > presentedValues.length) {
     console.log(
-      `\n"${column}" has ${distinctValues.length} distinct values. Mapping the first ${presentedValues.length}; the remaining ${skippedCount} use the unknown-status policy chosen next.`,
+      `\n"${column}" has more than ${STATUS_VALUE_PROMPT_LIMIT} distinct values. Mapping the first ${presentedValues.length}; the rest use the unknown-status policy chosen next.`,
     );
   }
   const statusValues: StatusValuesConfig = {};
@@ -904,7 +910,12 @@ export async function runWizard(): Promise<void> {
   });
   try {
     await validationAdapter.connect();
-    await probeInventoryResource(validationAdapter, config.resources.inventory);
+    const { wireContractViolationIds } = await probeInventoryResource(
+      validationAdapter,
+      config.resources.inventory,
+    );
+    const warning = formatWireContractViolationWarning(wireContractViolationIds);
+    if (warning) console.warn(`Warning: ${warning}`);
   } catch (error) {
     console.error(
       `Cannot save configuration: inventory sample violates the wire contract: ${

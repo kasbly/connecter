@@ -44,7 +44,7 @@ export async function validateConnectorConfig(
   let unknownStatusValues: string[];
   try {
     await dbAdapter.connect();
-    unknownStatusValues = await probeInventoryResource(dbAdapter, inventoryResource);
+    ({ unknownStatusValues } = await probeInventoryResource(dbAdapter, inventoryResource));
   } finally {
     await dbAdapter.disconnect();
   }

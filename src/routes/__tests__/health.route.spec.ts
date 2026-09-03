@@ -7,6 +7,7 @@ import {
   UNKNOWN_STATUS_VALUE_LIMIT,
   createResourceHealthCheck,
   formatUnknownStatusWarning,
+  formatWireContractViolationWarning,
   probeInventoryResource,
   registerHealthRoute,
 } from '../health.route.js';
@@ -213,13 +214,14 @@ describe('health route', () => {
     });
     dbAdapter.distinctValues = vi.fn().mockRejectedValue(new Error('statement timeout'));
 
-    const unknownStatusValues = await probeInventoryResource(dbAdapter, {
+    const result = await probeInventoryResource(dbAdapter, {
       ...inventoryResource,
       fields: { ...inventoryResource.fields, status: 'availability' },
       statusValues: { ACTIVE: ['for_sale'] },
     });
 
-    expect(unknownStatusValues).toEqual(['discontinued']);
+    expect(result.unknownStatusValues).toEqual(['discontinued']);
+    expect(result.wireContractViolationIds).toEqual([]);
   });
 
   it('samples a full default inventory page using the same sort as GET /inventory', async () => {
@@ -240,13 +242,36 @@ describe('health route', () => {
     );
   });
 
-  it('reports a field-specific error when any sampled row cannot satisfy the wire contract', async () => {
+  it('withholds a wire-contract-violating row and stays healthy when other sampled rows are valid', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(true);
     vi.mocked(dbAdapter.query).mockResolvedValueOnce({
       rows: [
         { id: '1', title: 'Valid listing', price: 1250 },
         { id: '2', title: 'Invalid listing', price: 'SAR 1,250' },
+      ],
+      total: 2,
+    });
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'ok',
+      resources: 'ok',
+      wireContractViolationIds: ['2'],
+    });
+    await app.close();
+  });
+
+  it('fails the resource when every sampled row violates the wire contract', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [
+        { id: '1', title: 'Invalid listing', price: 'SAR 1,250' },
+        { id: '2', title: 'Also invalid', price: null },
       ],
       total: 2,
     });
@@ -292,6 +317,11 @@ describe('health route', () => {
     expect(formatUnknownStatusWarning(['under_offer'], 'RESERVED')).toContain('RESERVED');
     expect(formatUnknownStatusWarning(['under_offer'], undefined)).toContain('DRAFT');
     expect(formatUnknownStatusWarning([], 'DRAFT')).toBeNull();
+  });
+
+  it('names the withheld listings for a wire-contract-violation warning', () => {
+    expect(formatWireContractViolationWarning(['42'])).toContain('"42"');
+    expect(formatWireContractViolationWarning([])).toBeNull();
   });
 
   it('caches a successful resource probe across health checks', async () => {

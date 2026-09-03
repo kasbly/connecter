@@ -44,7 +44,9 @@ const resourceProbeMocks = vi.hoisted(() => {
   return {
     adapter,
     createDatabaseAdapter: vi.fn(() => adapter),
-    probeInventoryResource: vi.fn().mockResolvedValue([]),
+    probeInventoryResource: vi
+      .fn()
+      .mockResolvedValue({ unknownStatusValues: [], wireContractViolationIds: [] }),
   };
 });
 
@@ -53,9 +55,13 @@ vi.mock('../introspect.js', () => introspectionMocks);
 vi.mock('../../db/adapter.factory.js', () => ({
   createDatabaseAdapter: resourceProbeMocks.createDatabaseAdapter,
 }));
-vi.mock('../../routes/health.route.js', () => ({
-  probeInventoryResource: resourceProbeMocks.probeInventoryResource,
-}));
+vi.mock('../../routes/health.route.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../routes/health.route.js')>();
+  return {
+    ...actual,
+    probeInventoryResource: resourceProbeMocks.probeInventoryResource,
+  };
+});
 
 describe('getFieldMappingPrompt', () => {
   it('offers every column and preselects the matching suggestion', () => {
@@ -708,6 +714,95 @@ describe('runWizard', () => {
     }
   });
 
+  it('warns about wire-contract violations from the pre-save probe instead of refusing to save', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    vi.clearAllMocks();
+    resourceProbeMocks.probeInventoryResource.mockResolvedValueOnce({
+      unknownStatusValues: [],
+      wireContractViolationIds: ['42'],
+    });
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('available_products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('sku'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'merchant_data',
+      'connector.merchant.example',
+    ]) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.password.mockResolvedValueOnce('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }) =>
+      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve([]);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title']);
+      }
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'available_products',
+            kind: 'view',
+            rowCount: 40,
+            columns: [
+              { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('"42"'));
+      expect(readFileSync(join(directory, 'connector.config.yml'), 'utf-8')).toContain(
+        'available_products',
+      );
+      expect(resourceProbeMocks.adapter.disconnect).toHaveBeenCalledOnce();
+    } finally {
+      consoleWarn.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a materialized view with no readable columns before field mapping', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
@@ -995,9 +1090,17 @@ describe('runWizard', () => {
     const withSchema = vi.fn(() => ({ table }));
     const db = Object.assign(vi.fn(), {
       destroy: vi.fn().mockResolvedValue(undefined),
-      raw: vi.fn().mockResolvedValue({
-        rows: distinctStatusValues.map((value) => ({ value })),
-      }),
+      // Honour the outer LIMIT bind the way a real database would. A stub that
+      // returns every distinct value regardless of the bind hides the bug this
+      // covers: when the wizard fetched exactly as many values as it prompts for,
+      // the overflow was undetectable and its warning was dead code.
+      raw: vi.fn((_sql: string, bindings: unknown[]) =>
+        Promise.resolve({
+          rows: distinctStatusValues
+            .slice(0, Number(bindings[bindings.length - 1]))
+            .map((value) => ({ value })),
+        }),
+      ),
       withSchema,
     });
 
@@ -1075,7 +1178,8 @@ describe('runWizard', () => {
           'products',
           'status',
           STATUS_VALUE_SCAN_LIMIT,
-          STATUS_VALUE_PROMPT_LIMIT,
+          // One past the prompt cap, so an overflowing column is detectable.
+          STATUS_VALUE_PROMPT_LIMIT + 1,
         ],
       );
 
@@ -1087,7 +1191,7 @@ describe('runWizard', () => {
       expect(inventory['schema']).toBe('catalog');
       expect(inventory['unknownStatusPolicy']).toBe('DRAFT');
 
-      // Bounded prompting: 25 of the 30 values are offered, one of them left unmapped.
+      // Bounded prompting: 26 values come back, 25 are offered, one left unmapped.
       const statusPrompts = promptMocks.select.mock.calls.filter((call: unknown[]) =>
         String((call[0] as { message?: string })?.message ?? '').startsWith(
           'Which Kasbly status matches',
@@ -1099,8 +1203,15 @@ describe('runWizard', () => {
       expect(statusValues['DRAFT']).toHaveLength(23);
       expect(statusValues['DRAFT']).not.toContain('status-01');
       expect(statusValues['DRAFT']).not.toContain('status-25');
+      // The operator is told the mapping is incomplete. The count is a lower bound:
+      // the query stops one past the cap, so the wizard cannot know there are 30.
       expect(consoleLog).toHaveBeenCalledWith(
-        expect.stringContaining('the remaining 5 use the unknown-status policy'),
+        expect.stringContaining(
+          `"status" has more than ${STATUS_VALUE_PROMPT_LIMIT} distinct values`,
+        ),
+      );
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining('the rest use the unknown-status policy chosen next'),
       );
     } finally {
       consoleLog.mockRestore();
