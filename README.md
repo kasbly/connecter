@@ -106,6 +106,11 @@ Paginated inventory search with filters.
 | `updatedSince`  | ISO 8601        | Only items updated after this timestamp      |
 | `filter.<name>` | string/number   | Dynamic filters defined in config            |
 
+Results are always ordered by the requested sort column and then by
+`resources.inventory.idColumn` descending. That second key keeps consecutive
+pages disjoint when many rows share the sort value — for example a catalogue
+whose rows all carry the same `updated_at` after a nightly import.
+
 Example:
 
 ```bash
@@ -277,7 +282,8 @@ resources:
 When `database.ssl` is `true`, the connector verifies the Postgres server certificate and
 hostname by default. Publicly trusted certificates need no additional configuration. For a
 private CA or self-signed deployment, provide its PEM certificate or bundle through
-`database.sslCa` (for example, `${DB_SSL_CA}`).
+`database.sslCa` (for example, `${DB_SSL_CA}`). `npm run setup` asks for the _path_ to that PEM
+file and writes its contents to `.env` as a quoted, multi-line `DB_SSL_CA` value.
 
 `database.sslRejectUnauthorized: false` is an explicit compatibility escape hatch that disables
 server authentication. It makes the connection vulnerable to interception and should only be used

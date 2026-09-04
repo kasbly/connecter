@@ -14,6 +14,14 @@ export interface PaginationOptions {
 export interface SortOptions {
   column: string;
   direction: 'asc' | 'desc';
+  /**
+   * Unique column appended as a final `DESC` sort key so a page is taken from a
+   * totally ordered result set. Without it, rows sharing the `column` value have
+   * no defined order between two `LIMIT`/`OFFSET` requests, so page 2 can repeat
+   * page 1's rows and leave others unreachable (#24914). Ignored when it is the
+   * sort column itself, which is already unique.
+   */
+  tiebreaker?: string;
 }
 
 export interface QueryResult {

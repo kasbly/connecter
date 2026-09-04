@@ -13,11 +13,13 @@ import {
   loadExistingSetupConfig,
   mergeEnvironmentFile,
   quoteIfNeeded,
+  readCaCertificate,
   serializeEnvValue,
   shouldDefaultToTls,
   STATUS_VALUE_PROMPT_LIMIT,
   STATUS_VALUE_SCAN_LIMIT,
   toConfigLiteral,
+  validateCaCertificatePath,
   writePrivateFile,
 } from '../wizard.js';
 import { runWizard } from '../wizard.js';
@@ -306,6 +308,71 @@ describe('mergeEnvironmentFile', () => {
         CONNECTOR_API_KEY_PENDING: null,
       }),
     ).toBe('CUSTOM_SETTING=keep\n');
+  });
+
+  it('replaces every line of an existing multi-line value', () => {
+    const previousCa = '-----BEGIN CERTIFICATE-----\nAAAOLD\n-----END CERTIFICATE-----';
+    const nextCa = '-----BEGIN CERTIFICATE-----\nBBBNEW\n-----END CERTIFICATE-----';
+    const existing = `DB_HOST='db.example'\nDB_SSL_CA='${previousCa}'\nCONNECTOR_API_KEY='kc_1'\n`;
+
+    const merged = mergeEnvironmentFile(existing, { DB_SSL_CA: nextCa });
+
+    expect(merged).toBe(`DB_HOST='db.example'\nDB_SSL_CA='${nextCa}'\nCONNECTOR_API_KEY='kc_1'\n`);
+    expect(merged).not.toContain('AAAOLD');
+    expect(parse(merged)).toEqual({
+      DB_HOST: 'db.example',
+      DB_SSL_CA: nextCa,
+      CONNECTOR_API_KEY: 'kc_1',
+    });
+  });
+
+  it.each(['pa$&ss', 'pa$1ss', 'pa$`ss', "pa$'ss"])(
+    'rewrites value %j as a literal rather than a String.replace pattern',
+    (value) => {
+      const existing = "DB_HOST=db\nDB_PASSWORD='old'\nAPI_KEY=k\n";
+      const merged = mergeEnvironmentFile(existing, { DB_PASSWORD: value });
+
+      expect(merged).toBe(`DB_HOST=db\nDB_PASSWORD=${serializeEnvValue(value)}\nAPI_KEY=k\n`);
+      expect(parse(merged)).toEqual({
+        DB_HOST: 'db',
+        DB_PASSWORD: value,
+        API_KEY: 'k',
+      });
+    },
+  );
+});
+
+describe('validateCaCertificatePath', () => {
+  const withPemFile = (contents: string, assertion: (path: string) => void): void => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-ca-'));
+    try {
+      const path = join(directory, 'ca.pem');
+      writeFileSync(path, contents);
+      assertion(path);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  };
+
+  it('accepts a complete PEM file and reads the whole certificate', () => {
+    const pem = '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n';
+    withPemFile(pem, (path) => {
+      expect(validateCaCertificatePath(path)).toBe(true);
+      expect(readCaCertificate(path)).toBe(pem.trim());
+    });
+  });
+
+  it('rejects a paste truncated at the certificate header', () => {
+    withPemFile('-----BEGIN CERTIFICATE-----', (path) => {
+      expect(validateCaCertificatePath(path)).toContain('not a complete PEM certificate');
+    });
+  });
+
+  it('rejects an empty or unreadable path', () => {
+    expect(validateCaCertificatePath('  ')).toContain('required');
+    expect(validateCaCertificatePath(join(tmpdir(), 'kasbly-connector-missing-ca.pem'))).toContain(
+      'Cannot read',
+    );
   });
 });
 

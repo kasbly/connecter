@@ -20,12 +20,32 @@ const baseConfig: InventoryResourceConfig = {
 
 describe('getDefaultSort', () => {
   it('uses updatedAt DESC when configured', () => {
-    expect(getDefaultSort(baseConfig)).toEqual({ column: 'updatedAt', direction: 'desc' });
+    expect(getDefaultSort(baseConfig)).toEqual({
+      column: 'updatedAt',
+      direction: 'desc',
+      tiebreaker: 'id',
+    });
   });
 
   it('uses id DESC when updatedAt is not configured', () => {
+    // No tiebreaker: the id column is already the sort column, and unique.
     expect(getDefaultSort({ ...baseConfig, updatedAtColumn: undefined })).toEqual({
       column: 'id',
+      direction: 'desc',
+    });
+  });
+
+  it('omits the tiebreaker when the id column is quoted but still the sort column', () => {
+    expect(getDefaultSort({ ...baseConfig, idColumn: '"id"', updatedAtColumn: undefined })).toEqual(
+      { column: '"id"', direction: 'desc' },
+    );
+  });
+
+  it('omits the tiebreaker when the id column is not a plain column expression', () => {
+    // An id mapped to an expression works for SELECT and lookup-by-id, so it
+    // must not start failing the raw ORDER BY guard on every list request.
+    expect(getDefaultSort({ ...baseConfig, idColumn: 'CAST(id AS text)' })).toEqual({
+      column: 'updatedAt',
       direction: 'desc',
     });
   });
@@ -35,7 +55,7 @@ describe('buildQuery', () => {
   it('returns default pagination and sort', () => {
     const result = buildQuery({}, baseConfig);
     expect(result.pagination).toEqual({ page: 1, pageSize: 20 });
-    expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc' });
+    expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc', tiebreaker: 'id' });
     expect(result.sort).toEqual(getDefaultSort(baseConfig));
     expect(result.conditions).toEqual([]);
   });
@@ -261,17 +281,18 @@ describe('buildQuery', () => {
 
   it('uses custom sort', () => {
     const result = buildQuery({ sortBy: 'price', sortDirection: 'asc' }, baseConfig);
-    expect(result.sort).toEqual({ column: 'price', direction: 'asc' });
+    expect(result.sort).toEqual({ column: 'price', direction: 'asc', tiebreaker: 'id' });
   });
 
   describe('sortBy allowlisting (#14461)', () => {
     it('accepts a sortBy matching a configured field column', () => {
       const result = buildQuery({ sortBy: 'title' }, baseConfig);
-      expect(result.sort).toEqual({ column: 'title', direction: 'desc' });
+      expect(result.sort).toEqual({ column: 'title', direction: 'desc', tiebreaker: 'id' });
     });
 
     it('accepts a sortBy matching the id column', () => {
       const result = buildQuery({ sortBy: 'id' }, baseConfig);
+      // Already unique — no second sort key is added on top of it (#24914).
       expect(result.sort).toEqual({ column: 'id', direction: 'desc' });
     });
 
@@ -281,7 +302,7 @@ describe('buildQuery', () => {
         attributes: { make: '"makeEn"' },
       };
       const result = buildQuery({ sortBy: '"makeEn"' }, configWithAttributes);
-      expect(result.sort).toEqual({ column: '"makeEn"', direction: 'desc' });
+      expect(result.sort).toEqual({ column: '"makeEn"', direction: 'desc', tiebreaker: 'id' });
     });
 
     it('accepts a bare sortBy for a quoted configured column', () => {
@@ -294,17 +315,17 @@ describe('buildQuery', () => {
 
       const result = buildQuery({ sortBy: 'price', sortDirection: 'asc' }, wizardGeneratedConfig);
 
-      expect(result.sort).toEqual({ column: '"price"', direction: 'asc' });
+      expect(result.sort).toEqual({ column: '"price"', direction: 'asc', tiebreaker: '"id"' });
     });
 
     it('falls back to the default sort column when sortBy is not a known column', () => {
       const result = buildQuery({ sortBy: 'nonexistentColumn' }, baseConfig);
-      expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc' });
+      expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc', tiebreaker: 'id' });
     });
 
     it('falls back to the default sort column when sortBy is empty', () => {
       const result = buildQuery({ sortBy: '' }, baseConfig);
-      expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc' });
+      expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc', tiebreaker: 'id' });
     });
 
     it.each([
@@ -319,7 +340,7 @@ describe('buildQuery', () => {
       'falls back to the default sort column instead of forwarding the SQL injection payload %j',
       (payload) => {
         const result = buildQuery({ sortBy: payload }, baseConfig);
-        expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc' });
+        expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc', tiebreaker: 'id' });
       },
     );
 

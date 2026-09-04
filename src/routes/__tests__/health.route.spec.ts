@@ -231,7 +231,9 @@ describe('health route', () => {
     await probeInventoryResource(dbAdapter, resource);
 
     const listSort = buildQuery({ page: '1', pageSize: '1' }, resource).sort;
-    expect(listSort).toEqual({ column: 'updated_at', direction: 'desc' });
+    // Includes the id tiebreaker (#24914): the probe must read the same
+    // deterministic first page GET /inventory serves.
+    expect(listSort).toEqual({ column: 'updated_at', direction: 'desc', tiebreaker: 'id' });
     expect(dbAdapter.query).toHaveBeenCalledWith(
       'inventory',
       [],

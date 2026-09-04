@@ -1,5 +1,6 @@
 import type { InventoryResourceConfig } from '../config/config.types.js';
 import type { QueryCondition, PaginationOptions, SortOptions } from '../db/adapter.interface.js';
+import { isSafeOrderByColumn } from '../db/postgres.adapter.js';
 import { getRequiredColumns, getSourceStatusValues } from './field-mapper.js';
 
 const MAX_PAGE_SIZE = 100;
@@ -64,15 +65,45 @@ function isFixedActiveStatus(config: InventoryResourceConfig): boolean {
 }
 
 /**
+ * Adds the resource's unique id column as a final sort key.
+ *
+ * `LIMIT`/`OFFSET` paging over a non-unique sort column (the wizard-preferred
+ * `updatedAt`, which a nightly import leaves identical across every row, and
+ * which `NULLS LAST` leaves entirely unordered when it is mostly NULL) leaves
+ * tied rows in no defined order. Page 1 and page 2 are separate requests and
+ * may order that tied block differently, so a listing served on page 1 can
+ * reappear on page 2 while another is never returned at all (#24914). The id
+ * column is unique, so appending it totally orders the result set.
+ *
+ * Skipped when the sort column already is the id column — it is unique on its
+ * own — and when the configured id column is not a plain column expression the
+ * adapter is allowed to interpolate into a raw `ORDER BY` (an id mapped to
+ * something like `CAST(id AS text)` still works everywhere else, so it must not
+ * start failing requests here).
+ */
+function withIdTiebreaker(sort: SortOptions, config: InventoryResourceConfig): SortOptions {
+  if (normalizeSortColumn(sort.column) === normalizeSortColumn(config.idColumn)) {
+    return sort;
+  }
+  if (!isSafeOrderByColumn(config.idColumn)) {
+    return sort;
+  }
+  return { ...sort, tiebreaker: config.idColumn };
+}
+
+/**
  * Default GET /inventory sort: `updatedAt DESC` when configured, otherwise
  * `id DESC`. `/health` and `npm run validate` must sample this same order so
  * they inspect the listing Kasbly's Test connection reads (#23588).
  */
 export function getDefaultSort(config: InventoryResourceConfig): SortOptions {
-  return {
-    column: config.updatedAtColumn ?? config.idColumn,
-    direction: 'desc',
-  };
+  return withIdTiebreaker(
+    {
+      column: config.updatedAtColumn ?? config.idColumn,
+      direction: 'desc',
+    },
+    config,
+  );
 }
 
 export function buildQuery(params: RawQueryParams, config: InventoryResourceConfig): ParsedQuery {
@@ -231,7 +262,7 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   return {
     conditions,
     pagination: { page, pageSize },
-    sort: { column: sortBy, direction: sortDirection },
+    sort: withIdTiebreaker({ column: sortBy, direction: sortDirection }, config),
     ignoredFilters,
   };
 }

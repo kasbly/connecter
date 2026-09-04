@@ -978,14 +978,21 @@ export function mergeEnvironmentFile(
 ): string {
   let result = existing;
   for (const [name, value] of Object.entries(values)) {
-    const pattern = new RegExp(`^\\s*${name}=.*(?:\\n|$)`, 'm');
+    // A PEM CA bundle spans several lines, so a single-line `.*` pattern replaced
+    // only the first line of an existing DB_SSL_CA and left the remainder of the
+    // old certificate behind as bare lines that Compose's `env_file` parser
+    // rejects. Match the whole entry: a quoted value may run across newlines.
+    const pattern = new RegExp(
+      `^[ \\t]*${name}=(?:'[^']*'|"[^"]*"|\`[^\`]*\`|[^\\r\\n]*)[ \\t]*\\r?\\n?`,
+      'm',
+    );
     if (value === null) {
       result = result.replace(pattern, '');
       continue;
     }
     const line = `${name}=${serializeEnvValue(value)}`;
     result = pattern.test(result)
-      ? result.replace(pattern, `${line}\n`)
+      ? result.replace(pattern, () => `${line}\n`)
       : `${result}${result.endsWith('\n') || !result ? '' : '\n'}${line}\n`;
   }
   return result.endsWith('\n') ? result : `${result}\n`;
@@ -1051,6 +1058,40 @@ export function quoteIfNeeded(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
 }
 
+const PEM_CERTIFICATE_BEGIN = '-----BEGIN CERTIFICATE-----';
+const PEM_CERTIFICATE_END = '-----END CERTIFICATE-----';
+
+/**
+ * Read the PEM the operator pointed setup at.
+ *
+ * The prompt asks for a path rather than the certificate body because
+ * `@inquirer/prompts`' `input` is a single-line readline prompt: a pasted PEM
+ * submits at its first newline, leaving `-----BEGIN CERTIFICATE-----` as the
+ * trust anchor and feeding the base64 body to the following prompts.
+ */
+export function readCaCertificate(path: string): string {
+  return readFileSync(resolve(path.trim()), 'utf-8').trim();
+}
+
+/** Reject a path that is missing, unreadable, or not a complete PEM certificate. */
+export function validateCaCertificatePath(value: string): true | string {
+  const path = value.trim();
+  if (!path) return 'A path to a PEM CA certificate or bundle is required.';
+
+  let contents: string;
+  try {
+    contents = readCaCertificate(path);
+  } catch {
+    return `Cannot read ${path}. Enter the path to a PEM CA certificate or bundle.`;
+  }
+
+  if (!contents.includes(PEM_CERTIFICATE_BEGIN) || !contents.includes(PEM_CERTIFICATE_END)) {
+    return `${path} is not a complete PEM certificate: expected ${PEM_CERTIFICATE_BEGIN} … ${PEM_CERTIFICATE_END}.`;
+  }
+
+  return true;
+}
+
 async function collectTlsSettings(requiresTls: boolean): Promise<DatabaseTlsSettings> {
   if (!requiresTls) return { enabled: false, rejectUnauthorized: true };
 
@@ -1073,11 +1114,11 @@ async function collectTlsSettings(requiresTls: boolean): Promise<DatabaseTlsSett
   });
 
   if (tlsMode === 'custom-ca') {
-    const ca = await input({
-      message: 'PEM CA certificate or bundle:',
-      validate: (value) => (value.trim() ? true : 'A PEM CA certificate or bundle is required.'),
+    const caPath = await input({
+      message: 'Path to the PEM CA certificate or bundle:',
+      validate: validateCaCertificatePath,
     });
-    return { enabled: true, ca, rejectUnauthorized: true };
+    return { enabled: true, ca: readCaCertificate(caPath), rejectUnauthorized: true };
   }
 
   return { enabled: true, rejectUnauthorized: tlsMode !== 'insecure' };

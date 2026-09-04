@@ -34,13 +34,29 @@ export function isSafeOrderByColumn(column: string): boolean {
  * this adapter must never interpolate an arbitrary string into raw SQL regardless
  * of what a caller passes in. `sort.direction` is a TS union type narrowed to
  * exactly 'asc' | 'desc' by every caller, so it never needs the same treatment.
+ * `sort.tiebreaker` goes through the same guard for the same reason.
+ *
+ * A `sort.tiebreaker` is appended as a trailing `DESC` key so tied rows keep a
+ * stable relative order across the separate requests that fetch page 1 and page
+ * 2 (#24914). It is dropped when it is the sort column itself — that column is
+ * already unique, so a second key would be dead weight.
  */
 export function buildOrderByClause(sort: SortOptions): string {
   if (!isSafeOrderByColumn(sort.column)) {
     throw new Error(`Refusing to sort by unsafe column expression: ${JSON.stringify(sort.column)}`);
   }
   const direction = sort.direction === 'asc' ? 'ASC' : 'DESC';
-  return `${sort.column} ${direction} NULLS LAST`;
+  const clause = `${sort.column} ${direction} NULLS LAST`;
+
+  if (sort.tiebreaker === undefined || sort.tiebreaker === sort.column) {
+    return clause;
+  }
+  if (!isSafeOrderByColumn(sort.tiebreaker)) {
+    throw new Error(
+      `Refusing to sort by unsafe column expression: ${JSON.stringify(sort.tiebreaker)}`,
+    );
+  }
+  return `${clause}, ${sort.tiebreaker} DESC`;
 }
 
 /**

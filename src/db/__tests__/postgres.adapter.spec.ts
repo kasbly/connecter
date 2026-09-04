@@ -278,6 +278,30 @@ describe('buildOrderByClause', () => {
     const sort: SortOptions = { column: 'price; DROP TABLE "Car"; --', direction: 'asc' };
     expect(() => buildOrderByClause(sort)).toThrow();
   });
+
+  it('appends the tiebreaker so tied rows keep one order across paged requests (#24914)', () => {
+    const sort: SortOptions = { column: 'updatedAt', direction: 'desc', tiebreaker: 'id' };
+    expect(buildOrderByClause(sort)).toBe('updatedAt DESC NULLS LAST, id DESC');
+  });
+
+  it('appends the tiebreaker to an ascending sort too', () => {
+    const sort: SortOptions = { column: 'price', direction: 'asc', tiebreaker: '"id"' };
+    expect(buildOrderByClause(sort)).toBe('price ASC NULLS LAST, "id" DESC');
+  });
+
+  it('omits the tiebreaker when it is the sort column, which is already unique', () => {
+    const sort: SortOptions = { column: 'id', direction: 'desc', tiebreaker: 'id' };
+    expect(buildOrderByClause(sort)).toBe('id DESC NULLS LAST');
+  });
+
+  it('throws instead of interpolating an unsafe tiebreaker into raw SQL', () => {
+    const sort: SortOptions = {
+      column: 'updatedAt',
+      direction: 'desc',
+      tiebreaker: 'id; DROP TABLE "Car"; --',
+    };
+    expect(() => buildOrderByClause(sort)).toThrow(/unsafe column expression/);
+  });
 });
 
 describe('PostgresAdapter relation ordering', () => {
@@ -418,6 +442,7 @@ async function runListQuery(options: {
   pageSize?: number;
   baseFilter?: string;
   schema?: string;
+  sort?: SortOptions;
 }) {
   const { db, captured } = createRecordingKnex({
     dataRows: options.dataRows ?? [],
@@ -433,7 +458,7 @@ async function runListQuery(options: {
     'Car',
     options.conditions ?? [],
     { page: options.page ?? 1, pageSize: options.pageSize ?? 20 },
-    { column: 'price', direction: 'asc' },
+    options.sort ?? { column: 'price', direction: 'asc' },
     options.baseFilter ?? 'published = true',
     ['id', 'price'],
     options.schema,
@@ -583,6 +608,18 @@ describe('PostgresAdapter list count (#17420)', () => {
     // total 4021 over pageSize 20 => 202 pages, i.e. page 201 is not reported
     // as the last page while more rows exist.
     expect(Math.ceil(result.total / 20)).toBeGreaterThan(201);
+  });
+
+  it('orders the page by the tiebreaker as well, so OFFSET slices a total order (#24914)', async () => {
+    const { dataQuery } = await runListQuery({
+      count: 40,
+      page: 2,
+      sort: { column: 'updatedAt', direction: 'desc', tiebreaker: 'id' },
+    });
+
+    expect(dataQuery.sql).toContain('order by updatedAt DESC NULLS LAST, id DESC');
+    expect(dataQuery.sql).toContain('limit ?');
+    expect(dataQuery.sql).toContain('offset ?');
   });
 });
 
