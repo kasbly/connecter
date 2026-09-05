@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DatabaseAdapter } from '../../db/adapter.interface.js';
 import { buildQuery } from '../../mapping/query-builder.js';
 import {
+  SEARCHABLE_COLUMN_PROBE_TERM,
   UNKNOWN_STATUS_SCAN_LIMIT,
   UNKNOWN_STATUS_VALUE_LIMIT,
   createResourceHealthCheck,
@@ -120,10 +121,27 @@ describe('health route', () => {
 
     await probeInventoryResource(dbAdapter, resource);
 
-    expect(dbAdapter.query).toHaveBeenCalledWith(
+    expect(dbAdapter.query).toHaveBeenNthCalledWith(
+      1,
       'inventory',
       [],
       { page: 1, pageSize: 20 },
+      { column: 'id', direction: 'desc' },
+      'published = true',
+      expect.arrayContaining(['id', 'title', 'price', 'sku', 'condition']),
+    );
+    expect(dbAdapter.query).toHaveBeenNthCalledWith(
+      2,
+      'inventory',
+      [
+        {
+          column: 'sku',
+          operator: 'ILIKE',
+          value: SEARCHABLE_COLUMN_PROBE_TERM,
+          _group: SEARCHABLE_COLUMN_PROBE_TERM,
+        },
+      ],
+      { page: 1, pageSize: 1 },
       { column: 'id', direction: 'desc' },
       'published = true',
       expect.arrayContaining(['id', 'title', 'price', 'sku', 'condition']),
@@ -136,6 +154,42 @@ describe('health route', () => {
       filter: undefined,
       orderBy: { column: 'position', direction: 'asc' },
     });
+  });
+
+  it('fails the resource when a searchable column cannot be used with ILIKE', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockImplementation(async (_table, conditions) => {
+      if (
+        conditions.some(
+          (condition) => condition.operator === 'ILIKE' && condition.column === 'state',
+        )
+      ) {
+        throw Object.assign(new Error('operator does not exist: integer ~~* unknown'), {
+          code: '42883',
+        });
+      }
+      return { rows: [{ id: '1', title: 'Item', price: 100, name: 'Item', state: 1 }], total: 1 };
+    });
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        searchableColumns: ['name', 'state'],
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      status: 'degraded',
+      database: 'connected',
+      resources: 'misconfigured',
+      resourceError: expect.stringContaining('operator does not exist'),
+    });
+    await app.close();
   });
 
   it('reports an observed source status that has not been mapped', async () => {

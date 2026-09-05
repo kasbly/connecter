@@ -15,6 +15,7 @@ services:
       start_period: 10s
     networks:
       connector_network:
+        ipv4_address: 172.30.0.3
 
   caddy:
     image: caddy:2.10-alpine

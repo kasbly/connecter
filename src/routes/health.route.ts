@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { FastifyInstance } from 'fastify';
 import type { AuditHealth } from '../audit/audit.service.js';
 import type { InventoryResourceConfig, UnknownStatusPolicy } from '../config/config.types.js';
-import type { DatabaseAdapter } from '../db/adapter.interface.js';
+import type { DatabaseAdapter, QueryCondition } from '../db/adapter.interface.js';
 import {
   getMappedImageValues,
   getRelationConfigs,
@@ -46,6 +46,13 @@ export const UNKNOWN_STATUS_VALUE_LIMIT = 50;
  * order, which reading the single mapped sample row never could.
  */
 export const UNKNOWN_STATUS_SCAN_LIMIT = 5_000;
+
+/**
+ * Throwaway `ILIKE` term for the searchable-column probe. It is wrapped as
+ * `%…%` by the adapter, matches nothing in a real catalog, and still forces
+ * PostgreSQL to resolve `ILIKE` against each configured column (#25115).
+ */
+export const SEARCHABLE_COLUMN_PROBE_TERM = '\\0probe';
 
 export interface ResourceHealth {
   ok: boolean;
@@ -98,10 +105,11 @@ export async function probeInventoryResource(
   // Search and configured filters do not need to be selected for a normal
   // inventory response, but they are column expressions the resource can use.
   // Include them in the probe so startup catches those latent mapping errors.
+  const searchableColumns = resourceConfig.searchableColumns ?? [];
   const selectColumns = Array.from(
     new Set([
       ...getRequiredColumns(resourceConfig),
-      ...(resourceConfig.searchableColumns ?? []),
+      ...searchableColumns,
       ...Object.values(resourceConfig.filterableColumns ?? {}).map(({ column }) => column),
     ]),
   );
@@ -110,25 +118,43 @@ export async function probeInventoryResource(
   // inspect the same listing (#23588).
   const sampleSort = getDefaultSort(resourceConfig);
 
-  try {
-    ({ rows } = resourceConfig.schema
-      ? await dbAdapter.query(
+  const runProbeQuery = (conditions: QueryCondition[], pageSize: number) =>
+    resourceConfig.schema
+      ? dbAdapter.query(
           resourceConfig.table,
-          [],
-          { page: 1, pageSize: DEFAULT_PAGE_SIZE },
+          conditions,
+          { page: 1, pageSize },
           sampleSort,
           resourceConfig.baseFilter,
           selectColumns,
           resourceConfig.schema,
         )
-      : await dbAdapter.query(
+      : dbAdapter.query(
           resourceConfig.table,
-          [],
-          { page: 1, pageSize: DEFAULT_PAGE_SIZE },
+          conditions,
+          { page: 1, pageSize },
           sampleSort,
           resourceConfig.baseFilter,
           selectColumns,
-        ));
+        );
+
+  try {
+    ({ rows } = await runProbeQuery([], DEFAULT_PAGE_SIZE));
+    // Selecting a searchable column only proves it exists. Real search emits
+    // `ILIKE` per column, which PostgreSQL rejects for integer/enum/uuid/date
+    // (`42883`). A throwaway term on a second query forces that operator
+    // resolution without emptying the mapping sample (#25115).
+    if (searchableColumns.length > 0) {
+      await runProbeQuery(
+        searchableColumns.map((column) => ({
+          column,
+          operator: 'ILIKE' as const,
+          value: SEARCHABLE_COLUMN_PROBE_TERM,
+          _group: SEARCHABLE_COLUMN_PROBE_TERM,
+        })),
+        1,
+      );
+    }
   } catch (error) {
     throw new Error(
       `Inventory resource probe failed for table "${resourceConfig.table}" ` +

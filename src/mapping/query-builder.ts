@@ -224,10 +224,18 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
       case 'string':
         if (filterKey === 'status') {
           const sourceValues = getSourceStatusValues(paramValue, config.statusValues);
-          if (sourceValues) {
-            conditions.push({ column: filterConfig.column, operator: 'IN', value: sourceValues });
-            break;
-          }
+          // Kasbly's status vocabulary only reaches the merchant's column
+          // through statusValues. A status with no configured source values has
+          // no rows, so answer empty with the same constant-false predicate the
+          // fixed-ACTIVE branch uses above — comparing the Kasbly token itself
+          // against an enum or integer status column aborts the query with
+          // SQLSTATE 22P02 instead (#25114).
+          conditions.push(
+            sourceValues
+              ? { column: filterConfig.column, operator: 'IN', value: sourceValues }
+              : { column: '1', operator: '=', value: 0 },
+          );
+          break;
         }
         conditions.push({
           column: filterConfig.column,

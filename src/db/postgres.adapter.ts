@@ -292,11 +292,9 @@ export class PostgresAdapter implements DatabaseAdapter {
     return row ?? null;
   }
 
-  async queryRelation(
-    query: RelationQuery,
-  ): Promise<Map<string | number, Record<string, unknown>[]>> {
+  async queryRelation(query: RelationQuery): Promise<Map<string, Record<string, unknown>[]>> {
     const db = this.getDb();
-    const result = new Map<string | number, Record<string, unknown>[]>();
+    const result = new Map<string, Record<string, unknown>[]>();
 
     // Use a single raw query for maximum performance — avoids Knex builder overhead
     const selectParts = Object.entries(query.fields).map(([alias, col]) => `${col} as "${alias}"`);
@@ -338,7 +336,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     const rows = rawResult.rows;
 
     for (const row of rows) {
-      const fk = row['__fk'] as string | number;
+      const fk = String(row['__fk']);
       delete row['__fk'];
       const existing = result.get(fk);
       if (existing) {

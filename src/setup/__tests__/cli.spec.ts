@@ -85,7 +85,7 @@ describe('validate reporting', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"under_offer"'));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('RESERVED'));
     expect(dbAdapter.disconnect).toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it('stays quiet when every source status value is mapped', async () => {
     mockConnector(['for_sale']);

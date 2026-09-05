@@ -90,7 +90,7 @@ export interface DatabaseAdapter {
     selectColumns?: string[],
     schema?: string,
   ): Promise<Record<string, unknown> | null>;
-  queryRelation(query: RelationQuery): Promise<Map<string | number, Record<string, unknown>[]>>;
+  queryRelation(query: RelationQuery): Promise<Map<string, Record<string, unknown>[]>>;
   /**
    * Bounded `SELECT DISTINCT` over one column, used by the inventory resource
    * probe to report source status values the merchant has not mapped

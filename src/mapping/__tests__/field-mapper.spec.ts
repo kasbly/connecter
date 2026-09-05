@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  getMappedImageValues,
   getRelationConfigs,
   getRequiredColumns,
   getSourceStatusValues,
@@ -275,9 +276,9 @@ describe('mapRowToInventoryItem', () => {
       },
     };
 
-    const imageData = new Map<string | number, Record<string, unknown>[]>();
+    const imageData = new Map<string, Record<string, unknown>[]>();
     imageData.set('123', [{ url: 'http://img1.jpg' }, { url: 'http://img2.jpg' }]);
-    const relationData = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+    const relationData = new Map<string, Map<string, Record<string, unknown>[]>>();
     relationData.set('images', imageData);
 
     const row = { id: '123', title: 'Test', price: 100 };
@@ -379,7 +380,7 @@ describe('mapRowToInventoryItem', () => {
         },
       },
     };
-    const imageData = new Map<string | number, Record<string, unknown>[]>([
+    const imageData = new Map<string, Record<string, unknown>[]>([
       ['sonata-2024', [{ url: 'http://img.jpg' }]],
     ]);
     const relationData = new Map([['images', imageData]]);
@@ -407,14 +408,41 @@ describe('mapRowToInventoryItem', () => {
       },
     };
 
-    const featureData = new Map<string | number, Record<string, unknown>[]>();
+    const featureData = new Map<string, Record<string, unknown>[]>();
     featureData.set('123', [{ name: 'ABS' }, { name: 'Airbag' }]);
-    const relationData = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+    const relationData = new Map<string, Map<string, Record<string, unknown>[]>>();
     relationData.set('features', featureData);
 
     const row = { id: '123', title: 'Test', price: 100 };
     const result = mapRowToInventoryItem(row, configWithRelations, relationData);
     expect(result.attributes.features).toEqual(['ABS', 'Airbag']);
+  });
+
+  it('joins image relations when the child FK is a string and the parent key is a number', () => {
+    const configWithRelations: InventoryResourceConfig = {
+      ...baseConfig,
+      relations: {
+        images: {
+          table: 'Image',
+          foreignKey: '"carId"',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+        },
+      },
+    };
+
+    const imageData = new Map<string, Record<string, unknown>[]>();
+    imageData.set('1', [{ url: 'https://x/1.jpg' }]);
+    const relationData = new Map<string, Map<string, Record<string, unknown>[]>>();
+    relationData.set('images', imageData);
+
+    const row = { id: 1, title: 'Test', price: 100 };
+    const result = mapRowToInventoryItem(row, configWithRelations, relationData);
+    expect(result.images).toEqual(['https://x/1.jpg']);
+    expect(getMappedImageValues(row, configWithRelations, relationData)).toEqual([
+      'https://x/1.jpg',
+    ]);
   });
 });
 

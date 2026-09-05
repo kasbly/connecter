@@ -380,6 +380,23 @@ describe('PostgresAdapter relation ordering', () => {
     ).rejects.toThrow(/unsafe column expression/);
     expect(rawMock).not.toHaveBeenCalled();
   });
+
+  it('keys relation rows by the string form of mixed-width foreign keys', async () => {
+    const adapter = createAdapterForRelationQuery();
+    rawMock.mockResolvedValue({
+      rows: [{ url: 'https://x/1.jpg', __fk: '1' }],
+    });
+
+    const result = await adapter.queryRelation({
+      table: 'Image',
+      foreignKey: 'carId',
+      parentIds: [1],
+      fields: { url: 'url' },
+    });
+
+    expect(result.get('1')).toEqual([{ url: 'https://x/1.jpg' }]);
+    expect([...result.keys()]).toEqual(['1']);
+  });
 });
 
 describe('resolveCountLimit', () => {

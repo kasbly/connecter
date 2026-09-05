@@ -226,7 +226,8 @@ resources:
       images: 'image_urls'
 
     # Source-system values for Kasbly's accepted status tokens.
-    # Defaults accept ACTIVE, DRAFT, RESERVED, SOLD, and EXPIRED (case-insensitive).
+    # Omit the whole block to accept ACTIVE, DRAFT, RESERVED, SOLD, and EXPIRED
+    # (case-insensitive). List only the tokens your catalogue actually uses.
     statusValues:
       ACTIVE: ['active', 'for_sale']
       DRAFT: ['draft']
@@ -301,9 +302,11 @@ temporarily while a valid CA bundle is configured.
 
 Kasbly accepts these inventory status tokens: `ACTIVE`, `DRAFT`, `RESERVED`, `SOLD`, and
 `EXPIRED`. Map the source status column in `fields.status`, then use `statusValues` to translate
-the source system's vocabulary. The defaults recognize each token in either uppercase or lowercase;
-add source-specific values such as `for_sale`, `under_offer`, or `backorder` to the corresponding
-list. When `fields.status` is not mapped, the connector logs a startup warning and reports every
+the source system's vocabulary. Omitting the whole `statusValues` block recognizes each token in
+either uppercase or lowercase; add source-specific values such as `for_sale`, `under_offer`, or
+`backorder` to the corresponding list. A block you do provide is read literally — tokens you leave
+out are taken as "this catalogue has no listings in that status", never filled in from the
+defaults. When `fields.status` is not mapped, the connector logs a startup warning and reports every
 listing as `ACTIVE`: an absent mapping is read as "this catalog is entirely live".
 
 Once a status column **is** mapped, a source value that none of the `statusValues` lists recognize
@@ -312,7 +315,8 @@ is treated as drift rather than a declaration. Those rows are reported as `unkno
 `/health` names any such values under `unknownStatusValues`.
 
 Status filters use the same mapping: `filter.status=SOLD` queries every source value configured
-under `statusValues.SOLD`.
+under `statusValues.SOLD`. A token with no configured source values returns an empty page rather
+than comparing the Kasbly token against your status column.
 
 ### Filter Types
 

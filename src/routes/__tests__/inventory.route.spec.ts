@@ -237,7 +237,7 @@ describe('inventory routes', () => {
     expect(response.json()).toEqual({
       statusCode: 400,
       error: 'Bad Request',
-      message: 'A numeric filter value is invalid for its configured database column',
+      message: 'A filter value is invalid for its configured database column',
     });
 
     await app.close();

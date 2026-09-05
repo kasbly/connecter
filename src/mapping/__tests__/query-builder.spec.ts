@@ -169,6 +169,29 @@ describe('buildQuery', () => {
     });
   });
 
+  it('returns no rows for a status the merchant mapped no source values for', () => {
+    // The wizard prompts for every distinct value in the status column, so a
+    // key it left out has nothing behind it. Sending 'RESERVED' to the column
+    // instead aborts an enum or integer status column with 22P02 (#25114).
+    const result = buildQuery(
+      { 'filter.status': 'RESERVED' },
+      {
+        ...baseConfig,
+        filterableColumns: {
+          ...baseConfig.filterableColumns,
+          status: { column: 'availability', type: 'string' },
+        },
+        statusValues: { ACTIVE: ['active'], SOLD: ['sold'], DRAFT: ['draft'] },
+      },
+    );
+
+    expect(result.conditions).toContainEqual({ column: '1', operator: '=', value: 0 });
+    expect(result.conditions).not.toContainEqual(
+      expect.objectContaining({ column: 'availability' }),
+    );
+    expect(result.ignoredFilters).not.toContain('status');
+  });
+
   it('enforces ACTIVE without ignoring it when every listing is implicitly active', () => {
     const result = buildQuery(
       { 'filter.status': 'ACTIVE' },

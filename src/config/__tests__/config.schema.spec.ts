@@ -144,10 +144,12 @@ describe('connectorConfigSchema inventory fields', () => {
         },
       },
     });
-    expect(configured.resources.inventory.statusValues).toMatchObject({
+    // A partially mapped block must not inherit Kasbly's English word list for
+    // the keys the merchant left out: those words reach the merchant's status
+    // column as comparison values (#25114).
+    expect(configured.resources.inventory.statusValues).toEqual({
       ACTIVE: ['for_sale'],
       SOLD: ['sold_out'],
-      RESERVED: ['RESERVED', 'reserved'],
     });
   });
 

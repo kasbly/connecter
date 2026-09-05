@@ -151,6 +151,10 @@ export function resolveInventoryStatus(
   const normalizedValue = String(value).trim().toLowerCase();
   if (!normalizedValue) return undefined;
 
+  // Reading a row keeps the per-key default as a safety net: an unrecognized
+  // source value would otherwise drop to `unknownStatusPolicy` and pull a live
+  // listing out of search. The filter direction below cannot afford the same
+  // guess, because there the synthesized word is sent to PostgreSQL.
   const mappings = statusValues ?? DEFAULT_STATUS_VALUES;
   return INVENTORY_STATUSES.find((status) =>
     (mappings[status] ?? DEFAULT_STATUS_VALUES[status]).some(
@@ -159,7 +163,17 @@ export function resolveInventoryStatus(
   );
 }
 
-/** Return source-system values that correspond to a Kasbly status filter. */
+/**
+ * Return source-system values that correspond to a Kasbly status filter.
+ *
+ * A `statusValues` block that is present is the merchant's own declaration of
+ * which source values exist — the setup wizard prompts for every distinct value
+ * in the status column, so a key it left out has nothing behind it. Filling
+ * that key in from Kasbly's English defaults sent 'RESERVED'/'EXPIRED' to the
+ * merchant's status column as a comparison value, which aborts with SQLSTATE
+ * 22P02 on an enum or integer column (#25114). `undefined` here means "no rows
+ * can be in this status"; only an entirely absent block uses the defaults.
+ */
 export function getSourceStatusValues(
   status: string,
   statusValues: StatusValuesConfig | undefined,
@@ -167,13 +181,16 @@ export function getSourceStatusValues(
   if (!INVENTORY_STATUSES.includes(status as InventoryStatus)) return undefined;
 
   const inventoryStatus = status as InventoryStatus;
-  return statusValues?.[inventoryStatus] ?? DEFAULT_STATUS_VALUES[inventoryStatus];
+  const sourceValues = statusValues
+    ? statusValues[inventoryStatus]
+    : DEFAULT_STATUS_VALUES[inventoryStatus];
+  return sourceValues?.length ? sourceValues : undefined;
 }
 
 export function mapRowToInventoryItem(
   row: Record<string, unknown>,
   config: InventoryResourceConfig,
-  relationData: Map<string, Map<string | number, Record<string, unknown>[]>>,
+  relationData: Map<string, Map<string, Record<string, unknown>[]>>,
 ): ConnectorInventoryItem {
   const idValue = resolveColumnValue(row, config.idColumn);
   const externalId = String(idValue ?? '');
@@ -201,7 +218,7 @@ export function mapRowToInventoryItem(
     for (const [relationName, relationConfig] of Object.entries(config.relations)) {
       const relData = relationData.get(relationName);
       const referenceValue = resolveColumnValue(row, relationConfig.referenceKey);
-      const relRows = relData?.get(referenceValue as string | number) ?? [];
+      const relRows = relData?.get(String(referenceValue)) ?? [];
 
       if (relationConfig.imageUrlField) {
         for (const relationRow of relRows) {
@@ -340,7 +357,7 @@ export function getRequiredColumns(config: InventoryResourceConfig): string[] {
 export function getMappedImageValues(
   row: Record<string, unknown>,
   resourceConfig: InventoryResourceConfig,
-  relationData: Map<string, Map<string | number, Record<string, unknown>[]>>,
+  relationData: Map<string, Map<string, Record<string, unknown>[]>>,
 ): unknown[] {
   const values: unknown[] = [];
   const imageColumn = resourceConfig.fields['images'];
@@ -349,8 +366,7 @@ export function getMappedImageValues(
   for (const [relationName, relationConfig] of getRelationConfigs(resourceConfig)) {
     if (!relationConfig.imageUrlField) continue;
     const referenceValue = resolveColumnValue(row, relationConfig.referenceKey);
-    const relationRows =
-      relationData.get(relationName)?.get(referenceValue as string | number) ?? [];
+    const relationRows = relationData.get(relationName)?.get(String(referenceValue)) ?? [];
     values.push(...relationRows.map((relationRow) => relationRow[relationConfig.imageUrlField!]));
   }
 

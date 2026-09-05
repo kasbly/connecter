@@ -64,7 +64,9 @@ resources:
       images: 'image_urls'
 
     # Map source-system availability terms to Kasbly's five status tokens.
-    # Defaults accept ACTIVE, DRAFT, RESERVED, SOLD, and EXPIRED (case-insensitive).
+    # Omit the whole block to accept ACTIVE, DRAFT, RESERVED, SOLD, and EXPIRED
+    # (case-insensitive). Tokens you leave out of a block you do provide have no
+    # source values, and filtering on them returns an empty page.
     statusValues:
       ACTIVE: ['active', 'for_sale']
       DRAFT: ['draft']

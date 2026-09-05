@@ -104,13 +104,19 @@ const inventoryResourceSchema = z.object({
       currency: z.string().min(1),
     })
     .catchall(z.string()),
+  // Defaulted as a whole object, never per key: an absent block still means
+  // "use Kasbly's own vocabulary", but a block the merchant partially filled in
+  // is their declaration of which source values exist. Per-key defaults used to
+  // invent 'RESERVED'/'EXPIRED' for keys the setup wizard left out, and those
+  // words then reached the merchant's status column as literal comparison
+  // values (#25114).
   statusValues: z
     .object({
-      ACTIVE: z.array(z.string().min(1)).min(1).default(defaultStatusValues.ACTIVE),
-      DRAFT: z.array(z.string().min(1)).min(1).default(defaultStatusValues.DRAFT),
-      RESERVED: z.array(z.string().min(1)).min(1).default(defaultStatusValues.RESERVED),
-      SOLD: z.array(z.string().min(1)).min(1).default(defaultStatusValues.SOLD),
-      EXPIRED: z.array(z.string().min(1)).min(1).default(defaultStatusValues.EXPIRED),
+      ACTIVE: z.array(z.string().min(1)).min(1).optional(),
+      DRAFT: z.array(z.string().min(1)).min(1).optional(),
+      RESERVED: z.array(z.string().min(1)).min(1).optional(),
+      SOLD: z.array(z.string().min(1)).min(1).optional(),
+      EXPIRED: z.array(z.string().min(1)).min(1).optional(),
     })
     .default(defaultStatusValues),
   // New source-system values must never become sellable without an explicit

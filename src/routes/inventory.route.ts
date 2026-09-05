@@ -43,7 +43,7 @@ function errorMessage(error: unknown): string {
 function mapValidatedInventoryItem(
   row: Record<string, unknown>,
   resourceConfig: InventoryResourceConfig,
-  relationData: Map<string, Map<string | number, Record<string, unknown>[]>>,
+  relationData: Map<string, Map<string, Record<string, unknown>[]>>,
 ): ConnectorInventoryItem {
   const item = mapRowToInventoryItem(row, resourceConfig, relationData);
   validateInventoryItemWireContract(item, getMappedImageValues(row, resourceConfig, relationData));
@@ -96,14 +96,17 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
         );
       } catch (error) {
         if (!isUncoercibleValueError(error)) throw error;
+        // Not necessarily a numeric filter: any filter value PostgreSQL cannot
+        // coerce to its column's type lands here, so the message must not send
+        // the operator hunting for a number they never sent (#25114).
         throw new QueryValidationError(
-          'A numeric filter value is invalid for its configured database column',
+          'A filter value is invalid for its configured database column',
         );
       }
       const { rows, total, totalIsCapped } = queryResult;
       // Fetch all relations in parallel
       const relationConfigs = getRelationConfigs(resourceConfig);
-      const relationData = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+      const relationData = new Map<string, Map<string, Record<string, unknown>[]>>();
 
       if (rows.length > 0 && relationConfigs.length > 0) {
         const relationResults = await Promise.all(
@@ -199,7 +202,7 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       }
 
       const relationConfigs = getRelationConfigs(resourceConfig);
-      const relationData = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+      const relationData = new Map<string, Map<string, Record<string, unknown>[]>>();
 
       // Fetch all relations in parallel
       if (relationConfigs.length > 0) {
