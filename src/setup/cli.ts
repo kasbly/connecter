@@ -17,20 +17,22 @@ export interface ConnectorValidationResult {
   unknownStatusValues: string[];
   /** Status every listing carrying one of those values is reported as. */
   unknownStatusPolicy: UnknownStatusPolicy;
+  /** Sampled listing ids withheld because they fail the JSON wire contract. */
+  wireContractViolationIds: string[];
 }
 
 /**
  * Runs the same probe `/health` runs, and reports what it found. Discarding the
- * probe's result here is how a merchant could add a source status value and be
- * told "probe passed" while those listings silently stopped being sellable
- * (#23293).
+ * probe's result here is how a merchant could add a source status value — or
+ * leave a NULL price in a sampled row — and be told "probe passed" while those
+ * listings silently stopped being sellable (#23293, #25309).
  */
 export async function validateConnectorConfig(
   configPath: string,
 ): Promise<ConnectorValidationResult> {
   const { loadConfig } = await import('../config/config.loader.js');
   const { createDatabaseAdapter } = await import('../db/adapter.factory.js');
-  const { formatUnknownStatusWarning, probeInventoryResource } =
+  const { formatUnknownStatusWarning, formatWireContractViolationWarning, probeInventoryResource } =
     await import('../routes/health.route.js');
   try {
     await access(configPath);
@@ -42,9 +44,13 @@ export async function validateConnectorConfig(
   const inventoryResource = config.resources.inventory;
   const dbAdapter = createDatabaseAdapter(config.database);
   let unknownStatusValues: string[];
+  let wireContractViolationIds: string[];
   try {
     await dbAdapter.connect();
-    ({ unknownStatusValues } = await probeInventoryResource(dbAdapter, inventoryResource));
+    ({ unknownStatusValues, wireContractViolationIds } = await probeInventoryResource(
+      dbAdapter,
+      inventoryResource,
+    ));
   } finally {
     await dbAdapter.disconnect();
   }
@@ -52,8 +58,10 @@ export async function validateConnectorConfig(
   const unknownStatusPolicy = inventoryResource.unknownStatusPolicy ?? 'DRAFT';
   const warning = formatUnknownStatusWarning(unknownStatusValues, unknownStatusPolicy);
   if (warning) console.warn(`Warning: ${warning}`);
+  const wireContractWarning = formatWireContractViolationWarning(wireContractViolationIds);
+  if (wireContractWarning) console.warn(`Warning: ${wireContractWarning}`);
 
-  return { unknownStatusValues, unknownStatusPolicy };
+  return { unknownStatusValues, unknownStatusPolicy, wireContractViolationIds };
 }
 
 async function run(): Promise<void> {

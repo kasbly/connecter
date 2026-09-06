@@ -47,12 +47,17 @@ describe('validate reporting', () => {
     mocks.createDatabaseAdapter.mockReset();
   });
 
-  function mockConnector(distinctStatuses: unknown[]): DatabaseAdapter {
+  function mockConnector(
+    distinctStatuses: unknown[],
+    rows: Record<string, unknown>[] = [
+      { id: '1', title: 'Test', price: 100, availability: 'for_sale' },
+    ],
+  ): DatabaseAdapter {
     const dbAdapter = {
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
       query: vi.fn().mockResolvedValue({
-        rows: [{ id: '1', title: 'Test', price: 100, availability: 'for_sale' }],
+        rows,
         total: 10_000,
       }),
       distinctValues: vi.fn().mockResolvedValue(distinctStatuses),
@@ -81,6 +86,7 @@ describe('validate reporting', () => {
     expect(result).toEqual({
       unknownStatusValues: ['under_offer'],
       unknownStatusPolicy: 'RESERVED',
+      wireContractViolationIds: [],
     });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"under_offer"'));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('RESERVED'));
@@ -94,6 +100,29 @@ describe('validate reporting', () => {
     const result = await validateConnectorConfig(packageJsonPath);
 
     expect(result.unknownStatusValues).toEqual([]);
+    expect(result.wireContractViolationIds).toEqual([]);
     expect(warn).not.toHaveBeenCalled();
   });
+
+  it('warns about sampled listings withheld for a broken wire contract', async () => {
+    const dbAdapter = mockConnector(
+      ['for_sale'],
+      [
+        { id: '1', title: 'Valid listing', price: 100, availability: 'for_sale' },
+        { id: '42', title: 'Broken listing', price: null, availability: 'for_sale' },
+      ],
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const result = await validateConnectorConfig(packageJsonPath);
+
+    expect(result).toEqual({
+      unknownStatusValues: [],
+      unknownStatusPolicy: 'RESERVED',
+      wireContractViolationIds: ['42'],
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"42"'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('withheld from customers'));
+    expect(dbAdapter.disconnect).toHaveBeenCalled();
+  }, 15_000);
 });
