@@ -673,6 +673,119 @@ describe('runWizard', () => {
     }
   });
 
+  it('suggests a listing-URL column as an attribute mapping, wiring it onto attributes.url for resolvePublicListingUrl (#25311)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'merchant_data',
+      'connector.merchant.example',
+    ]) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.password.mockResolvedValueOnce('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }) =>
+      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }) => {
+      // The `listing_url` column must come back pre-checked: that is what
+      // `suggestFieldMappings`'s new `url` ATTRIBUTE_PATTERN drives.
+      if (message.startsWith('Select additional')) return Promise.resolve(['listing_url']);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title']);
+      }
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 40,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'listing_url', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      expect(promptMocks.checkbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Select additional columns to include as attributes:',
+          choices: expect.arrayContaining([
+            expect.objectContaining({ name: 'listing_url', value: 'listing_url', checked: true }),
+          ]),
+        }),
+      );
+
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      const inventory = config.resources.inventory;
+      // Written under the `url` key (not the raw column name) so
+      // resolvePublicListingUrl's `attributes.url` lookup finds it without
+      // needing the `listing_url`/`link` aliases at all.
+      expect(inventory.attributes?.url).toBe('"listing_url"');
+
+      expect(
+        mapRowToInventoryItem(
+          {
+            id: 'p1',
+            title: 'Item',
+            price: 10,
+            currency: 'SAR',
+            listing_url: 'https://shop.example/p1',
+          },
+          inventory,
+          new Map(),
+        ).attributes.url,
+      ).toBe('https://shop.example/p1');
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('writes the operator-chosen unique listing id for a view with no id column', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
@@ -1279,6 +1392,103 @@ describe('runWizard', () => {
       );
       expect(consoleLog).toHaveBeenCalledWith(
         expect.stringContaining('the rest use the unknown-status policy chosen next'),
+      );
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('writes a kilometers odometer column onto attributes.kilometers, not mileage', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('cars');
+      if (message.startsWith('Which column is the unique listing id')) {
+        return Promise.resolve('id');
+      }
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+      if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
+        return Promise.resolve(fieldMatch[1]);
+      }
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+      if (message.startsWith('Public DNS name')) {
+        return Promise.resolve('connector.merchant.example');
+      }
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve(['kilometers']);
+      if (message.startsWith('Which columns should be searchable'))
+        return Promise.resolve(['title']);
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'cars',
+            kind: 'table',
+            rowCount: 40,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'kilometers', type: 'integer', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      const generated = yaml.load(
+        readFileSync(join(directory, 'connector.config.yml'), 'utf-8'),
+      ) as { resources: { inventory: { attributes?: Record<string, string> } } };
+      expect(generated.resources.inventory.attributes).toEqual({
+        kilometers: '"kilometers"',
+      });
+      expect(generated.resources.inventory.attributes).not.toHaveProperty('mileage');
+      expect(promptMocks.checkbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining('Select additional columns'),
+          choices: expect.arrayContaining([
+            expect.objectContaining({
+              name: 'kilometers',
+              value: 'kilometers',
+              checked: true,
+            }),
+          ]),
+        }),
       );
     } finally {
       consoleLog.mockRestore();

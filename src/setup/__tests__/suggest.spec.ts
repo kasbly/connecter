@@ -57,9 +57,31 @@ describe('suggestFieldMappings', () => {
 
     expect(attrs.some((a) => a.suggestedMapping === 'year')).toBe(true);
     expect(attrs.some((a) => a.suggestedMapping === 'color')).toBe(true);
-    expect(attrs.some((a) => a.suggestedMapping === 'mileage')).toBe(true);
+    expect(attrs.some((a) => a.suggestedMapping === 'kilometers')).toBe(true);
+    expect(attrs.some((a) => a.suggestedMapping === 'mileage')).toBe(false);
     expect(attrs.some((a) => a.suggestedMapping === 'transmission')).toBe(true);
   });
+
+  it.each(['kilometers', 'km', 'odometer', 'mileage'])(
+    'maps odometer column %s onto kilometers, not mileage',
+    (columnName) => {
+      const suggestions = suggestFieldMappings([
+        col('id', 'integer', true),
+        col(columnName, 'integer'),
+      ]);
+
+      expect(suggestions).toContainEqual(
+        expect.objectContaining({
+          columnName,
+          suggestedMapping: 'kilometers',
+          mappingType: 'attribute',
+        }),
+      );
+      expect(suggestions.some((suggestion) => suggestion.suggestedMapping === 'mileage')).toBe(
+        false,
+      );
+    },
+  );
 
   it('keeps the first matching column for each attribute target', () => {
     const columns = [
@@ -78,6 +100,20 @@ describe('suggestFieldMappings', () => {
       expect.objectContaining({ columnName: 'makeEn', suggestedMapping: 'make' }),
       expect.objectContaining({ columnName: 'engineSize', suggestedMapping: 'enginePower' }),
     ]);
+  });
+
+  it('suggests a listing-URL column as the `url` attribute, so resolvePublicListingUrl can build a customer link (#25311)', () => {
+    for (const columnName of ['url', 'listing_url', 'listingUrl', 'link', 'product_url']) {
+      const suggestions = suggestFieldMappings([col('id', 'integer', true), col(columnName)]);
+
+      expect(suggestions).toContainEqual(
+        expect.objectContaining({
+          columnName,
+          suggestedMapping: 'url',
+          mappingType: 'attribute',
+        }),
+      );
+    }
   });
 
   it('skips foreign key and timestamp columns for attributes', () => {

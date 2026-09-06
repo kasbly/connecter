@@ -952,7 +952,18 @@ export async function runWizard(): Promise<void> {
 
   console.log('\n   Start the connector: docker compose up -d');
   console.log(`   Verify the public endpoint: curl -fsS https://${connectorDomain}/health`);
-  console.log(`   Give Kasbly this URL: https://${connectorDomain}\n`);
+  console.log(`   Give Kasbly this URL: https://${connectorDomain}`);
+  // Without one of these, every AI inventory card ends with a dead 🔗 after a
+  // successful Test connection — Kasbly only builds a customer link from
+  // `attributes.url`/`listingUrl` or a Kasbly-side listingUrlTemplate (#25311).
+  if (!attributes['url'] && !attributes['listingUrl']) {
+    console.log(
+      '   No listing-URL column was mapped: every AI product card will be missing its link ' +
+        'until you either map one here (rerun setup and add a `url`/`listing_url` column as an ' +
+        'attribute) or set a listing URL template on the source in Kasbly.',
+    );
+  }
+  console.log('');
 
   await db.destroy();
 }

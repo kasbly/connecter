@@ -48,11 +48,17 @@ const ATTRIBUTE_PATTERNS: { target: string; patterns: RegExp[] }[] = [
   { target: 'model', patterns: [/model/i] },
   { target: 'year', patterns: [/^year$/i, /^model_?year$/i, /^production_?year$/i] },
   { target: 'color', patterns: [/^color$/i, /^colour$/i] },
-  { target: 'mileage', patterns: [/^mileage$/i, /^kilometers$/i, /^km$/i, /^odometer$/i] },
+  // search_inventory reads attributes.kilometers (mileage is a fallback alias).
+  { target: 'kilometers', patterns: [/^mileage$/i, /^kilometers$/i, /^km$/i, /^odometer$/i] },
   { target: 'fuelType', patterns: [/fuel/i] },
   { target: 'transmission', patterns: [/transmission/i, /gearbox/i] },
   { target: 'enginePower', patterns: [/engine/i, /power/i, /horsepower/i, /hp$/i] },
   { target: 'drivetrain', patterns: [/drivetrain/i, /drive_?type/i, /^4wd$/i, /^awd$/i] },
+  // A per-row customer-facing listing page. Written to `attributes.url`
+  // (see wizard.ts's `suggestedAttributes` lookup), which
+  // `resolvePublicListingUrl` already reads — without this, every default AI
+  // card renders a dead 🔗 after a successful connector Test connection (#25311).
+  { target: 'url', patterns: [/^url$/i, /^listing_?url$/i, /^link$/i, /^product_?url$/i] },
 ];
 
 // Columns to suggest as published filter
