@@ -312,7 +312,7 @@ export function suggestFilterableColumns(
     columnToName.set(s.columnName, s.suggestedMapping);
   }
   for (const attr of additionalAttributes) {
-    columnToName.set(attr, attr);
+    if (!columnToName.has(attr)) columnToName.set(attr, attr);
   }
 
   for (const col of columns) {

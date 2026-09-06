@@ -368,6 +368,38 @@ describe('health route', () => {
     await app.close();
   });
 
+  it('reports a relative image path from a sample row as a wire-contract violation', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [
+        {
+          id: '1',
+          title: 'Test',
+          price: 100,
+          image_urls: '/wp-content/uploads/2026/03/car-123.jpg',
+        },
+      ],
+      total: 1,
+    });
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        fields: { ...inventoryResource.fields, images: 'image_urls' },
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      resourceError: expect.stringContaining('must be absolute http(s) URLs'),
+    });
+    await app.close();
+  });
+
   it('names the unmapped values and the status they are reported as', () => {
     expect(formatUnknownStatusWarning(['under_offer'], 'RESERVED')).toContain('"under_offer"');
     expect(formatUnknownStatusWarning(['under_offer'], 'RESERVED')).toContain('RESERVED');

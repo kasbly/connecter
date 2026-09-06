@@ -320,12 +320,12 @@ than comparing the Kasbly token against your status column.
 
 ### Filter Types
 
-| Type     | Operator | Use case                              |
-| -------- | -------- | ------------------------------------- |
-| `string` | `=`      | Exact match (make, color, fuelType)   |
-| `number` | `=`      | Exact numeric match (year)            |
-| `gte`    | `>=`     | Range lower bound (minPrice, minYear) |
-| `lte`    | `<=`     | Range upper bound (maxPrice, maxYear) |
+| Type     | Operator | Use case                                              |
+| -------- | -------- | ----------------------------------------------------- |
+| `string` | `=`      | Exact match, case-insensitive (make, color, fuelType) |
+| `number` | `=`      | Exact numeric match (year)                            |
+| `gte`    | `>=`     | Range lower bound (minPrice, minYear)                 |
+| `lte`    | `<=`     | Range upper bound (maxPrice, maxYear)                 |
 
 ## Environment Variables
 

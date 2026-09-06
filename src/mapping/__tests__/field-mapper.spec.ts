@@ -332,6 +332,21 @@ describe('mapRowToInventoryItem', () => {
     ).toEqual(['https://example.com/one.jpg', 'https://example.com/two.jpg']);
   });
 
+  it('drops relative paths and bare filenames instead of emitting them as URLs', () => {
+    expect(normalizeImageUrls('/wp-content/uploads/2026/03/car-123.jpg')).toEqual([]);
+    expect(normalizeImageUrls('car-123.jpg')).toEqual([]);
+    expect(
+      normalizeImageUrls([
+        'https://example.com/one.jpg',
+        '/wp-content/uploads/2026/03/car-123.jpg',
+        'car-123.jpg',
+      ]),
+    ).toEqual(['https://example.com/one.jpg']);
+    expect(normalizeImageUrls('["https://example.com/one.jpg", "car-123.jpg"]')).toEqual([
+      'https://example.com/one.jpg',
+    ]);
+  });
+
   it('places inventory-row images before related-table images', () => {
     const config: InventoryResourceConfig = {
       ...baseConfig,
@@ -499,6 +514,44 @@ describe('validateInventoryItemWireContract', () => {
         ['["https://example.com/coffee.jpg", 42]'],
       ),
     ).toThrow(/images\[1\]/);
+  });
+
+  it('rejects relative paths and bare filenames as non-absolute image URLs', () => {
+    expect(() =>
+      validateInventoryItemWireContract(
+        {
+          externalId: 'sku-1',
+          title: 'Coffee',
+          description: null,
+          price: 1,
+          currency: 'SAR',
+          category: '',
+          status: 'ACTIVE',
+          images: [],
+          attributes: {},
+          updatedAt: null,
+        },
+        ['/wp-content/uploads/2026/03/car-123.jpg'],
+      ),
+    ).toThrow(/images: image values must be absolute http\(s\) URLs/);
+
+    expect(() =>
+      validateInventoryItemWireContract(
+        {
+          externalId: 'sku-1',
+          title: 'Coffee',
+          description: null,
+          price: 1,
+          currency: 'SAR',
+          category: '',
+          status: 'ACTIVE',
+          images: [],
+          attributes: {},
+          updatedAt: null,
+        },
+        ['car-123.jpg'],
+      ),
+    ).toThrow(/images: image values must be absolute http\(s\) URLs/);
   });
 });
 

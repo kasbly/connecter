@@ -149,6 +149,26 @@ describe('buildQuery', () => {
     });
   });
 
+  it('passes filter.color=white through as string equality for the adapter to match case-insensitively', () => {
+    const result = buildQuery(
+      { 'filter.color': 'white' },
+      {
+        ...baseConfig,
+        filterableColumns: {
+          ...baseConfig.filterableColumns,
+          color: { column: 'color', type: 'string' },
+        },
+      },
+    );
+
+    expect(result.conditions).toContainEqual({
+      column: 'color',
+      operator: '=',
+      value: 'white',
+    });
+    expect(result.ignoredFilters).not.toContain('color');
+  });
+
   it('translates Kasbly status filters to the configured source values', () => {
     const result = buildQuery(
       { 'filter.status': 'SOLD' },

@@ -284,9 +284,17 @@ export async function runWizard(): Promise<void> {
     }
   }
 
-  const existingConfig = hasExistingConfig
-    ? loadExistingSetupConfig(configPath, envPath)
-    : undefined;
+  let existingConfig: ConnectorConfig | undefined;
+  if (hasExistingConfig) {
+    try {
+      existingConfig = loadExistingSetupConfig(configPath, envPath);
+    } catch (error) {
+      console.warn(
+        `Could not read ${configPath} (${error instanceof Error ? error.message : String(error)}). ` +
+          'Starting from defaults; your existing files are backed up before anything is written.',
+      );
+    }
+  }
   const existingEnv = hasExistingEnv ? parse(readFileSync(envPath, 'utf-8')) : {};
   const existingApiKey = existingEnv['CONNECTOR_API_KEY'];
   const existingPendingApiKey = existingEnv['CONNECTOR_API_KEY_PENDING'];
@@ -826,7 +834,6 @@ export async function runWizard(): Promise<void> {
       ],
     },
     database: {
-      ...existingConfig?.database,
       type: dbType,
       host: '${DB_HOST}',
       port: parseInt(dbPort, 10),

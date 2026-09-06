@@ -403,6 +403,46 @@ describe('suggestFilterableColumns', () => {
     );
   });
 
+  it('prefers the resolved canonical mapping over a raw column name when a column is both field-mapped and pre-checked as an additional attribute', () => {
+    // Regression test for a bug where the wizard pre-checks a raw column name
+    // (e.g. 'mileage', 'colour') as an "additional attribute" even though a
+    // fieldMappings entry already resolved it to the canonical filter key
+    // (e.g. 'kilometers', 'color'). The additionalAttributes loop used to
+    // unconditionally overwrite the canonical mapping with the raw column
+    // name, so the generated filterableColumns keys (minMileage/maxMileage,
+    // colour) never matched what the API sends (filter.minKilometers/
+    // filter.maxKilometers, filter.color), silently dropping those filters.
+    const columns = [
+      col('id', 'integer', true),
+      col('mileage', 'integer'),
+      col('colour', 'character varying'),
+    ];
+    const fieldMappings = [
+      {
+        columnName: 'mileage',
+        suggestedMapping: 'kilometers',
+        confidence: 'high' as const,
+        mappingType: 'attribute' as const,
+      },
+      {
+        columnName: 'colour',
+        suggestedMapping: 'color',
+        confidence: 'high' as const,
+        mappingType: 'attribute' as const,
+      },
+    ];
+
+    const suggestions = suggestFilterableColumns(columns, fieldMappings, ['mileage', 'colour']);
+    const filterNames = suggestions.map((s) => s.filterName);
+
+    expect(filterNames).toContain('minKilometers');
+    expect(filterNames).toContain('maxKilometers');
+    expect(filterNames).toContain('color');
+    expect(filterNames).not.toContain('minMileage');
+    expect(filterNames).not.toContain('maxMileage');
+    expect(filterNames).not.toContain('colour');
+  });
+
   it('keeps the first column when mapped names would produce duplicate filters', () => {
     const columns = [col('id', 'integer', true), col('makeEn'), col('makeAr')];
     const fieldMappings = [

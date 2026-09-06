@@ -189,6 +189,15 @@ export class PostgresAdapter implements DatabaseAdapter {
         );
         continue;
       }
+      // String `=` is exact-but-case-insensitive (ILIKE with no wildcards), so
+      // filter.color=white matches a catalogue value stored as 'White' (#25604).
+      // Numeric `=` stays a bound equality because its value is a JS number.
+      if (condition.operator === '=' && typeof condition.value === 'string') {
+        queryBuilder = queryBuilder.whereRaw(`${condition.column} ILIKE ? ESCAPE '\\'`, [
+          escapeLikePattern(condition.value),
+        ]);
+        continue;
+      }
       queryBuilder = queryBuilder.where(
         db.raw(condition.column),
         condition.operator,

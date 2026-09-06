@@ -567,6 +567,38 @@ describe('PostgresAdapter list count (#17420)', () => {
     expect(dataQuery.bindings.slice(0, 3)).toEqual([2024, '%sonata%', '%sonata%']);
   });
 
+  it('matches filter.color=white against a stored White value via case-insensitive exact ILIKE', async () => {
+    const conditions: QueryCondition[] = [{ column: 'color', operator: '=', value: 'white' }];
+
+    const { countQuery, dataQuery, result } = await runListQuery({
+      count: 1,
+      conditions,
+      dataRows: [{ id: '1', price: 10, color: 'White' }],
+    });
+
+    expect(dataQuery.sql).toContain(`color ILIKE ? ESCAPE '\\'`);
+    expect(countQuery.sql).toContain(`color ILIKE ? ESCAPE '\\'`);
+    expect(dataQuery.sql).not.toContain('color = ?');
+    expect(countQuery.sql).not.toContain('color = ?');
+    // ILIKE with no %/_ wildcards is exact equality, case-insensitive (#25604).
+    expect(dataQuery.bindings[0]).toBe('white');
+    expect(countQuery.bindings[0]).toBe('white');
+    expect(result.rows).toEqual([{ id: '1', price: 10, color: 'White' }]);
+  });
+
+  it('escapes LIKE metacharacters in string equality so the match stays exact', async () => {
+    const conditions: QueryCondition[] = [
+      { column: 'color', operator: '=', value: String.raw`50%_off\white` },
+    ];
+
+    const { countQuery, dataQuery } = await runListQuery({ count: 1, conditions });
+
+    expect(dataQuery.sql).toContain(`color ILIKE ? ESCAPE '\\'`);
+    expect(countQuery.sql).toContain(`color ILIKE ? ESCAPE '\\'`);
+    expect(dataQuery.bindings[0]).toBe(String.raw`50\%\_off\\white`);
+    expect(countQuery.bindings[0]).toBe(String.raw`50\%\_off\\white`);
+  });
+
   it('applies IN filters with their bindings to both data and bounded count queries', async () => {
     const conditions: QueryCondition[] = [
       { column: 'availability', operator: 'IN', value: ['sold', 'closed'] },

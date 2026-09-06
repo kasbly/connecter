@@ -673,6 +673,125 @@ describe('runWizard', () => {
     }
   });
 
+  it('starts from defaults instead of crashing when the existing config references an env var .env no longer provides (#25603)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    vi.clearAllMocks();
+    // A previous run wrote the yml but .env was lost (or never fully written), so
+    // the password interpolation has nothing to resolve against.
+    writeFileSync(
+      join(directory, 'connector.config.yml'),
+      [
+        'version: 1',
+        'database:',
+        '  type: postgres',
+        '  host: database.example.com',
+        '  port: 5432',
+        '  database: catalog',
+        '  user: reader',
+        '  password: ${DB_PASSWORD}',
+        '  ssl: false',
+        '',
+      ].join('\n'),
+    );
+
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      'description',
+      '\0unmapped',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'merchant_data',
+      'connector.merchant.example',
+    ]) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.password.mockResolvedValueOnce('p@ss#word');
+    // The initial "existing configuration found" prompt only appears because the
+    // stale yml is still on disk; everything else behaves like a fresh setup.
+    promptMocks.confirm.mockImplementation(({ message }) =>
+      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve([]);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title', 'description']);
+      }
+      if (message.startsWith('Which filters should be available')) {
+        return Promise.resolve(['minPrice', 'maxPrice', 'currency']);
+      }
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 100,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+
+      // The previous behaviour was an uncaught throw ("Environment variable
+      // \"DB_PASSWORD\" is not set") before the wizard ever showed a prompt.
+      await expect(runWizard()).resolves.toBeUndefined();
+
+      expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('Could not read'));
+      expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('Starting from defaults'));
+      // Downstream prompts got no existing-password default, so the wizard fell
+      // through to asking for one, and a fresh, loadable pair was written.
+      expect(promptMocks.password).toHaveBeenCalled();
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(config.database.host).toBe('database.example.com');
+      expect(config.database.password).toBe('p@ss#word');
+      expect(config.resources.inventory.fields.price).toBe('"price"');
+    } finally {
+      consoleWarn.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('suggests a listing-URL column as an attribute mapping, wiring it onto attributes.url for resolvePublicListingUrl (#25311)', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
@@ -1253,6 +1372,181 @@ describe('runWizard', () => {
     }
   });
 
+  it('drops a stale sslRejectUnauthorized/sslCa escape hatch when a rerun re-enables TLS verification', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    vi.clearAllMocks();
+    writeFileSync(
+      join(directory, 'connector.config.yml'),
+      [
+        'version: 1',
+        'server:',
+        '  port: 4100',
+        '  host: 0.0.0.0',
+        '  trustedProxies: 10.0.0.0/8',
+        'auth:',
+        '  apiKeys:',
+        '    - key: ${CONNECTOR_API_KEY}',
+        '      label: kasbly-production',
+        'database:',
+        '  type: postgres',
+        '  host: ${DB_HOST}',
+        '  port: 5432',
+        '  database: ${DB_NAME}',
+        '  user: ${DB_USER}',
+        '  password: ${DB_PASSWORD}',
+        '  ssl: true',
+        '  sslRejectUnauthorized: false',
+        '  sslCa: ${DB_SSL_CA}',
+        'resources:',
+        '  inventory:',
+        '    schema: merchant_data',
+        '    table: products',
+        '    baseFilter: "published = true AND deleted_at IS NULL"',
+        '    idColumn: id',
+        '    fields:',
+        '      title: title',
+        '      price: price',
+        '      currency: currency',
+        '      description: description',
+        '    attributes:',
+        '      make: "makeEn"',
+        '      year: year',
+        '      legacy_attribute: legacy_attribute',
+        '    searchableColumns: [title, description]',
+        '    filterableColumns:',
+        '      legacy_attribute: { column: legacy_attribute, type: string }',
+        '    relations:',
+        '      images:',
+        '        schema: merchant_data',
+        '        table: product_images',
+        '        foreignKey: product_id',
+        '        referenceKey: id',
+        '        fields: { url: url }',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(directory, '.env'),
+      'DB_HOST=database.example.com\nDB_NAME=catalog\nDB_USER=reader\nDB_PASSWORD=p@ss#word\nDB_SSL_CA=FAKE-RETIRED-CA-PEM-CONTENTS\nCONNECTOR_API_KEY=kc_existing\nCONNECTOR_DOMAIN=connector.merchant.example\n',
+    );
+
+    // Order: dbType, TLS verification mode (requiresTls is now true), table, id
+    // column, then the 7 field-mapping prompts, then the reverse-proxy topology.
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('system-ca'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('custom'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'merchant_data',
+      'connector.merchant.example',
+      '10.0.0.0/8',
+    ]) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    // Order: overwriteExisting, requiresTls (now "Yes" — re-enabling verification),
+    // usePublished, excludeDeleted, addRelation, generateKey.
+    promptMocks.confirm
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false);
+    promptMocks.checkbox
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 100,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'published', type: 'boolean', nullable: false, isPrimaryKey: false },
+              { name: 'deleted_at', type: 'timestamp', nullable: true, isPrimaryKey: false },
+              { name: 'makeEn', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'year', type: 'integer', nullable: true, isPrimaryKey: false },
+              { name: 'legacy_attribute', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+          {
+            name: 'product_images',
+            kind: 'table',
+            rowCount: 200,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'product_id', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [
+          {
+            fromTable: 'product_images',
+            fromColumn: 'product_id',
+            toTable: 'products',
+            toColumn: 'id',
+          },
+        ],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      const generated = yaml.load(
+        readFileSync(join(directory, 'connector.config.yml'), 'utf-8'),
+      ) as {
+        database: Record<string, unknown>;
+      };
+      // Choosing "Verify with the system CA store" is the escape-hatch's exit:
+      // the regenerated database block must carry no trace of the retired CA or
+      // the disabled-verification flag, not merely a falsy value for either.
+      expect(generated.database.ssl).toBe(true);
+      expect(generated.database).not.toHaveProperty('sslRejectUnauthorized');
+      expect(generated.database).not.toHaveProperty('sslCa');
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('maps a status column in a non-public schema without an unqualified read', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
@@ -1400,7 +1694,7 @@ describe('runWizard', () => {
     }
   });
 
-  it('writes a kilometers odometer column onto attributes.kilometers, not mileage', async () => {
+  it('writes a mileage odometer column onto attributes.kilometers and filterableColumns.min/maxKilometers, not mileage', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
     const db = Object.assign(vi.fn(), {
@@ -1440,9 +1734,15 @@ describe('runWizard', () => {
       Promise.resolve(!message.startsWith('Does this database require TLS')),
     );
     promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
-      if (message.startsWith('Select additional')) return Promise.resolve(['kilometers']);
+      if (message.startsWith('Select additional')) return Promise.resolve(['mileage']);
       if (message.startsWith('Which columns should be searchable'))
         return Promise.resolve(['title']);
+      // Regression coverage (issue #25601): the mapped-attribute column 'mileage'
+      // resolves to the canonical filter names minKilometers/maxKilometers, not
+      // the raw column name (minMileage/maxMileage). Select them here so the
+      // generated config's filterableColumns block can be asserted below.
+      if (message.startsWith('Which filters should be available'))
+        return Promise.resolve(['minKilometers', 'maxKilometers']);
       return Promise.resolve([]);
     });
     vi.mocked(introspectDatabase).mockResolvedValueOnce({
@@ -1458,7 +1758,7 @@ describe('runWizard', () => {
               { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
               { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
               { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
-              { name: 'kilometers', type: 'integer', nullable: true, isPrimaryKey: false },
+              { name: 'mileage', type: 'integer', nullable: true, isPrimaryKey: false },
             ],
           },
         ],
@@ -1473,9 +1773,16 @@ describe('runWizard', () => {
 
       const generated = yaml.load(
         readFileSync(join(directory, 'connector.config.yml'), 'utf-8'),
-      ) as { resources: { inventory: { attributes?: Record<string, string> } } };
+      ) as {
+        resources: {
+          inventory: {
+            attributes?: Record<string, string>;
+            filterableColumns?: Record<string, { column: string; type: string }>;
+          };
+        };
+      };
       expect(generated.resources.inventory.attributes).toEqual({
-        kilometers: '"kilometers"',
+        kilometers: '"mileage"',
       });
       expect(generated.resources.inventory.attributes).not.toHaveProperty('mileage');
       expect(promptMocks.checkbox).toHaveBeenCalledWith(
@@ -1483,13 +1790,25 @@ describe('runWizard', () => {
           message: expect.stringContaining('Select additional columns'),
           choices: expect.arrayContaining([
             expect.objectContaining({
-              name: 'kilometers',
-              value: 'kilometers',
+              name: 'mileage',
+              value: 'mileage',
               checked: true,
             }),
           ]),
         }),
       );
+      // The bug (#25601): the additionalAttributes loop overwrote the canonical
+      // mapping ('kilometers') with the raw column name ('mileage'), so the
+      // generated filterableColumns keys were minMileage/maxMileage instead of
+      // minKilometers/maxKilometers — which Kasbly's API never sends.
+      expect(generated.resources.inventory.filterableColumns).toEqual(
+        expect.objectContaining({
+          minKilometers: { column: '"mileage"', type: 'gte' },
+          maxKilometers: { column: '"mileage"', type: 'lte' },
+        }),
+      );
+      expect(generated.resources.inventory.filterableColumns).not.toHaveProperty('minMileage');
+      expect(generated.resources.inventory.filterableColumns).not.toHaveProperty('maxMileage');
     } finally {
       consoleLog.mockRestore();
       process.chdir(previousDirectory);

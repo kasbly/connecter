@@ -89,15 +89,22 @@ function getMalformedImageValueErrors(value: unknown, path: string): string[] {
   if (typeof value !== 'string') return [`${path}: expected a string or array of strings`];
 
   const trimmed = value.trim();
-  if (!trimmed || !trimmed.startsWith('[')) return [];
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    return Array.isArray(parsed)
-      ? parsed.flatMap((entry, index) => getMalformedImageValueErrors(entry, `${path}[${index}]`))
-      : [`${path}: JSON image value must be an array`];
-  } catch {
-    return [`${path}: invalid JSON image array`];
+  if (!trimmed) return [];
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      return Array.isArray(parsed)
+        ? parsed.flatMap((entry, index) => getMalformedImageValueErrors(entry, `${path}[${index}]`))
+        : [`${path}: JSON image value must be an array`];
+    } catch {
+      return [`${path}: invalid JSON image array`];
+    }
   }
+
+  if (!/^https?:\/\//i.test(trimmed)) {
+    return [`${path}: image values must be absolute http(s) URLs (got ${JSON.stringify(trimmed)})`];
+  }
+  return [];
 }
 
 function errorMessage(error: unknown): string {
@@ -288,7 +295,7 @@ export function normalizeImageUrls(value: unknown): string[] {
     }
   }
 
-  return [url];
+  return /^https?:\/\//i.test(url) ? [url] : [];
 }
 
 export function resolveColumnValue(row: Record<string, unknown>, columnExpr: string): unknown {
