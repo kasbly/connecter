@@ -99,6 +99,8 @@ resources:
       color: { column: 'color', type: 'string' }
       minPrice: { column: 'price', type: 'gte' }
       maxPrice: { column: 'price', type: 'lte' }
+      minKilometers: { column: 'kilometers', type: 'gte' }
+      maxKilometers: { column: 'kilometers', type: 'lte' }
 
     relations:
       images:
