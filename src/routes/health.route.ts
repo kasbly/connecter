@@ -6,6 +6,7 @@ import type { AuditHealth } from '../audit/audit.service.js';
 import type { InventoryResourceConfig, UnknownStatusPolicy } from '../config/config.types.js';
 import type { DatabaseAdapter, QueryCondition } from '../db/adapter.interface.js';
 import {
+  getImageValueProblems,
   getMappedImageValues,
   getRelationConfigs,
   getRequiredColumns,
@@ -66,6 +67,13 @@ export interface ResourceHealth {
    * /inventory already skips exactly these rows and serves the rest (#24913).
    */
   wireContractViolationIds?: string[];
+  /**
+   * externalIds of sampled rows carrying an image value that is not an
+   * absolute http(s) URL - a site-relative path, a bare filename. The value is
+   * dropped, so the listing is served with fewer (or no) photos. It is never a
+   * reason to withhold the listing or take the resource offline (#25790).
+   */
+  unservableImageIds?: string[];
 }
 
 export interface InventoryResourceProbeResult {
@@ -73,6 +81,8 @@ export interface InventoryResourceProbeResult {
   unknownStatusValues: string[];
   /** externalIds of sampled rows withheld for violating the wire contract. */
   wireContractViolationIds: string[];
+  /** externalIds of sampled rows served without an unusable image value. */
+  unservableImageIds: string[];
 }
 
 export type ResourceHealthCheck = () => Promise<ResourceHealth>;
@@ -193,20 +203,28 @@ export async function probeInventoryResource(
   // already skips them and serves the rest, so the probe reports them as an
   // advisory instead of taking the whole resource offline (#24913).
   let wireContractViolationIds: string[] = [];
+  const unservableImageIds: string[] = [];
   if (rows.length > 0) {
     const relationData = new Map(relationEntries);
     const violations: { externalId: string; error: string }[] = [];
     for (const row of rows) {
+      const externalId = String(resolveColumnValue(row, resourceConfig.idColumn) ?? '');
+      const mappedImageValues = getMappedImageValues(row, resourceConfig, relationData);
       try {
         validateInventoryItemWireContract(
           mapRowToInventoryItem(row, resourceConfig, relationData),
-          getMappedImageValues(row, resourceConfig, relationData),
+          mappedImageValues,
         );
       } catch (error) {
-        violations.push({
-          externalId: String(resolveColumnValue(row, resourceConfig.idColumn) ?? ''),
-          error: errorMessage(error),
-        });
+        violations.push({ externalId, error: errorMessage(error) });
+        continue;
+      }
+      // A relative path or bare filename in the image column is a data
+      // advisory, not a broken mapping: the listing is served, just without
+      // that photo. Counting it as a violation took the whole catalog offline
+      // for every WordPress-shaped store (#25790).
+      if (getImageValueProblems(mappedImageValues).unservable.length > 0) {
+        unservableImageIds.push(externalId);
       }
     }
 
@@ -218,7 +236,8 @@ export async function probeInventoryResource(
   }
 
   const statusColumn = resourceConfig.fields['status'];
-  if (!statusColumn) return { unknownStatusValues: [], wireContractViolationIds };
+  if (!statusColumn)
+    return { unknownStatusValues: [], wireContractViolationIds, unservableImageIds };
 
   const observedStatuses = await probeStatusValues(dbAdapter, resourceConfig, statusColumn, rows);
 
@@ -235,7 +254,7 @@ export async function probeInventoryResource(
     .sort()
     .slice(0, UNKNOWN_STATUS_VALUE_LIMIT);
 
-  return { unknownStatusValues, wireContractViolationIds };
+  return { unknownStatusValues, wireContractViolationIds, unservableImageIds };
 }
 
 /**
@@ -314,6 +333,24 @@ export function formatWireContractViolationWarning(
   );
 }
 
+/**
+ * One operator-facing line naming the sampled listings whose image values the
+ * connector cannot serve, or `null` when every image is an absolute URL. These
+ * listings are still sold - they just reach customers with fewer photos - so
+ * this must never read like the withheld-listing warning above (#25790).
+ */
+export function formatUnservableImageWarning(unservableImageIds: readonly string[]): string | null {
+  if (unservableImageIds.length === 0) return null;
+
+  const ids = unservableImageIds.map((id) => JSON.stringify(id)).join(', ');
+  return (
+    `Inventory sample rows have image values that are not absolute http(s) URLs: ${ids}. ` +
+    'Those values (e.g. "/wp-content/uploads/car-123.jpg" or "car-123.jpg") are dropped, so ' +
+    'these listings are still sold but reach customers without those photos. ' +
+    'Store absolute https URLs in the mapped image column.'
+  );
+}
+
 export function createResourceHealthCheck(
   dbAdapter: DatabaseAdapter,
   resourceConfig: InventoryResourceConfig,
@@ -329,10 +366,11 @@ export function createResourceHealthCheck(
 
     if (!resourceProbeInFlight) {
       resourceProbeInFlight = probeInventoryResource(dbAdapter, resourceConfig)
-        .then(({ unknownStatusValues, wireContractViolationIds }) => ({
+        .then(({ unknownStatusValues, wireContractViolationIds, unservableImageIds }) => ({
           ok: true,
           ...(unknownStatusValues.length > 0 ? { unknownStatusValues } : {}),
           ...(wireContractViolationIds.length > 0 ? { wireContractViolationIds } : {}),
+          ...(unservableImageIds.length > 0 ? { unservableImageIds } : {}),
         }))
         .catch((error: unknown) => ({ ok: false, error: errorMessage(error) }))
         .then((health) => {
@@ -378,6 +416,9 @@ export function registerHealthRoute(
         : {}),
       ...(resourceHealth?.wireContractViolationIds?.length
         ? { wireContractViolationIds: resourceHealth.wireContractViolationIds }
+        : {}),
+      ...(resourceHealth?.unservableImageIds?.length
+        ? { unservableImageIds: resourceHealth.unservableImageIds }
         : {}),
       uptime: uptimeSeconds,
     };

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  getImageValueProblems,
   getMappedImageValues,
   getRelationConfigs,
   getRequiredColumns,
@@ -516,42 +517,65 @@ describe('validateInventoryItemWireContract', () => {
     ).toThrow(/images\[1\]/);
   });
 
-  it('rejects relative paths and bare filenames as non-absolute image URLs', () => {
-    expect(() =>
-      validateInventoryItemWireContract(
-        {
-          externalId: 'sku-1',
-          title: 'Coffee',
-          description: null,
-          price: 1,
-          currency: 'SAR',
-          category: '',
-          status: 'ACTIVE',
-          images: [],
-          attributes: {},
-          updatedAt: null,
-        },
-        ['/wp-content/uploads/2026/03/car-123.jpg'],
-      ),
-    ).toThrow(/images: image values must be absolute http\(s\) URLs/);
+  it('serves a listing whose only image value is a relative path or a bare filename', () => {
+    // The photo is unusable and already dropped by `normalizeImageUrls`, but
+    // title/price/currency are valid, so withholding the listing would take a
+    // whole WordPress-shaped catalog offline (#25790).
+    const item = {
+      externalId: 'sku-1',
+      title: 'Coffee',
+      description: null,
+      price: 1,
+      currency: 'SAR',
+      category: '',
+      status: 'ACTIVE',
+      images: [],
+      attributes: {},
+      updatedAt: null,
+    };
 
     expect(() =>
-      validateInventoryItemWireContract(
-        {
-          externalId: 'sku-1',
-          title: 'Coffee',
-          description: null,
-          price: 1,
-          currency: 'SAR',
-          category: '',
-          status: 'ACTIVE',
-          images: [],
-          attributes: {},
-          updatedAt: null,
-        },
-        ['car-123.jpg'],
-      ),
-    ).toThrow(/images: image values must be absolute http\(s\) URLs/);
+      validateInventoryItemWireContract(item, ['/wp-content/uploads/2026/03/car-123.jpg']),
+    ).not.toThrow();
+    expect(() => validateInventoryItemWireContract(item, ['car-123.jpg'])).not.toThrow();
+  });
+});
+
+describe('getImageValueProblems', () => {
+  it('reports a relative path or bare filename as unservable, not malformed', () => {
+    expect(getImageValueProblems(['/wp-content/uploads/2026/03/car-123.jpg'])).toEqual({
+      malformed: [],
+      unservable: [
+        'images: image values must be absolute http(s) URLs (got "/wp-content/uploads/2026/03/car-123.jpg")',
+      ],
+    });
+    expect(getImageValueProblems(['car-123.jpg']).unservable).toHaveLength(1);
+    expect(getImageValueProblems(['car-123.jpg']).malformed).toEqual([]);
+  });
+
+  it('keeps structurally unusable image values malformed', () => {
+    expect(getImageValueProblems([42]).malformed).toEqual([
+      'images: expected a string or array of strings',
+    ]);
+    expect(getImageValueProblems(['["https://example.com/a.jpg", 1]']).malformed).toEqual([
+      'images[1]: expected a string or array of strings',
+    ]);
+    expect(getImageValueProblems(['[not json']).malformed).toEqual([
+      'images: invalid JSON image array',
+    ]);
+    expect(getImageValueProblems(['{"a":1}']).malformed).toEqual([]);
+  });
+
+  it('reports nothing for absolute URLs, empty values, and nested arrays', () => {
+    expect(
+      getImageValueProblems([
+        ['https://example.com/a.jpg'],
+        '["https://example.com/b.jpg"]',
+        '',
+        null,
+        undefined,
+      ]),
+    ).toEqual({ malformed: [], unservable: [] });
   });
 });
 

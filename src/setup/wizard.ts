@@ -31,6 +31,7 @@ import {
 import { UNMAPPED_STATUS_FALLBACK } from '../mapping/field-mapper.js';
 import { createDatabaseAdapter } from '../db/adapter.factory.js';
 import {
+  formatUnservableImageWarning,
   formatWireContractViolationWarning,
   probeInventoryResource,
 } from '../routes/health.route.js';
@@ -179,7 +180,7 @@ export function getFieldMappingPrompt(
   return {
     message:
       field === 'images'
-        ? 'Which column contains the images? (one URL, a PostgreSQL text array, or a JSON array; e.g. ["https://example.com/photo.jpg"])'
+        ? 'Which column contains the images? (one URL, a PostgreSQL text array, or a JSON array; e.g. ["https://example.com/photo.jpg"]). Values must be absolute http(s) URLs \u2014 site-relative paths and bare filenames such as "/uploads/car-123.jpg" are dropped, and those listings reach customers without photos.'
         : `Which column contains the ${field}?`,
     choices,
     default:
@@ -917,12 +918,14 @@ export async function runWizard(): Promise<void> {
   });
   try {
     await validationAdapter.connect();
-    const { wireContractViolationIds } = await probeInventoryResource(
+    const { wireContractViolationIds, unservableImageIds } = await probeInventoryResource(
       validationAdapter,
       config.resources.inventory,
     );
     const warning = formatWireContractViolationWarning(wireContractViolationIds);
     if (warning) console.warn(`Warning: ${warning}`);
+    const imageWarning = formatUnservableImageWarning(unservableImageIds);
+    if (imageWarning) console.warn(`Warning: ${imageWarning}`);
   } catch (error) {
     console.error(
       `Cannot save configuration: inventory sample violates the wire contract: ${

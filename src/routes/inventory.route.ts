@@ -146,15 +146,23 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
         }
       }
 
+      // Rows withheld for a wire-contract violation (#24913) are never served,
+      // so they must not be advertised either: callers render `total` as the
+      // customer-facing match count ("I found N options") and as the Sources
+      // "N listings available" badge. Keeping the raw SQL count promises rows
+      // this page — and every later page — will not deliver (#25791).
+      const omittedCount = rows.length - items.length;
+      const servableTotal = Math.max(total - omittedCount, items.length);
+
       const result = {
         items,
-        total,
+        total: servableTotal,
         // `total` is a lower bound whenever the adapter hit its count cap — the
         // exact COUNT(*) is deliberately not run on every request (#17420).
         totalIsCapped: totalIsCapped === true,
         page: pagination.page,
         pageSize: pagination.pageSize,
-        totalPages: Math.ceil(total / pagination.pageSize),
+        totalPages: Math.ceil(servableTotal / pagination.pageSize),
         ...(ignoredFilters.length > 0 ? { ignoredFilters } : {}),
       };
 

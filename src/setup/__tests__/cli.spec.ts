@@ -52,6 +52,7 @@ describe('validate reporting', () => {
     rows: Record<string, unknown>[] = [
       { id: '1', title: 'Test', price: 100, availability: 'for_sale' },
     ],
+    extraFields: Record<string, string> = {},
   ): DatabaseAdapter {
     const dbAdapter = {
       connect: vi.fn().mockResolvedValue(undefined),
@@ -68,7 +69,13 @@ describe('validate reporting', () => {
         inventory: {
           table: 'inventory',
           idColumn: 'id',
-          fields: { title: 'title', price: 'price', currency: "'SAR'", status: 'availability' },
+          fields: {
+            title: 'title',
+            price: 'price',
+            currency: "'SAR'",
+            status: 'availability',
+            ...extraFields,
+          },
           statusValues: { ACTIVE: ['for_sale'] },
           unknownStatusPolicy: 'RESERVED',
         },
@@ -87,6 +94,7 @@ describe('validate reporting', () => {
       unknownStatusValues: ['under_offer'],
       unknownStatusPolicy: 'RESERVED',
       wireContractViolationIds: [],
+      unservableImageIds: [],
     });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"under_offer"'));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('RESERVED'));
@@ -120,9 +128,49 @@ describe('validate reporting', () => {
       unknownStatusValues: [],
       unknownStatusPolicy: 'RESERVED',
       wireContractViolationIds: ['42'],
+      unservableImageIds: [],
     });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"42"'));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('withheld from customers'));
+    expect(dbAdapter.disconnect).toHaveBeenCalled();
+  }, 15_000);
+
+  it('reports relative image paths as an advisory rather than failing validation', async () => {
+    // Every sampled row carries a site-relative path — the WordPress shape.
+    // Before #25790 the probe threw here, which is what 503'd the resource and
+    // made `npm run setup` refuse to write the config.
+    const dbAdapter = mockConnector(
+      ['for_sale'],
+      [
+        {
+          id: '1',
+          title: 'Valid listing',
+          price: 100,
+          availability: 'for_sale',
+          image_urls: '/wp-content/uploads/2026/03/car-123.jpg',
+        },
+        {
+          id: '2',
+          title: 'Another listing',
+          price: 200,
+          availability: 'for_sale',
+          image_urls: 'car-456.jpg',
+        },
+      ],
+      { images: 'image_urls' },
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const result = await validateConnectorConfig(packageJsonPath);
+
+    expect(result).toEqual({
+      unknownStatusValues: [],
+      unknownStatusPolicy: 'RESERVED',
+      wireContractViolationIds: [],
+      unservableImageIds: ['1', '2'],
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('absolute http(s) URLs'));
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('withheld from customers'));
     expect(dbAdapter.disconnect).toHaveBeenCalled();
   }, 15_000);
 });

@@ -46,9 +46,11 @@ const resourceProbeMocks = vi.hoisted(() => {
   return {
     adapter,
     createDatabaseAdapter: vi.fn(() => adapter),
-    probeInventoryResource: vi
-      .fn()
-      .mockResolvedValue({ unknownStatusValues: [], wireContractViolationIds: [] }),
+    probeInventoryResource: vi.fn().mockResolvedValue({
+      unknownStatusValues: [],
+      wireContractViolationIds: [],
+      unservableImageIds: [],
+    }),
   };
 });
 
@@ -1028,6 +1030,7 @@ describe('runWizard', () => {
     resourceProbeMocks.probeInventoryResource.mockResolvedValueOnce({
       unknownStatusValues: [],
       wireContractViolationIds: ['42'],
+      unservableImageIds: ['43'],
     });
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('available_products'));
@@ -1091,6 +1094,9 @@ describe('runWizard', () => {
       await runWizard();
 
       expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('"42"'));
+      // A relative image path is an advisory, never a reason to refuse the
+      // save — setup still writes the config (#25790).
+      expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('"43"'));
       expect(readFileSync(join(directory, 'connector.config.yml'), 'utf-8')).toContain(
         'available_products',
       );

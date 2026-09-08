@@ -8,6 +8,7 @@ import {
   UNKNOWN_STATUS_VALUE_LIMIT,
   createResourceHealthCheck,
   formatUnknownStatusWarning,
+  formatUnservableImageWarning,
   formatWireContractViolationWarning,
   probeInventoryResource,
   registerHealthRoute,
@@ -368,7 +369,7 @@ describe('health route', () => {
     await app.close();
   });
 
-  it('reports a relative image path from a sample row as a wire-contract violation', async () => {
+  it('keeps the resource healthy when every sampled row stores a relative image path', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(true);
     vi.mocked(dbAdapter.query).mockResolvedValueOnce({
@@ -379,8 +380,9 @@ describe('health route', () => {
           price: 100,
           image_urls: '/wp-content/uploads/2026/03/car-123.jpg',
         },
+        { id: '2', title: 'Also test', price: 200, image_urls: 'car-456.jpg' },
       ],
-      total: 1,
+      total: 2,
     });
     registerHealthRoute(
       app,
@@ -393,11 +395,26 @@ describe('health route', () => {
 
     const response = await app.inject({ method: 'GET', url: '/health' });
 
-    expect(response.statusCode).toBe(503);
+    // The WordPress/Magento shape: the photos cannot be served, but the
+    // listings can. Failing the resource here 503s the whole catalog and
+    // blocks setup for the most common self-hosted store (#25790).
+    expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      resourceError: expect.stringContaining('must be absolute http(s) URLs'),
+      status: 'ok',
+      resources: 'ok',
+      unservableImageIds: ['1', '2'],
     });
+    expect(response.json()).not.toHaveProperty('resourceError');
+    expect(response.json()).not.toHaveProperty('wireContractViolationIds');
     await app.close();
+  });
+
+  it('names the listings whose image values cannot be served', () => {
+    const warning = formatUnservableImageWarning(['car-123']);
+
+    expect(warning).toContain('"car-123"');
+    expect(warning).toContain('absolute http(s) URLs');
+    expect(formatUnservableImageWarning([])).toBeNull();
   });
 
   it('names the unmapped values and the status they are reported as', () => {

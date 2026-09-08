@@ -281,9 +281,49 @@ describe('inventory routes', () => {
     const response = await app.inject({ method: 'GET', url: '/inventory' });
 
     expect(response.statusCode).toBe(200);
-    const body = response.json() as { items: { externalId: string }[]; total: number };
-    expect(body.total).toBe(3);
+    const body = response.json() as {
+      items: { externalId: string }[];
+      total: number;
+      totalPages: number;
+    };
+    // #25791: withheld rows are never served, so they must not be counted
+    // either — callers render `total` as the customer-facing match count and
+    // as the "N listings available" badge. 3 rows in, 2 withheld, total 1.
+    expect(body.total).toBe(1);
+    expect(body.totalPages).toBe(1);
     expect(body.items).toEqual([expect.objectContaining({ externalId: '1', title: 'Widget' })]);
+
+    await app.close();
+  });
+
+  it('GET /inventory reports total 0 when every row on the page violates the wire contract', async () => {
+    const mockAdapter = createMockDbAdapter({
+      query: vi.fn().mockResolvedValue({
+        rows: [
+          { id: '1', name: 'Widget', price: 'TBD', updatedAt: '2026-01-01T00:00:00Z' },
+          { id: '2', name: 'Gadget', price: 'TBD', updatedAt: '2026-01-02T00:00:00Z' },
+        ],
+        total: 2,
+      }),
+    });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const response = await app.inject({ method: 'GET', url: '/inventory' });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      items: unknown[];
+      total: number;
+      totalPages: number;
+    };
+    expect(body.items).toEqual([]);
+    expect(body.total).toBe(0);
+    expect(body.totalPages).toBe(0);
 
     await app.close();
   });
@@ -530,6 +570,54 @@ describe('inventory routes', () => {
     );
     expect(listResponse.json().items[0].images).toEqual(['https://example.com/image.jpg']);
     expect(itemResponse.json().images).toEqual(['https://example.com/image.jpg']);
+
+    await app.close();
+  });
+
+  it('serves listings whose image column holds relative paths, with images dropped', async () => {
+    // WordPress/WooCommerce/Magento store site-relative paths or bare
+    // filenames. The connector cannot resolve them, so it drops them — but the
+    // listing itself is sellable and must still be served (#25790).
+    const imageConfig: InventoryResourceConfig = {
+      ...testConfig,
+      fields: { ...testConfig.fields, images: 'image_urls' },
+    };
+    const rows = [
+      {
+        id: '42',
+        name: 'Test Item',
+        price: 99.99,
+        image_urls: '/wp-content/uploads/2026/03/car-123.jpg',
+        updatedAt: '2026-02-01T00:00:00Z',
+      },
+      {
+        id: '43',
+        name: 'Other Item',
+        price: 12.5,
+        image_urls: 'car-456.jpg',
+        updatedAt: '2026-02-01T00:00:00Z',
+      },
+    ];
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: createMockDbAdapter({
+        query: vi.fn().mockResolvedValue({ rows, total: 2 }),
+        queryById: vi.fn().mockResolvedValue(rows[0]),
+      }),
+      resourceConfig: imageConfig,
+    });
+
+    const listResponse = await app.inject({ method: 'GET', url: '/inventory' });
+    const itemResponse = await app.inject({ method: 'GET', url: '/inventory/42' });
+
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.json().items).toHaveLength(2);
+    expect(
+      listResponse.json().items.map((item: { externalId: string }) => item.externalId),
+    ).toEqual(['42', '43']);
+    expect(listResponse.json().items[0].images).toEqual([]);
+    expect(itemResponse.statusCode).toBe(200);
+    expect(itemResponse.json().images).toEqual([]);
 
     await app.close();
   });

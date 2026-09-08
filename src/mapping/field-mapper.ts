@@ -68,43 +68,92 @@ export function validateInventoryItemWireContract(
     );
   }
 
-  const malformedImageFields = mappedImageValues.flatMap((value, index) =>
-    getMalformedImageValueErrors(
-      value,
-      `images${mappedImageValues.length > 1 ? `[${index}]` : ''}`,
-    ),
-  );
-  if (malformedImageFields.length > 0) {
-    throw new Error(`Inventory sample violates wire contract: ${malformedImageFields.join('; ')}`);
+  const { malformed } = getImageValueProblems(mappedImageValues);
+  if (malformed.length > 0) {
+    throw new Error(`Inventory sample violates wire contract: ${malformed.join('; ')}`);
   }
 }
 
-function getMalformedImageValueErrors(value: unknown, path: string): string[] {
-  if (value === null || value === undefined) return [];
-  if (Array.isArray(value)) {
-    return value.flatMap((entry, index) =>
-      getMalformedImageValueErrors(entry, `${path}[${index}]`),
+/** What is wrong with one listing's configured image values, split by severity. */
+export interface ImageValueProblems {
+  /**
+   * Values whose shape the mapper cannot interpret at all - a number, an
+   * object, a broken JSON array. The listing is withheld from customers.
+   */
+  malformed: string[];
+  /**
+   * Well-formed strings that are not absolute http(s) URLs: a site-relative
+   * path, a bare filename, a storage key. `normalizeImageUrls` already drops
+   * them, so the listing itself is still sellable (#25790).
+   */
+  unservable: string[];
+}
+
+/**
+ * Inspect the raw configured image values behind one listing.
+ *
+ * The split is the whole point. #25605 made a non-absolute image URL fail the
+ * wire contract, which withheld the listing - and because every row of a
+ * WordPress/Magento-shaped catalogue stores relative paths, *every* sampled row
+ * failed, which 503s the inventory resource and blocks `npm run setup`
+ * entirely. A photo the connector cannot serve is a data advisory, not a broken
+ * mapping: title, price and currency are still valid, so the listing is served
+ * without those images (#25790, #24913).
+ */
+export function getImageValueProblems(mappedImageValues: readonly unknown[]): ImageValueProblems {
+  const problems: ImageValueProblems = { malformed: [], unservable: [] };
+  mappedImageValues.forEach((value, index) => {
+    collectImageValueProblems(
+      value,
+      `images${mappedImageValues.length > 1 ? `[${index}]` : ''}`,
+      problems,
     );
+  });
+  return problems;
+}
+
+function collectImageValueProblems(
+  value: unknown,
+  path: string,
+  problems: ImageValueProblems,
+): void {
+  if (value === null || value === undefined) return;
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => {
+      collectImageValueProblems(entry, `${path}[${index}]`, problems);
+    });
+    return;
   }
-  if (typeof value !== 'string') return [`${path}: expected a string or array of strings`];
+  if (typeof value !== 'string') {
+    problems.malformed.push(`${path}: expected a string or array of strings`);
+    return;
+  }
 
   const trimmed = value.trim();
-  if (!trimmed) return [];
+  if (!trimmed) return;
   if (trimmed.startsWith('[')) {
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(trimmed) as unknown;
-      return Array.isArray(parsed)
-        ? parsed.flatMap((entry, index) => getMalformedImageValueErrors(entry, `${path}[${index}]`))
-        : [`${path}: JSON image value must be an array`];
+      parsed = JSON.parse(trimmed);
     } catch {
-      return [`${path}: invalid JSON image array`];
+      problems.malformed.push(`${path}: invalid JSON image array`);
+      return;
     }
+    if (!Array.isArray(parsed)) {
+      problems.malformed.push(`${path}: JSON image value must be an array`);
+      return;
+    }
+    parsed.forEach((entry, index) => {
+      collectImageValueProblems(entry, `${path}[${index}]`, problems);
+    });
+    return;
   }
 
   if (!/^https?:\/\//i.test(trimmed)) {
-    return [`${path}: image values must be absolute http(s) URLs (got ${JSON.stringify(trimmed)})`];
+    problems.unservable.push(
+      `${path}: image values must be absolute http(s) URLs (got ${JSON.stringify(trimmed)})`,
+    );
   }
-  return [];
 }
 
 function errorMessage(error: unknown): string {

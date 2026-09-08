@@ -19,6 +19,8 @@ export interface ConnectorValidationResult {
   unknownStatusPolicy: UnknownStatusPolicy;
   /** Sampled listing ids withheld because they fail the JSON wire contract. */
   wireContractViolationIds: string[];
+  /** Sampled listing ids served without an image value that is not a URL. */
+  unservableImageIds: string[];
 }
 
 /**
@@ -32,8 +34,12 @@ export async function validateConnectorConfig(
 ): Promise<ConnectorValidationResult> {
   const { loadConfig } = await import('../config/config.loader.js');
   const { createDatabaseAdapter } = await import('../db/adapter.factory.js');
-  const { formatUnknownStatusWarning, formatWireContractViolationWarning, probeInventoryResource } =
-    await import('../routes/health.route.js');
+  const {
+    formatUnknownStatusWarning,
+    formatUnservableImageWarning,
+    formatWireContractViolationWarning,
+    probeInventoryResource,
+  } = await import('../routes/health.route.js');
   try {
     await access(configPath);
   } catch {
@@ -45,12 +51,11 @@ export async function validateConnectorConfig(
   const dbAdapter = createDatabaseAdapter(config.database);
   let unknownStatusValues: string[];
   let wireContractViolationIds: string[];
+  let unservableImageIds: string[];
   try {
     await dbAdapter.connect();
-    ({ unknownStatusValues, wireContractViolationIds } = await probeInventoryResource(
-      dbAdapter,
-      inventoryResource,
-    ));
+    ({ unknownStatusValues, wireContractViolationIds, unservableImageIds } =
+      await probeInventoryResource(dbAdapter, inventoryResource));
   } finally {
     await dbAdapter.disconnect();
   }
@@ -60,8 +65,15 @@ export async function validateConnectorConfig(
   if (warning) console.warn(`Warning: ${warning}`);
   const wireContractWarning = formatWireContractViolationWarning(wireContractViolationIds);
   if (wireContractWarning) console.warn(`Warning: ${wireContractWarning}`);
+  const unservableImageWarning = formatUnservableImageWarning(unservableImageIds);
+  if (unservableImageWarning) console.warn(`Warning: ${unservableImageWarning}`);
 
-  return { unknownStatusValues, unknownStatusPolicy, wireContractViolationIds };
+  return {
+    unknownStatusValues,
+    unknownStatusPolicy,
+    wireContractViolationIds,
+    unservableImageIds,
+  };
 }
 
 async function run(): Promise<void> {
