@@ -372,13 +372,21 @@ export class PostgresAdapter implements DatabaseAdapter {
    * `column` and `baseFilter` are column expressions from the merchant's own
    * config file, the same trust level as the select list in {@link query}.
    * The two bounds are bound parameters, never interpolated.
+   *
+   * Without an explicit `orderBy`, Postgres serves an unordered `LIMIT` in
+   * physical heap order, which skews toward old/never-updated rows and can
+   * miss a status value that only shows up on recently-changed rows past the
+   * scan cap on a large table (#25985). Callers should pass the resource's
+   * default sort (recency, falling back to id) so the scan follows the same
+   * order the mapping-sample page already uses.
    */
   async distinctValues(query: DistinctValuesQuery): Promise<unknown[]> {
     const db = this.getDb();
     const where = query.baseFilter ? ` WHERE (${query.baseFilter})` : '';
+    const orderBy = query.orderBy ? ` ORDER BY ${buildOrderByClause(query.orderBy)}` : '';
     const sampled =
       `SELECT ${query.column} AS "value" ` +
-      `FROM ${qualifiedTable(query.schema, query.table)}${where} LIMIT ?`;
+      `FROM ${qualifiedTable(query.schema, query.table)}${where}${orderBy} LIMIT ?`;
     const result = await db.raw<{ rows: { value: unknown }[] }>(
       `SELECT DISTINCT "value" FROM (${sampled}) AS "sampled_rows" LIMIT ?`,
       [query.scanLimit, query.limit],

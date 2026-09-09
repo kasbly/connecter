@@ -128,12 +128,12 @@ export async function probeInventoryResource(
   // inspect the same listing (#23588).
   const sampleSort = getDefaultSort(resourceConfig);
 
-  const runProbeQuery = (conditions: QueryCondition[], pageSize: number) =>
+  const runProbeQuery = (conditions: QueryCondition[], pageSize: number, page = 1) =>
     resourceConfig.schema
       ? dbAdapter.query(
           resourceConfig.table,
           conditions,
-          { page: 1, pageSize },
+          { page, pageSize },
           sampleSort,
           resourceConfig.baseFilter,
           selectColumns,
@@ -142,7 +142,7 @@ export async function probeInventoryResource(
       : dbAdapter.query(
           resourceConfig.table,
           conditions,
-          { page: 1, pageSize },
+          { page, pageSize },
           sampleSort,
           resourceConfig.baseFilter,
           selectColumns,
@@ -206,30 +206,50 @@ export async function probeInventoryResource(
   const unservableImageIds: string[] = [];
   if (rows.length > 0) {
     const relationData = new Map(relationEntries);
-    const violations: { externalId: string; error: string }[] = [];
-    for (const row of rows) {
-      const externalId = String(resolveColumnValue(row, resourceConfig.idColumn) ?? '');
-      const mappedImageValues = getMappedImageValues(row, resourceConfig, relationData);
-      try {
-        validateInventoryItemWireContract(
-          mapRowToInventoryItem(row, resourceConfig, relationData),
-          mappedImageValues,
-        );
-      } catch (error) {
-        violations.push({ externalId, error: errorMessage(error) });
-        continue;
+    const evaluateRows = (sampleRows: Record<string, unknown>[]) => {
+      const pageViolations: { externalId: string; error: string }[] = [];
+      for (const row of sampleRows) {
+        const externalId = String(resolveColumnValue(row, resourceConfig.idColumn) ?? '');
+        const mappedImageValues = getMappedImageValues(row, resourceConfig, relationData);
+        try {
+          validateInventoryItemWireContract(
+            mapRowToInventoryItem(row, resourceConfig, relationData),
+            mappedImageValues,
+          );
+        } catch (error) {
+          pageViolations.push({ externalId, error: errorMessage(error) });
+          continue;
+        }
+        // A relative path or bare filename in the image column is a data
+        // advisory, not a broken mapping: the listing is served, just without
+        // that photo. Counting it as a violation took the whole catalog offline
+        // for every WordPress-shaped store (#25790).
+        if (getImageValueProblems(mappedImageValues).unservable.length > 0) {
+          unservableImageIds.push(externalId);
+        }
       }
-      // A relative path or bare filename in the image column is a data
-      // advisory, not a broken mapping: the listing is served, just without
-      // that photo. Counting it as a violation took the whole catalog offline
-      // for every WordPress-shaped store (#25790).
-      if (getImageValueProblems(mappedImageValues).unservable.length > 0) {
-        unservableImageIds.push(externalId);
-      }
-    }
+      return pageViolations;
+    };
+
+    let violations = evaluateRows(rows);
 
     if (violations.length === rows.length) {
-      throw new Error(`Inventory resource probe failed for sample row: ${violations[0]!.error}`);
+      // One fully-invalid page is not enough evidence on its own: a
+      // contiguous bad import batch can fill exactly one `updatedAt DESC`
+      // page (the health-probe sample) while the other ~19,980 listings in a
+      // large catalog are fine. Sample the next page, same sort, before
+      // concluding the resource itself is broken — only a second
+      // fully-invalid page still proves a systematic mapping break (e.g.
+      // price pointed at a text column, which fails every row on every
+      // page) (#25983).
+      const { rows: nextRows } = await runProbeQuery([], DEFAULT_PAGE_SIZE, 2);
+      const nextViolations = nextRows.length > 0 ? evaluateRows(nextRows) : [];
+
+      if (nextRows.length === 0 || nextViolations.length === nextRows.length) {
+        throw new Error(`Inventory resource probe failed for sample row: ${violations[0]!.error}`);
+      }
+
+      violations = [...violations, ...nextViolations];
     }
 
     wireContractViolationIds = violations.map((violation) => violation.externalId);
@@ -265,6 +285,12 @@ export async function probeInventoryResource(
  * sampled row happens to carry it (#23293). Ask the adapter for the distinct
  * values instead, and keep the sampled row's value in the answer so this is
  * always a superset of what the previous behaviour saw.
+ *
+ * The scan follows the resource's default sort (recency, falling back to id)
+ * rather than running unordered: an unordered `LIMIT` is served in physical
+ * heap order, which skews toward old/never-updated rows and can miss a status
+ * that only shows up on rows changed after the scan cap on a large catalog
+ * (#25985).
  */
 async function probeStatusValues(
   dbAdapter: DatabaseAdapter,
@@ -283,6 +309,7 @@ async function probeStatusValues(
       limit: UNKNOWN_STATUS_VALUE_LIMIT,
       scanLimit: UNKNOWN_STATUS_SCAN_LIMIT,
       ...(resourceConfig.baseFilter ? { baseFilter: resourceConfig.baseFilter } : {}),
+      orderBy: getDefaultSort(resourceConfig),
     });
     return [...sampledStatuses, ...distinctStatuses];
   } catch {

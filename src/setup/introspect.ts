@@ -19,6 +19,9 @@ export interface IntrospectedColumn {
 }
 
 export interface ForeignKeyInfo {
+  /** The constraint this column pair belongs to. Composite foreign keys report
+   *  one row per column pair, all sharing this name, so callers can regroup them. */
+  constraintName: string;
   fromTable: string;
   fromColumn: string;
   toTable: string;
@@ -285,8 +288,16 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
 }
 
 async function introspectForeignKeys(db: Knex, schema: string): Promise<ForeignKeyInfo[]> {
+  // Read from the PostgreSQL catalogs instead of information_schema. A foreign key's
+  // local and referenced columns are paired positionally in pg_constraint.conkey /
+  // confkey; information_schema.key_column_usage / constraint_column_usage carry no
+  // ordinal position and are only joined by constraint name, which is a cross product
+  // for composite keys (every local column pairs with every referenced column) and is
+  // outright wrong when two unrelated tables share a hand-written constraint name
+  // (PostgreSQL only enforces FK constraint-name uniqueness per table, not per schema).
   const fkRows = await db.raw<{
     rows: {
+      constraint_name: string;
       from_table: string;
       from_column: string;
       to_table: string;
@@ -294,24 +305,26 @@ async function introspectForeignKeys(db: Knex, schema: string): Promise<ForeignK
     }[];
   }>(
     `SELECT
-       tc.table_name AS from_table,
-       kcu.column_name AS from_column,
-       ccu.table_name AS to_table,
-       ccu.column_name AS to_column
-     FROM information_schema.table_constraints tc
-     JOIN information_schema.key_column_usage kcu
-       ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-     JOIN information_schema.constraint_column_usage ccu
-       ON ccu.constraint_name = tc.constraint_name
-       AND ccu.table_schema = tc.table_schema
-     WHERE tc.constraint_type = 'FOREIGN KEY'
-       AND tc.table_schema = ?
-     ORDER BY tc.table_name`,
+       c.conname AS constraint_name,
+       cl.relname AS from_table,
+       a.attname AS from_column,
+       fcl.relname AS to_table,
+       fa.attname AS to_column
+     FROM pg_constraint c
+     JOIN pg_class cl ON cl.oid = c.conrelid
+     JOIN pg_class fcl ON fcl.oid = c.confrelid
+     JOIN pg_namespace n ON n.oid = cl.relnamespace
+     JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS k(att, fatt, ord) ON TRUE
+     JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.att
+     JOIN pg_attribute fa ON fa.attrelid = c.confrelid AND fa.attnum = k.fatt
+     WHERE c.contype = 'f'
+       AND n.nspname = ?
+     ORDER BY cl.relname, c.conname, k.ord`,
     [schema],
   );
 
   return fkRows.rows.map((row) => ({
+    constraintName: row.constraint_name,
     fromTable: row.from_table,
     fromColumn: row.from_column,
     toTable: row.to_table,

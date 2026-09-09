@@ -568,12 +568,14 @@ describe('runWizard', () => {
         ],
         foreignKeys: [
           {
+            constraintName: 'product_images_product_sku_fkey',
             fromTable: 'product_images',
             fromColumn: 'product_sku',
             toTable: 'products',
             toColumn: 'sku',
           },
           {
+            constraintName: 'variant_images_product_id_fkey',
             fromTable: 'variant_images',
             fromColumn: 'product_id',
             toTable: 'products',
@@ -1293,6 +1295,7 @@ describe('runWizard', () => {
         ],
         foreignKeys: [
           {
+            constraintName: 'product_images_product_id_fkey',
             fromTable: 'product_images',
             fromColumn: 'product_id',
             toTable: 'products',
@@ -1521,6 +1524,7 @@ describe('runWizard', () => {
         ],
         foreignKeys: [
           {
+            constraintName: 'product_images_product_id_fkey',
             fromTable: 'product_images',
             fromColumn: 'product_id',
             toTable: 'products',

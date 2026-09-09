@@ -134,6 +134,7 @@ describe('introspectDatabase', () => {
         .mockResolvedValueOnce({
           rows: [
             {
+              constraint_name: 'images_product_id_fkey',
               from_table: 'images',
               from_column: 'product_id',
               to_table: 'products',
@@ -158,7 +159,7 @@ describe('introspectDatabase', () => {
       expect.stringContaining('WHERE table_name = ? AND table_schema = ?'),
       ['products', 'catalog'],
     );
-    expect(db.raw).toHaveBeenNthCalledWith(6, expect.stringContaining('tc.table_schema = ?'), [
+    expect(db.raw).toHaveBeenNthCalledWith(6, expect.stringContaining('FROM pg_constraint c'), [
       'catalog',
     ]);
     expect(result.result).toEqual({
@@ -174,7 +175,13 @@ describe('introspectDatabase', () => {
         },
       ],
       foreignKeys: [
-        { fromTable: 'images', fromColumn: 'product_id', toTable: 'products', toColumn: 'id' },
+        {
+          constraintName: 'images_product_id_fkey',
+          fromTable: 'images',
+          fromColumn: 'product_id',
+          toTable: 'products',
+          toColumn: 'id',
+        },
       ],
     });
   });

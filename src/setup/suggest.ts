@@ -158,8 +158,26 @@ export function suggestRelations(
 ): RelationSuggestion[] {
   const suggestions: RelationSuggestion[] = [];
 
+  // introspectForeignKeys reports one row per column pair, all sharing a
+  // constraintName. Regroup them before doing anything else so a composite
+  // foreign key's pairs are considered together instead of as independent
+  // single-column relations.
+  const byConstraint = new Map<string, ForeignKeyInfo[]>();
+  for (const fk of foreignKeys) {
+    const key = `${fk.fromTable}::${fk.constraintName}`;
+    const group = byConstraint.get(key);
+    if (group) group.push(fk);
+    else byConstraint.set(key, [fk]);
+  }
+
   // Find tables that have a foreign key pointing to the main table
-  const relatedFks = foreignKeys.filter((fk) => fk.toTable === mainTable);
+  // RelationConfig only models a single foreignKey/referenceKey pair, so a
+  // composite foreign key (constraint group with more than one column pair)
+  // can't be expressed without silently dropping columns. Skip it rather than
+  // guess which pair the operator wants.
+  const relatedFks = [...byConstraint.values()]
+    .filter((group) => group.length === 1 && group[0]!.toTable === mainTable)
+    .map((group) => group[0]!);
 
   for (const fk of relatedFks) {
     const relatedTable = tables.find((t) => t.name === fk.fromTable);

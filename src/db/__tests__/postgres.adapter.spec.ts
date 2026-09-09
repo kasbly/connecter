@@ -165,6 +165,57 @@ describe('PostgresAdapter distinct status probe', () => {
     );
     expect(values).toEqual(['for_sale', 'under_offer']);
   });
+
+  it('orders the bounded scan by recency so a status that only landed on recently-changed rows is not hidden behind heap order (#25985)', async () => {
+    // An unordered `LIMIT` is served in physical heap order, which is biased
+    // toward old/never-updated rows: an `UPDATE` writes its new tuple version
+    // at the heap tail, so a status that just changed on a row past the scan
+    // cap is exactly the kind of value an unordered scan misses. Passing
+    // `orderBy` (the resource's default sort) must push those recently
+    // touched rows to the front of the scan instead.
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+    rawMock.mockResolvedValueOnce({ rows: [{ value: 'for_sale' }, { value: 'under_offer' }] });
+
+    const values = await adapter.distinctValues({
+      table: 'cars',
+      column: 'availability',
+      limit: 50,
+      scanLimit: 5000,
+      baseFilter: 'published = true',
+      orderBy: { column: 'updatedAt', direction: 'desc', tiebreaker: 'id' },
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT DISTINCT "value" FROM (SELECT availability AS "value" ' +
+        'FROM "public"."cars" WHERE (published = true) ' +
+        'ORDER BY updatedAt DESC NULLS LAST, id DESC LIMIT ?) AS "sampled_rows" LIMIT ?',
+      [5000, 50],
+    );
+    expect(values).toEqual(['for_sale', 'under_offer']);
+  });
+
+  it('falls back to id-ordered when no updatedAt column is configured', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+    rawMock.mockResolvedValueOnce({ rows: [{ value: 'sold' }] });
+
+    await adapter.distinctValues({
+      table: 'cars',
+      column: 'availability',
+      limit: 50,
+      scanLimit: 5000,
+      orderBy: { column: 'id', direction: 'desc' },
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT DISTINCT "value" FROM (SELECT availability AS "value" ' +
+        'FROM "public"."cars" ORDER BY id DESC NULLS LAST LIMIT ?) AS "sampled_rows" LIMIT ?',
+      [5000, 50],
+    );
+  });
 });
 
 describe('PostgresAdapter statement timeout', () => {

@@ -296,6 +296,133 @@ describe('inventory routes', () => {
     await app.close();
   });
 
+  it('GET /inventory back-fills the page when the newest rows all violate the wire contract (#25984)', async () => {
+    // A customer search asks for 5 rows. The newest 5 rows in `updatedAt DESC`
+    // order are all invalid, but the catalogue has plenty of valid listings
+    // right behind them — the response must still come back with 5 items
+    // instead of an empty page.
+    const invalidRows = Array.from({ length: 5 }, (_, i) => ({
+      id: String(i + 1),
+      name: 'Bad Row',
+      price: 'TBD',
+      updatedAt: `2026-01-0${i + 1}T00:00:00Z`,
+    }));
+    const validRows = Array.from({ length: 5 }, (_, i) => ({
+      id: String(i + 6),
+      name: `Good Row ${i + 6}`,
+      price: 9.99,
+      updatedAt: `2026-01-1${i}T00:00:00Z`,
+    }));
+    const query = vi.fn().mockImplementation((_table, _conditions, pagination) => {
+      if (pagination.page === 1) return Promise.resolve({ rows: invalidRows, total: 10 });
+      if (pagination.page === 2) return Promise.resolve({ rows: validRows, total: 10 });
+      return Promise.resolve({ rows: [], total: 10 });
+    });
+    const mockAdapter = createMockDbAdapter({ query });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const response = await app.inject({ method: 'GET', url: '/inventory?pageSize=5' });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      items: { externalId: string }[];
+      total: number;
+      page: number;
+      pageSize: number;
+    };
+    expect(body.items).toHaveLength(5);
+    expect(body.items.map((item) => item.externalId)).toEqual(['6', '7', '8', '9', '10']);
+    expect(body.page).toBe(1);
+    expect(body.pageSize).toBe(5);
+    // First page (5 invalid) + backfill page (5 valid) both examined: 10 rows
+    // examined, 5 servable — matches the #25791 accounting extended over the
+    // backfill.
+    expect(body.total).toBe(5);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ page: 2, pageSize: 5 }),
+      expect.anything(),
+      undefined,
+      expect.anything(),
+    );
+
+    await app.close();
+  });
+
+  it('GET /inventory does not loop past a genuinely exhausted result set', async () => {
+    // The raw page comes back shorter than requested — the catalogue itself
+    // ran out, which must return a short page rather than triggering a
+    // backfill fetch.
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        { id: '1', name: 'Widget', price: 9.99, updatedAt: '2026-01-01T00:00:00Z' },
+        { id: '2', name: 'Gadget', price: 'TBD', updatedAt: '2026-01-02T00:00:00Z' },
+      ],
+      total: 2,
+    });
+    const mockAdapter = createMockDbAdapter({ query });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const response = await app.inject({ method: 'GET', url: '/inventory?pageSize=5' });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { items: { externalId: string }[]; total: number };
+    expect(body.items).toEqual([expect.objectContaining({ externalId: '1' })]);
+    expect(body.total).toBe(1);
+    // Only the single fetch — a short raw batch already proves exhaustion, so
+    // no backfill fetch is issued.
+    expect(query).toHaveBeenCalledTimes(1);
+
+    await app.close();
+  });
+
+  it('GET /inventory bounds the backfill loop instead of fetching indefinitely', async () => {
+    // Every page the adapter can serve is a full, entirely-invalid page — the
+    // loop must give up after a bounded number of extra fetches rather than
+    // walking the whole table.
+    const query = vi.fn().mockImplementation(() =>
+      Promise.resolve({
+        rows: Array.from({ length: 5 }, (_, i) => ({
+          id: `bad-${i}`,
+          name: 'Bad Row',
+          price: 'TBD',
+          updatedAt: '2026-01-01T00:00:00Z',
+        })),
+        total: 1000,
+      }),
+    );
+    const mockAdapter = createMockDbAdapter({ query });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const response = await app.inject({ method: 'GET', url: '/inventory?pageSize=5' });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { items: unknown[] };
+    expect(body.items).toEqual([]);
+    // 1 initial fetch + MAX_BACKFILL_FETCHES (4) extra fetches, never more.
+    expect(query).toHaveBeenCalledTimes(5);
+
+    await app.close();
+  });
+
   it('GET /inventory reports total 0 when every row on the page violates the wire contract', async () => {
     const mockAdapter = createMockDbAdapter({
       query: vi.fn().mockResolvedValue({

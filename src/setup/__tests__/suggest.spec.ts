@@ -196,7 +196,13 @@ describe('suggestRelations', () => {
       },
     ];
     const fks: ForeignKeyInfo[] = [
-      { fromTable: 'Image', fromColumn: 'carId', toTable: 'Car', toColumn: 'id' },
+      {
+        constraintName: 'image_car_id_fkey',
+        fromTable: 'Image',
+        fromColumn: 'carId',
+        toTable: 'Car',
+        toColumn: 'id',
+      },
     ];
 
     const suggestions = suggestRelations('Car', tables, fks);
@@ -217,7 +223,13 @@ describe('suggestRelations', () => {
       },
     ];
     const fks: ForeignKeyInfo[] = [
-      { fromTable: 'CarFeature', fromColumn: 'carId', toTable: 'Car', toColumn: 'id' },
+      {
+        constraintName: 'car_feature_car_id_fkey',
+        fromTable: 'CarFeature',
+        fromColumn: 'carId',
+        toTable: 'Car',
+        toColumn: 'id',
+      },
     ];
 
     const suggestions = suggestRelations('Car', tables, fks);
@@ -232,6 +244,89 @@ describe('suggestRelations', () => {
     ];
     const suggestions = suggestRelations('Car', tables, []);
     expect(suggestions).toEqual([]);
+  });
+
+  it('skips a composite foreign key instead of guessing a column pair (#25986)', () => {
+    const tables: IntrospectedTable[] = [
+      {
+        name: 'Cat',
+        kind: 'table',
+        rowCount: 100,
+        columns: [col('tenantId', 'integer', true), col('sku', 'text', true)],
+      },
+      {
+        name: 'CatPhotos',
+        kind: 'table',
+        rowCount: 1000,
+        columns: [col('sku', 'text'), col('tenantId', 'integer'), col('url', 'text')],
+      },
+    ];
+    // introspectForeignKeys reports one row per column pair for a composite key:
+    // FOREIGN KEY (tenantId, sku) REFERENCES Cat(tenantId, sku).
+    const fks: ForeignKeyInfo[] = [
+      {
+        constraintName: 'cat_photos_cat_fkey',
+        fromTable: 'CatPhotos',
+        fromColumn: 'sku',
+        toTable: 'Cat',
+        toColumn: 'sku',
+      },
+      {
+        constraintName: 'cat_photos_cat_fkey',
+        fromTable: 'CatPhotos',
+        fromColumn: 'tenantId',
+        toTable: 'Cat',
+        toColumn: 'tenantId',
+      },
+    ];
+
+    const suggestions = suggestRelations('Cat', tables, fks);
+    expect(suggestions).toEqual([]);
+  });
+
+  it('keeps two tables that share a hand-written FK constraint name independent (#25986)', () => {
+    const tables: IntrospectedTable[] = [
+      { name: 'Products', kind: 'table', rowCount: 100, columns: [col('id', 'integer', true)] },
+      {
+        name: 'CChild',
+        kind: 'table',
+        rowCount: 10,
+        columns: [col('id', 'integer', true), col('listingRef', 'integer')],
+      },
+      {
+        name: 'DChild',
+        kind: 'table',
+        rowCount: 10,
+        columns: [col('id', 'integer', true), col('ownerRef', 'integer')],
+      },
+    ];
+    // PostgreSQL only enforces FK constraint-name uniqueness per table, so two
+    // unrelated tables can both use CONSTRAINT fk_dup.
+    const fks: ForeignKeyInfo[] = [
+      {
+        constraintName: 'fk_dup',
+        fromTable: 'CChild',
+        fromColumn: 'listingRef',
+        toTable: 'Products',
+        toColumn: 'id',
+      },
+      {
+        constraintName: 'fk_dup',
+        fromTable: 'DChild',
+        fromColumn: 'ownerRef',
+        toTable: 'Products',
+        toColumn: 'id',
+      },
+    ];
+
+    const suggestions = suggestRelations('Products', tables, fks);
+    expect(suggestions).toHaveLength(2);
+    expect(suggestions).toContainEqual(
+      expect.objectContaining({ table: 'CChild', foreignKeyColumn: 'listingRef' }),
+    );
+    expect(suggestions).toContainEqual(
+      expect.objectContaining({ table: 'DChild', foreignKeyColumn: 'ownerRef' }),
+    );
   });
 });
 

@@ -56,6 +56,14 @@ export interface DistinctValuesQuery {
   /** Hard ceiling on how many rows the scan may read before de-duplicating. */
   scanLimit: number;
   baseFilter?: string;
+  /**
+   * Order the bounded scan follows before the `scanLimit` cuts it off. Without
+   * this, an unordered `LIMIT` returns rows in physical heap order, which is
+   * biased toward old/never-updated rows — an `UPDATE` writes its new tuple
+   * version at the heap tail, so a status that just changed on a mid-catalog
+   * row is exactly the kind of value an unordered scan misses (#25985).
+   */
+  orderBy?: SortOptions;
 }
 
 export interface TableInfo {

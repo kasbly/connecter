@@ -251,11 +251,55 @@ describe('health route', () => {
       limit: UNKNOWN_STATUS_VALUE_LIMIT,
       scanLimit: UNKNOWN_STATUS_SCAN_LIMIT,
       baseFilter: 'published = true',
+      // No updatedAtColumn configured on `inventoryResource`, so the scan
+      // falls back to id-descending (#25985).
+      orderBy: { column: 'id', direction: 'desc' },
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       status: 'ok',
       resources: 'ok',
+      unknownStatusValues: ['under_offer'],
+    });
+    await app.close();
+  });
+
+  it('orders the distinct-status scan by recency when an updatedAtColumn is configured, so a status that only landed on a mid-catalogue row is not hidden behind heap order (#25985)', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    // The sampled page (the newest rows) never carries `under_offer` — it
+    // only shows up on a row that was updated after the scan cap would have
+    // been reached in unordered (heap) order. Ordering the scan by
+    // `updatedAt DESC` — the same recency order the sampled page uses — is
+    // what lets the diagnostic see it on a large catalogue.
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [{ id: '1', title: 'Test', price: 100, availability: 'for_sale' }],
+      total: 10_000,
+    });
+    dbAdapter.distinctValues = vi.fn().mockResolvedValue(['for_sale', 'under_offer']);
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        updatedAtColumn: 'updated_at',
+        fields: { ...inventoryResource.fields, status: 'availability' },
+        statusValues: { ACTIVE: ['for_sale'], SOLD: ['sold_out'] },
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    expect(dbAdapter.distinctValues).toHaveBeenCalledWith({
+      table: 'inventory',
+      column: 'availability',
+      limit: UNKNOWN_STATUS_VALUE_LIMIT,
+      scanLimit: UNKNOWN_STATUS_SCAN_LIMIT,
+      orderBy: { column: 'updated_at', direction: 'desc', tiebreaker: 'id' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'ok',
       unknownStatusValues: ['under_offer'],
     });
     await app.close();
@@ -336,6 +380,76 @@ describe('health route', () => {
 
     const response = await app.inject({ method: 'GET', url: '/health' });
 
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      resources: 'misconfigured',
+      resourceError: expect.stringContaining('price'),
+    });
+    await app.close();
+  });
+
+  it('stays healthy when the first sampled page is fully invalid but the second page has a valid row', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query)
+      .mockResolvedValueOnce({
+        rows: [
+          { id: '1', title: 'Bad import row', price: 'SAR 1,250' },
+          { id: '2', title: 'Also bad import row', price: null },
+        ],
+        total: 20_002,
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { id: '3', title: 'Valid listing', price: 999 },
+          { id: '4', title: 'Another bad row', price: 'SAR 50' },
+        ],
+        total: 20_002,
+      });
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    // A contiguous bad import batch fills exactly the first `updatedAt DESC`
+    // page while the rest of a large catalog is fine — that must not take
+    // GET /inventory offline for every listing (#25983).
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'ok',
+      resources: 'ok',
+      wireContractViolationIds: ['1', '2', '4'],
+    });
+    expect(dbAdapter.query).toHaveBeenNthCalledWith(
+      2,
+      'inventory',
+      [],
+      { page: 2, pageSize: 20 },
+      expect.any(Object),
+      undefined,
+      expect.any(Array),
+    );
+    await app.close();
+  });
+
+  it('fails the resource when both the first and second sampled pages are fully invalid', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query)
+      .mockResolvedValueOnce({
+        rows: [{ id: '1', title: 'Invalid listing', price: 'SAR 1,250' }],
+        total: 40,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: '21', title: 'Also invalid', price: 'SAR 999' }],
+        total: 40,
+      });
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    // Every row on both pages fails the same way — a systematic mapping
+    // break (e.g. price pointed at a text column) — so the resource must
+    // still be reported misconfigured rather than served as healthy.
     expect(response.statusCode).toBe(503);
     expect(response.json()).toMatchObject({
       resources: 'misconfigured',
