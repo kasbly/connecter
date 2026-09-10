@@ -646,9 +646,9 @@ export async function runWizard(): Promise<void> {
     if (!relTable) continue;
 
     // Relation names are also the keys used to load relation rows at runtime. Keep
-    // a matching existing key when rerunning setup, but use the source table name
-    // for new image relations so accepting more than one cannot overwrite a
-    // previous image source.
+    // a matching existing key when rerunning setup, but default new relations to a
+    // table+foreignKey key so accepting more than one relation — including two FKs
+    // from the same child table (#26144) — cannot overwrite a previous one.
     const existingRelationEntry = Object.entries(
       existingConfig?.resources.inventory.relations ?? {},
     ).find(
@@ -656,7 +656,8 @@ export async function runWizard(): Promise<void> {
         relation.table === suggestion.table &&
         unquoteIdentifier(relation.foreignKey) === suggestion.foreignKeyColumn,
     );
-    const relationName = existingRelationEntry?.[0] ?? suggestion.table;
+    const relationName =
+      existingRelationEntry?.[0] ?? `${suggestion.table}__${suggestion.foreignKeyColumn}`;
     const existingRelation = existingRelationEntry?.[1];
 
     const addRelation = await confirm({

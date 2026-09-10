@@ -604,13 +604,15 @@ describe('runWizard', () => {
         'connector.merchant.example',
       );
       expect(config.server.trustedProxies).toBe('172.30.0.2');
-      expect(config.resources.inventory.relations?.product_images).toMatchObject({
+      // Relation keys are table+foreignKey, not just table name, so two FKs from
+      // the same child table can't collide (#26144).
+      expect(config.resources.inventory.relations?.['product_images__product_sku']).toMatchObject({
         schema: 'merchant_data',
         imageUrlField: 'url',
         foreignKey: '"product_sku"',
         referenceKey: '"sku"',
       });
-      expect(config.resources.inventory.relations?.variant_images).toMatchObject({
+      expect(config.resources.inventory.relations?.['variant_images__product_id']).toMatchObject({
         schema: 'merchant_data',
         imageUrlField: 'url',
       });
@@ -620,11 +622,11 @@ describe('runWizard', () => {
           config.resources.inventory,
           new Map([
             [
-              'product_images',
+              'product_images__product_sku',
               new Map([['sonata-2024', [{ url: 'https://example.com/product.jpg' }]]]),
             ],
             [
-              'variant_images',
+              'variant_images__product_id',
               new Map([['product-1', [{ url: 'https://example.com/variant.jpg' }]]]),
             ],
           ]),
@@ -671,6 +673,157 @@ describe('runWizard', () => {
       );
       expect(resourceProbeMocks.adapter.connect).toHaveBeenCalledOnce();
       expect(resourceProbeMocks.adapter.disconnect).toHaveBeenCalledOnce();
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('retains both relations when a single child table has two FKs onto the inventory table (#26144)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      'description',
+      '\0unmapped',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    // Step 6 asks which proxy fronts the connector; take the bundled Caddy.
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'merchant_data',
+      'connector.merchant.example',
+    ]) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.password.mockResolvedValueOnce('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }) =>
+      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve([]);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title', 'description']);
+      }
+      if (message.startsWith('Which filters should be available')) {
+        return Promise.resolve(['minPrice', 'maxPrice', 'currency']);
+      }
+      return Promise.resolve(['url']);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 100,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'title', type: 'character', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'makeEn', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'year', type: 'integer', nullable: true, isPrimaryKey: false },
+            ],
+          },
+          {
+            // A single child table with two FKs onto products: a product-level
+            // gallery shot and a variant/color-swatch shot. Both are image-typed
+            // relation suggestions for the *same* table, which is what #23025's
+            // table-name keying missed.
+            name: 'images',
+            kind: 'table',
+            rowCount: 400,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'product_id', type: 'uuid', nullable: true, isPrimaryKey: false },
+              { name: 'variant_id', type: 'uuid', nullable: true, isPrimaryKey: false },
+              { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [
+          {
+            constraintName: 'images_product_id_fkey',
+            fromTable: 'images',
+            fromColumn: 'product_id',
+            toTable: 'products',
+            toColumn: 'id',
+          },
+          {
+            constraintName: 'images_variant_id_fkey',
+            fromTable: 'images',
+            fromColumn: 'variant_id',
+            toTable: 'products',
+            toColumn: 'id',
+          },
+        ],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      const relations = config.resources.inventory.relations ?? {};
+      // Both FKs from the `images` table must survive under distinct keys —
+      // the second FK must not silently overwrite the first.
+      expect(Object.keys(relations)).toHaveLength(2);
+      expect(relations['images__product_id']).toMatchObject({
+        schema: 'merchant_data',
+        table: 'images',
+        foreignKey: '"product_id"',
+        imageUrlField: 'url',
+      });
+      expect(relations['images__variant_id']).toMatchObject({
+        schema: 'merchant_data',
+        table: 'images',
+        foreignKey: '"variant_id"',
+        imageUrlField: 'url',
+      });
+      expect(
+        mapRowToInventoryItem(
+          { id: 'product-1', sku: 'sonata-2024', title: 'Product', price: 100, currency: 'SAR' },
+          config.resources.inventory,
+          new Map([
+            [
+              'images__product_id',
+              new Map([['product-1', [{ url: 'https://example.com/gallery.jpg' }]]]),
+            ],
+            [
+              'images__variant_id',
+              new Map([['product-1', [{ url: 'https://example.com/variant.jpg' }]]]),
+            ],
+          ]),
+        ).images,
+      ).toEqual(['https://example.com/gallery.jpg', 'https://example.com/variant.jpg']);
     } finally {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
