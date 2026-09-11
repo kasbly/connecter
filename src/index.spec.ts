@@ -33,6 +33,7 @@ describe('startConnector', () => {
       query: vi.fn().mockRejectedValue(new Error('column "price" does not exist')),
       queryById: vi.fn(),
       queryRelation: vi.fn(),
+      probeSearchableColumns: vi.fn(),
       introspect: vi.fn(),
     };
     let listen = vi.fn();

@@ -8,6 +8,7 @@ import type {
   SortOptions,
   QueryResult,
   RelationQuery,
+  SearchableColumnsProbeQuery,
   TableInfo,
   ColumnInfo,
 } from './adapter.interface.js';
@@ -101,7 +102,7 @@ export function resolveCountLimit(
   pagination: PaginationOptions,
   countLimit: number = DEFAULT_COUNT_LIMIT,
 ): number {
-  const offset = (pagination.page - 1) * pagination.pageSize;
+  const offset = pagination.rawOffset ?? (pagination.page - 1) * pagination.pageSize;
   return Math.max(countLimit, offset + pagination.pageSize + 1);
 }
 
@@ -183,9 +184,17 @@ export class PostgresAdapter implements DatabaseAdapter {
     for (const condition of filterConditions) {
       if (condition.operator === 'IN') {
         const sourceValues = condition.value as string[];
+        // Case-insensitive like the `=` branch below (#25604) and like the
+        // read-side `resolveInventoryStatus`, which also does
+        // `.trim().toLowerCase()` on both the column value and the configured
+        // source values. Without this, a catalogue storing 'Active' is read
+        // back as ACTIVE but never matches `WHERE status IN ('ACTIVE', ...)`,
+        // so filter.status=ACTIVE returns zero rows for it (residual of
+        // #25604 — the IN branch was left exact). `::text` keeps this a
+        // no-op for enum/integer status columns.
         queryBuilder = queryBuilder.whereRaw(
-          `${condition.column} IN (${sourceValues.map(() => '?').join(', ')})`,
-          sourceValues,
+          `lower(${condition.column}::text) IN (${sourceValues.map(() => '?').join(', ')})`,
+          sourceValues.map((value) => value.trim().toLowerCase()),
         );
         continue;
       }
@@ -242,7 +251,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     schema?: string,
   ): Promise<QueryResult> {
     const db = this.getDb();
-    const offset = (pagination.page - 1) * pagination.pageSize;
+    const offset = pagination.rawOffset ?? (pagination.page - 1) * pagination.pageSize;
 
     // Build data query with specific columns
     let dataQuery: Knex.QueryBuilder = db.withSchema(schema ?? 'public').from(table);
@@ -356,6 +365,41 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
 
     return result;
+  }
+
+  /**
+   * Forces PostgreSQL to resolve `ILIKE` against every configured searchable
+   * column without ever reading a row of the merchant's table.
+   *
+   * `WHERE FALSE AND (...)` is the same trick {@link queryRelation} uses to
+   * validate a relation's shape with no rows: operator resolution happens
+   * during parse analysis, before the planner folds the `FALSE` constant, so
+   * a non-text column (integer/enum/uuid/date) still raises `42883` here.
+   * Previously this ran as a second real page query with a throwaway search
+   * term that could never match, so both the page query and its paired bounded
+   * count in {@link query} sequential-scanned the whole table every 30s
+   * (#26342) — this issues one non-executing statement instead, with no
+   * `ORDER BY`, no `LIMIT`/`OFFSET`, and no count query at all.
+   */
+  async probeSearchableColumns(query: SearchableColumnsProbeQuery): Promise<void> {
+    if (query.columns.length === 0) return;
+    const db = this.getDb();
+
+    // Same OR-within-the-group shape `applyBaseFilterAndConditions` gives a
+    // real search: any configured column may resolve `ILIKE`, so all of them
+    // must be checked in one statement rather than short-circuiting on the
+    // first.
+    const searchClause = query.columns
+      .map((column) => `${column} ILIKE ? ESCAPE '\\'`)
+      .join(' OR ');
+    const bindings = query.columns.map(() => `%${escapeLikePattern(query.probeTerm)}%`);
+
+    let sql = `SELECT 1 FROM ${qualifiedTable(query.schema, query.table)} WHERE FALSE AND (${searchClause})`;
+    if (query.baseFilter) {
+      sql += ` AND (${query.baseFilter})`;
+    }
+
+    await db.raw(sql, bindings);
   }
 
   /**

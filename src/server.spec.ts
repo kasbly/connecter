@@ -36,6 +36,7 @@ describe('buildApp database timeout handling', () => {
       query: vi.fn().mockResolvedValue({ rows: [], total: 0, totalIsCapped: false }),
       queryById: vi.fn(),
       queryRelation: vi.fn(),
+      probeSearchableColumns: vi.fn(),
       healthCheck: vi.fn().mockResolvedValue(true),
       introspect: vi.fn(),
     };
@@ -101,6 +102,7 @@ describe('buildApp database timeout handling', () => {
       query: vi.fn().mockRejectedValue(timeoutError),
       queryById: vi.fn(),
       queryRelation: vi.fn(),
+      probeSearchableColumns: vi.fn(),
       healthCheck: vi.fn().mockResolvedValue(true),
       introspect: vi.fn(),
     };
@@ -161,6 +163,7 @@ describe('buildApp database timeout handling', () => {
       query: vi.fn(),
       queryById: vi.fn(),
       queryRelation: vi.fn(),
+      probeSearchableColumns: vi.fn(),
       healthCheck: vi.fn().mockResolvedValue(true),
       introspect: vi.fn(),
     };

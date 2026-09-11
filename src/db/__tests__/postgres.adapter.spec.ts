@@ -138,6 +138,60 @@ describe('PostgresAdapter relation probes', () => {
   });
 });
 
+describe('PostgresAdapter searchable-column probe', () => {
+  beforeEach(() => {
+    knexMock.mockClear();
+    rawMock.mockClear();
+  });
+
+  it('issues a single WHERE-FALSE statement instead of scanning any rows (#26342)', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.probeSearchableColumns({
+      table: 'cars',
+      columns: ['make', 'model'],
+      probeTerm: '\\0probe',
+      baseFilter: 'published = true',
+    });
+
+    expect(rawMock).toHaveBeenCalledTimes(1);
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT 1 FROM "public"."cars" WHERE FALSE AND (make ILIKE ? ESCAPE \'\\\' OR model ILIKE ? ESCAPE \'\\\') AND (published = true)',
+      ['%\\\\0probe%', '%\\\\0probe%'],
+    );
+  });
+
+  it('qualifies the probe with the configured schema', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.probeSearchableColumns({
+      schema: 'catalog',
+      table: 'products',
+      columns: ['sku'],
+      probeTerm: '\\0probe',
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT 1 FROM "catalog"."products" WHERE FALSE AND (sku ILIKE ? ESCAPE \'\\\')',
+      ['%\\\\0probe%'],
+    );
+  });
+
+  it('does nothing when no searchable columns are configured', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.probeSearchableColumns({ table: 'cars', columns: [], probeTerm: '\\0probe' });
+
+    expect(rawMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('PostgresAdapter distinct status probe', () => {
   beforeEach(() => {
     knexMock.mockClear();
@@ -660,10 +714,32 @@ describe('PostgresAdapter list count (#17420)', () => {
 
     const { countQuery, dataQuery } = await runListQuery({ count: 3, conditions });
 
-    expect(countQuery.sql).toContain('availability IN (?, ?)');
-    expect(dataQuery.sql).toContain('availability IN (?, ?)');
+    expect(countQuery.sql).toContain('lower(availability::text) IN (?, ?)');
+    expect(dataQuery.sql).toContain('lower(availability::text) IN (?, ?)');
     expect(countQuery.bindings.slice(0, 2)).toEqual(['sold', 'closed']);
     expect(dataQuery.bindings.slice(0, 2)).toEqual(['sold', 'closed']);
+  });
+
+  it('matches filter.status=ACTIVE against a stored Active value via case-insensitive IN (residual of #25604)', async () => {
+    // Default statusValues for ACTIVE is ['ACTIVE', 'active'] (config.schema.ts).
+    // resolveInventoryStatus reads a stored 'Active' back as ACTIVE by lowering
+    // both sides, but the IN filter used to compare exact case, so this row was
+    // invisible to search even though it read as live. See #26343.
+    const conditions: QueryCondition[] = [
+      { column: 'status', operator: 'IN', value: ['ACTIVE', 'active'] },
+    ];
+
+    const { countQuery, dataQuery, result } = await runListQuery({
+      count: 1,
+      conditions,
+      dataRows: [{ id: '1', price: 10, status: 'Active' }],
+    });
+
+    expect(dataQuery.sql).toContain('lower(status::text) IN (?, ?)');
+    expect(countQuery.sql).toContain('lower(status::text) IN (?, ?)');
+    expect(dataQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
+    expect(countQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
+    expect(result.rows).toEqual([{ id: '1', price: 10, status: 'Active' }]);
   });
 
   it('escapes LIKE metacharacters in search values for data and count queries', async () => {

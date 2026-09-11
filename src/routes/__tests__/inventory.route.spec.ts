@@ -13,6 +13,7 @@ function createMockDbAdapter(overrides: Partial<DatabaseAdapter> = {}): Database
     query: vi.fn().mockResolvedValue({ rows: [], total: 0 } satisfies QueryResult),
     queryById: vi.fn().mockResolvedValue(null),
     queryRelation: vi.fn().mockResolvedValue(new Map()),
+    probeSearchableColumns: vi.fn().mockResolvedValue(undefined),
     healthCheck: vi.fn().mockResolvedValue(true),
     introspect: vi.fn().mockResolvedValue([]),
     ...overrides,
@@ -353,6 +354,60 @@ describe('inventory routes', () => {
       undefined,
       expect.anything(),
     );
+
+    await app.close();
+  });
+
+  it('GET /inventory does not repeat rows across pages when a mid-page row fails validation (#26344)', async () => {
+    // Reproduces the exact failing sequence from the issue: pageSize 20, 100
+    // matching rows, three rows in the middle of page 1 (ids 3, 7 and 11) fail
+    // the wire contract. The #25984 backfill correctly fills page 1 up to 20
+    // items by borrowing raw rows 21-23 — but page 2 must resume after those
+    // borrowed rows instead of re-fetching the same raw window and serving
+    // rows 21-23 again.
+    const totalRawRows = 100;
+    const invalidRawIds = new Set(['3', '7', '11']);
+    const rawRows = Array.from({ length: totalRawRows }, (_, i) => {
+      const id = String(i + 1);
+      return invalidRawIds.has(id)
+        ? { id, name: 'Bad Row', price: 'TBD', updatedAt: '2026-01-01T00:00:00Z' }
+        : { id, name: `Good Row ${id}`, price: 9.99, updatedAt: '2026-01-01T00:00:00Z' };
+    });
+    const query = vi.fn().mockImplementation((_table, _conditions, pagination) => {
+      const offset = pagination.rawOffset ?? (pagination.page - 1) * pagination.pageSize;
+      return Promise.resolve({
+        rows: rawRows.slice(offset, offset + pagination.pageSize),
+        total: totalRawRows,
+      });
+    });
+    const mockAdapter = createMockDbAdapter({ query });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const page1Response = await app.inject({ method: 'GET', url: '/inventory?page=1&pageSize=20' });
+    const page2Response = await app.inject({ method: 'GET', url: '/inventory?page=2&pageSize=20' });
+
+    expect(page1Response.statusCode).toBe(200);
+    expect(page2Response.statusCode).toBe(200);
+
+    const page1Ids = (page1Response.json() as { items: { externalId: string }[] }).items.map(
+      (item) => item.externalId,
+    );
+    const page2Ids = (page2Response.json() as { items: { externalId: string }[] }).items.map(
+      (item) => item.externalId,
+    );
+
+    expect(page1Ids).toHaveLength(20);
+    expect(page2Ids).toHaveLength(20);
+
+    // The union of both pages' item ids must contain no duplicates.
+    const overlap = page1Ids.filter((id) => page2Ids.includes(id));
+    expect(overlap).toEqual([]);
+    expect(new Set([...page1Ids, ...page2Ids]).size).toBe(page1Ids.length + page2Ids.length);
 
     await app.close();
   });

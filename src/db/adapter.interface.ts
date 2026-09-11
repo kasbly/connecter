@@ -9,6 +9,16 @@ export interface QueryCondition {
 export interface PaginationOptions {
   page: number;
   pageSize: number;
+  /**
+   * Explicit raw row offset. When present, adapters must use it verbatim
+   * instead of deriving the offset from `page` — `page` becomes informational
+   * only. This lets a caller resume a raw scan mid-page, which the inventory
+   * route's wire-contract backfill needs: once withheld rows push a page's
+   * served window past a whole-page boundary, the next page must start
+   * exactly where the previous one's raw scan stopped rather than at
+   * `(page - 1) * pageSize`, or the two pages serve overlapping rows (#26344).
+   */
+  rawOffset?: number;
 }
 
 export interface SortOptions {
@@ -44,6 +54,16 @@ export interface RelationQuery {
   fields: Record<string, string>;
   filter?: string;
   orderBy?: SortOptions;
+}
+
+export interface SearchableColumnsProbeQuery {
+  schema?: string;
+  table: string;
+  /** Column expressions from the resource's `searchableColumns` config. */
+  columns: string[];
+  /** Throwaway term guaranteed to match nothing; only its operator resolution matters. */
+  probeTerm: string;
+  baseFilter?: string;
 }
 
 export interface DistinctValuesQuery {
@@ -99,6 +119,17 @@ export interface DatabaseAdapter {
     schema?: string,
   ): Promise<Record<string, unknown> | null>;
   queryRelation(query: RelationQuery): Promise<Map<string, Record<string, unknown>[]>>;
+  /**
+   * Zero-row check that the database can resolve `ILIKE` against every
+   * configured searchable column, without reading a single row of the
+   * merchant's table. Mirrors {@link queryRelation}'s `WHERE FALSE` pattern:
+   * operator resolution happens during parse analysis, before the planner
+   * folds the `WHERE FALSE` constant, so a non-text column (integer, enum,
+   * uuid, date) still raises an operator-resolution error (e.g. Postgres
+   * `42883`) here — it just never costs a sequential scan of a large
+   * production table to find out (#26342).
+   */
+  probeSearchableColumns(query: SearchableColumnsProbeQuery): Promise<void>;
   /**
    * Bounded `SELECT DISTINCT` over one column, used by the inventory resource
    * probe to report source status values the merchant has not mapped

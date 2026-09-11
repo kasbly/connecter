@@ -152,18 +152,17 @@ export async function probeInventoryResource(
     ({ rows } = await runProbeQuery([], DEFAULT_PAGE_SIZE));
     // Selecting a searchable column only proves it exists. Real search emits
     // `ILIKE` per column, which PostgreSQL rejects for integer/enum/uuid/date
-    // (`42883`). A throwaway term on a second query forces that operator
-    // resolution without emptying the mapping sample (#25115).
+    // (`42883`). This forces that operator resolution as a zero-row
+    // `WHERE FALSE` check — never a real query over the merchant's table
+    // (#26342) — rather than emptying the mapping sample.
     if (searchableColumns.length > 0) {
-      await runProbeQuery(
-        searchableColumns.map((column) => ({
-          column,
-          operator: 'ILIKE' as const,
-          value: SEARCHABLE_COLUMN_PROBE_TERM,
-          _group: SEARCHABLE_COLUMN_PROBE_TERM,
-        })),
-        1,
-      );
+      await dbAdapter.probeSearchableColumns({
+        ...(resourceConfig.schema ? { schema: resourceConfig.schema } : {}),
+        table: resourceConfig.table,
+        columns: searchableColumns,
+        probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
+        ...(resourceConfig.baseFilter ? { baseFilter: resourceConfig.baseFilter } : {}),
+      });
     }
   } catch (error) {
     throw new Error(
@@ -172,29 +171,42 @@ export async function probeInventoryResource(
     );
   }
 
-  const relationEntries = await Promise.all(
-    getRelationConfigs(resourceConfig).map(async ([relationName, relationConfig]) => {
-      try {
-        const relationRows = await dbAdapter.queryRelation({
-          ...((relationConfig.schema ?? resourceConfig.schema)
-            ? { schema: relationConfig.schema ?? resourceConfig.schema }
-            : {}),
-          table: relationConfig.table,
-          foreignKey: relationConfig.foreignKey,
-          parentIds: getReferenceValues(rows, relationConfig.referenceKey),
-          fields: relationConfig.fields,
-          filter: relationConfig.filter,
-          orderBy: relationConfig.orderBy,
-        });
-        return [relationName, relationRows] as const;
-      } catch (error) {
-        throw new Error(
-          `Inventory relation "${relationName}" probe failed for table ` +
-            `"${relationConfig.table}": ${errorMessage(error)}`,
-        );
-      }
-    }),
-  );
+  // Loads relation rows keyed by relationName -> parent reference value for a
+  // given row batch. Called once for the page-1 sample below and, on the
+  // fully-invalid-first-page path, again for the page-2 sample: relation data
+  // fetched for one page's parent ids is empty for another page's rows, which
+  // makes every relation-sourced value on that other page resolve to nothing
+  // and pass a check it should fail (residual of #25983).
+  const loadRelationData = async (
+    batch: Record<string, unknown>[],
+  ): Promise<Map<string, Map<string, Record<string, unknown>[]>>> => {
+    const relationEntries = await Promise.all(
+      getRelationConfigs(resourceConfig).map(async ([relationName, relationConfig]) => {
+        try {
+          const relationRows = await dbAdapter.queryRelation({
+            ...((relationConfig.schema ?? resourceConfig.schema)
+              ? { schema: relationConfig.schema ?? resourceConfig.schema }
+              : {}),
+            table: relationConfig.table,
+            foreignKey: relationConfig.foreignKey,
+            parentIds: getReferenceValues(batch, relationConfig.referenceKey),
+            fields: relationConfig.fields,
+            filter: relationConfig.filter,
+            orderBy: relationConfig.orderBy,
+          });
+          return [relationName, relationRows] as const;
+        } catch (error) {
+          throw new Error(
+            `Inventory relation "${relationName}" probe failed for table ` +
+              `"${relationConfig.table}": ${errorMessage(error)}`,
+          );
+        }
+      }),
+    );
+    return new Map(relationEntries);
+  };
+
+  const relationData = await loadRelationData(rows);
 
   // An empty catalog is valid. A sampled page where every row fails the exact
   // mapping and JSON wire contract signals a broken mapping (e.g. price
@@ -205,15 +217,17 @@ export async function probeInventoryResource(
   let wireContractViolationIds: string[] = [];
   const unservableImageIds: string[] = [];
   if (rows.length > 0) {
-    const relationData = new Map(relationEntries);
-    const evaluateRows = (sampleRows: Record<string, unknown>[]) => {
+    const evaluateRows = (
+      sampleRows: Record<string, unknown>[],
+      sampleRelationData: Map<string, Map<string, Record<string, unknown>[]>>,
+    ) => {
       const pageViolations: { externalId: string; error: string }[] = [];
       for (const row of sampleRows) {
         const externalId = String(resolveColumnValue(row, resourceConfig.idColumn) ?? '');
-        const mappedImageValues = getMappedImageValues(row, resourceConfig, relationData);
+        const mappedImageValues = getMappedImageValues(row, resourceConfig, sampleRelationData);
         try {
           validateInventoryItemWireContract(
-            mapRowToInventoryItem(row, resourceConfig, relationData),
+            mapRowToInventoryItem(row, resourceConfig, sampleRelationData),
             mappedImageValues,
           );
         } catch (error) {
@@ -231,7 +245,7 @@ export async function probeInventoryResource(
       return pageViolations;
     };
 
-    let violations = evaluateRows(rows);
+    let violations = evaluateRows(rows, relationData);
 
     if (violations.length === rows.length) {
       // One fully-invalid page is not enough evidence on its own: a
@@ -241,9 +255,14 @@ export async function probeInventoryResource(
       // concluding the resource itself is broken — only a second
       // fully-invalid page still proves a systematic mapping break (e.g.
       // price pointed at a text column, which fails every row on every
-      // page) (#25983).
+      // page) (#25983). That verdict must be evaluated against the page-2
+      // rows' own relation data, not page 1's: reusing page 1's relation map
+      // resolves every page-2 relation lookup to nothing, so a broken
+      // relation-sourced image value silently passes and the probe fails
+      // open exactly where this second sample exists to catch it.
       const { rows: nextRows } = await runProbeQuery([], DEFAULT_PAGE_SIZE, 2);
-      const nextViolations = nextRows.length > 0 ? evaluateRows(nextRows) : [];
+      const nextViolations =
+        nextRows.length > 0 ? evaluateRows(nextRows, await loadRelationData(nextRows)) : [];
 
       if (nextRows.length === 0 || nextViolations.length === nextRows.length) {
         throw new Error(`Inventory resource probe failed for sample row: ${violations[0]!.error}`);

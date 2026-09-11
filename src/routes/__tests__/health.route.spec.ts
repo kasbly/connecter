@@ -104,6 +104,7 @@ describe('health route', () => {
   it('probes configured columns and every relation before reporting healthy', async () => {
     const dbAdapter = createHealthAdapter(true);
     dbAdapter.queryRelation = vi.fn().mockResolvedValue(new Map());
+    dbAdapter.probeSearchableColumns = vi.fn().mockResolvedValue(undefined);
     const resource = {
       ...inventoryResource,
       baseFilter: 'published = true',
@@ -122,6 +123,7 @@ describe('health route', () => {
 
     await probeInventoryResource(dbAdapter, resource);
 
+    expect(dbAdapter.query).toHaveBeenCalledTimes(1);
     expect(dbAdapter.query).toHaveBeenNthCalledWith(
       1,
       'inventory',
@@ -131,22 +133,15 @@ describe('health route', () => {
       'published = true',
       expect.arrayContaining(['id', 'title', 'price', 'sku', 'condition']),
     );
-    expect(dbAdapter.query).toHaveBeenNthCalledWith(
-      2,
-      'inventory',
-      [
-        {
-          column: 'sku',
-          operator: 'ILIKE',
-          value: SEARCHABLE_COLUMN_PROBE_TERM,
-          _group: SEARCHABLE_COLUMN_PROBE_TERM,
-        },
-      ],
-      { page: 1, pageSize: 1 },
-      { column: 'id', direction: 'desc' },
-      'published = true',
-      expect.arrayContaining(['id', 'title', 'price', 'sku', 'condition']),
-    );
+    // The searchable-column check is a dedicated zero-row probe, not a second
+    // real page query — it must never re-enter `dbAdapter.query` (#26342).
+    expect(dbAdapter.probeSearchableColumns).toHaveBeenCalledTimes(1);
+    expect(dbAdapter.probeSearchableColumns).toHaveBeenCalledWith({
+      table: 'inventory',
+      columns: ['sku'],
+      probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
+      baseFilter: 'published = true',
+    });
     expect(dbAdapter.queryRelation).toHaveBeenCalledWith({
       table: 'images',
       foreignKey: 'inventory_id',
@@ -157,21 +152,15 @@ describe('health route', () => {
     });
   });
 
-  it('fails the resource when a searchable column cannot be used with ILIKE', async () => {
+  it('fails the resource when a searchable column cannot be used with ILIKE, via a non-executing probe (#26342)', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(true);
-    vi.mocked(dbAdapter.query).mockImplementation(async (_table, conditions) => {
-      if (
-        conditions.some(
-          (condition) => condition.operator === 'ILIKE' && condition.column === 'state',
-        )
-      ) {
-        throw Object.assign(new Error('operator does not exist: integer ~~* unknown'), {
-          code: '42883',
-        });
-      }
-      return { rows: [{ id: '1', title: 'Item', price: 100, name: 'Item', state: 1 }], total: 1 };
-    });
+    const probeSearchableColumns = vi.fn().mockRejectedValue(
+      Object.assign(new Error('operator does not exist: integer ~~* unknown'), {
+        code: '42883',
+      }),
+    );
+    dbAdapter.probeSearchableColumns = probeSearchableColumns;
     registerHealthRoute(
       app,
       dbAdapter,
@@ -183,6 +172,17 @@ describe('health route', () => {
 
     const response = await app.inject({ method: 'GET', url: '/health' });
 
+    // The probe never touches `dbAdapter.query` a second time — it is a
+    // dedicated, non-executing statement (no page query, no count query) —
+    // yet it still surfaces the operator-resolution error for a non-text
+    // column so a `state` (integer) column pointed at as searchable is still
+    // caught.
+    expect(dbAdapter.query).toHaveBeenCalledTimes(1);
+    expect(probeSearchableColumns).toHaveBeenCalledWith({
+      table: 'inventory',
+      columns: ['name', 'state'],
+      probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
+    });
     expect(response.statusCode).toBe(503);
     expect(response.json()).toMatchObject({
       status: 'degraded',
@@ -455,6 +455,76 @@ describe('health route', () => {
       resources: 'misconfigured',
       resourceError: expect.stringContaining('price'),
     });
+    await app.close();
+  });
+
+  it('fails the resource when every sampled row on both pages carries a malformed relation image value', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query)
+      .mockResolvedValueOnce({
+        rows: [
+          { id: '1', title: 'Listing 1', price: 100 },
+          { id: '2', title: 'Listing 2', price: 200 },
+        ],
+        total: 4,
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { id: '3', title: 'Listing 3', price: 300 },
+          { id: '4', title: 'Listing 4', price: 400 },
+        ],
+        total: 4,
+      });
+    dbAdapter.queryRelation = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Map([
+          ['1', [{ image_url: { url: 'https://example.com/a.jpg' } }]],
+          ['2', [{ image_url: { url: 'https://example.com/b.jpg' } }]],
+        ]),
+      )
+      .mockResolvedValueOnce(
+        new Map([
+          ['3', [{ image_url: { url: 'https://example.com/c.jpg' } }]],
+          ['4', [{ image_url: { url: 'https://example.com/d.jpg' } }]],
+        ]),
+      );
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        relations: {
+          photos: {
+            table: 'images',
+            foreignKey: 'inventory_id',
+            referenceKey: 'id',
+            fields: { image_url: 'image_url' },
+            imageUrlField: 'image_url',
+          },
+        },
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+
+    // Every row on both pages has a relation image value that is a jsonb
+    // object rather than a string, which the wire contract rejects as
+    // malformed. Evaluating page 2 against page 1's relation data (keyed by
+    // ids "1"/"2") would resolve every page-2 lookup to no relation rows,
+    // hide the malformed value, and let the probe fail open exactly where
+    // this second-page check exists to catch it (residual of #25983).
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      resources: 'misconfigured',
+      resourceError: expect.stringContaining('images'),
+    });
+    expect(dbAdapter.queryRelation).toHaveBeenCalledTimes(2);
+    expect(dbAdapter.queryRelation).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ parentIds: ['3', '4'] }),
+    );
     await app.close();
   });
 

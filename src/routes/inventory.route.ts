@@ -62,11 +62,43 @@ function mapValidatedInventoryItem(
  */
 const MAX_BACKFILL_FETCHES = 4;
 
+/**
+ * Bound on how many distinct (conditions, sort, pageSize) shapes {@link
+ * registerInventoryRoutes} remembers a raw-offset boundary for. Only shapes
+ * that actually hit a wire-contract backfill ever get an entry, so in
+ * practice this caps memory for merchants whose feed keeps producing invalid
+ * rows across many distinct searches/filters, not normal traffic.
+ */
+const MAX_BACKFILL_CURSOR_ENTRIES = 200;
+
+/** Where page `afterPage`'s raw scan for a given query shape left off. */
+interface BackfillCursor {
+  afterPage: number;
+  rawOffset: number;
+}
+
 export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDeps): void {
   const { dbAdapter, resourceConfig, getResourceHealth } = deps;
 
   // Pre-compute the columns we need — avoids SELECT * on every request
   const selectColumns = getRequiredColumns(resourceConfig);
+
+  // Remembers, per (conditions, sort, pageSize) shape, the raw row offset
+  // where the most recently served page's scan stopped. Populated only when
+  // a page's wire-contract backfill (#25984) pulls rows from beyond its own
+  // page-sized raw window, so a later request for the next page can resume
+  // the raw scan exactly there instead of re-deriving offset from `page` and
+  // re-serving rows already handed out on the previous page (#26344).
+  const backfillCursors = new Map<string, BackfillCursor>();
+
+  const cacheBackfillCursor = (key: string, cursor: BackfillCursor): void => {
+    backfillCursors.delete(key);
+    backfillCursors.set(key, cursor);
+    if (backfillCursors.size > MAX_BACKFILL_CURSOR_ENTRIES) {
+      const oldestKey = backfillCursors.keys().next().value;
+      if (oldestKey !== undefined) backfillCursors.delete(oldestKey);
+    }
+  };
 
   const requireReadyInventoryResource = async (
     _request: FastifyRequest,
@@ -119,10 +151,14 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       };
 
       // Fetch relations for and wire-contract-validate one raw batch of rows.
+      // `validRawIndexes[i]` is the position within `rows` that produced
+      // `items[i]`, so a caller can tell exactly how many raw rows a target
+      // number of valid rows consumed — needed to compute the backfill cursor
+      // below without re-deriving validity from scratch.
       const validateRows = async (
         rows: Record<string, unknown>[],
-      ): Promise<ConnectorInventoryItem[]> => {
-        if (rows.length === 0) return [];
+      ): Promise<{ items: ConnectorInventoryItem[]; validRawIndexes: number[] }> => {
+        if (rows.length === 0) return { items: [], validRawIndexes: [] };
 
         const relationData = new Map<string, Map<string, Record<string, unknown>[]>>();
         if (relationConfigs.length > 0) {
@@ -148,10 +184,12 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
           }
         }
 
-        const validated: ConnectorInventoryItem[] = [];
-        for (const row of rows) {
+        const items: ConnectorInventoryItem[] = [];
+        const validRawIndexes: number[] = [];
+        rows.forEach((row, index) => {
           try {
-            validated.push(mapValidatedInventoryItem(row, resourceConfig, relationData));
+            items.push(mapValidatedInventoryItem(row, resourceConfig, relationData));
+            validRawIndexes.push(index);
           } catch (error) {
             request.log.warn(
               {
@@ -161,15 +199,57 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
               'Omitting inventory item that violates the wire contract',
             );
           }
-        }
-        return validated;
+        });
+        return { items, validRawIndexes };
       };
 
-      const first = await runQuery(pagination);
+      // Given the raw batches fetched for this request (in fetch order), find
+      // how many raw rows — starting from the first batch — were needed to
+      // produce `target` valid rows. Returns the full raw row count fetched
+      // if the batches never reach `target` (the result set was exhausted
+      // first), which is exactly the boundary the next page must resume
+      // after either way.
+      const rawRowsConsumedForTarget = (
+        batches: { rawLength: number; validRawIndexes: number[] }[],
+        target: number,
+      ): number => {
+        let validSoFar = 0;
+        let rawSoFar = 0;
+        for (const batch of batches) {
+          if (validSoFar + batch.validRawIndexes.length >= target) {
+            const neededFromBatch = target - validSoFar;
+            if (neededFromBatch <= 0) return rawSoFar;
+            const rawIndexWithinBatch = batch.validRawIndexes[neededFromBatch - 1]!;
+            return rawSoFar + rawIndexWithinBatch + 1;
+          }
+          validSoFar += batch.validRawIndexes.length;
+          rawSoFar += batch.rawLength;
+        }
+        return rawSoFar;
+      };
+
+      // The requested page's raw window is normally `(page - 1) * pageSize`,
+      // but if the previous page's backfill (#25984) had to borrow rows past
+      // its own page-sized window, those rows are already served — resuming
+      // at the naive offset would serve them again on this page too (#26344).
+      // Resume from the remembered boundary instead, when this request is
+      // for the page right after the one that produced it.
+      const cursorKey = JSON.stringify({ conditions, sort, pageSize: pagination.pageSize });
+      const cachedCursor = backfillCursors.get(cursorKey);
+      const startOffset =
+        pagination.page > 1 && cachedCursor?.afterPage === pagination.page - 1
+          ? cachedCursor.rawOffset
+          : (pagination.page - 1) * pagination.pageSize;
+
+      const first = await runQuery({ ...pagination, rawOffset: startOffset });
       const { total, totalIsCapped } = first;
 
       let rowsExamined = first.rows.length;
-      let validated = await validateRows(first.rows);
+      const firstValidation = await validateRows(first.rows);
+      let validated = firstValidation.items;
+      const batches: { rawLength: number; validRawIndexes: number[] }[] = [
+        { rawLength: first.rows.length, validRawIndexes: firstValidation.validRawIndexes },
+      ];
       // A raw batch shorter than what was asked for means the underlying
       // result set ran out — there is nothing left to page in.
       let exhausted = first.rows.length < pagination.pageSize;
@@ -187,14 +267,33 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
         const backfillPage: PaginationOptions = {
           page: pagination.page + extraFetch + 1,
           pageSize: pagination.pageSize,
+          rawOffset: startOffset + (extraFetch + 1) * pagination.pageSize,
         };
         const backfill = await runQuery(backfillPage);
         rowsExamined += backfill.rows.length;
-        validated = validated.concat(await validateRows(backfill.rows));
+        const backfillValidation = await validateRows(backfill.rows);
+        validated = validated.concat(backfillValidation.items);
+        batches.push({
+          rawLength: backfill.rows.length,
+          validRawIndexes: backfillValidation.validRawIndexes,
+        });
         exhausted = backfill.rows.length < pagination.pageSize;
       }
 
       const items = validated.slice(0, pagination.pageSize);
+
+      // Record exactly how many raw rows (from `startOffset`) this page
+      // consumed, so a request for the next page resumes right after them
+      // instead of re-deriving an offset that overlaps rows already served
+      // above (#26344). A short/exhausted page has no next page to resume,
+      // so there is nothing worth caching.
+      if (items.length === pagination.pageSize) {
+        const consumedRaw = rawRowsConsumedForTarget(batches, items.length);
+        cacheBackfillCursor(cursorKey, {
+          afterPage: pagination.page,
+          rawOffset: startOffset + consumedRaw,
+        });
+      }
 
       // Rows withheld for a wire-contract violation (#24913) are never served,
       // so they must not be advertised either: callers render `total` as the
