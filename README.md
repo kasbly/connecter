@@ -111,6 +111,20 @@ Results are always ordered by the requested sort column and then by
 pages disjoint when many rows share the sort value — for example a catalogue
 whose rows all carry the same `updated_at` after a nightly import.
 
+Both keys sort `DESC NULLS LAST`, which is not PostgreSQL's default for a
+`DESC` sort (`NULLS FIRST`) — so a plain `btree(column)` index cannot serve
+this query, and every page falls back to sorting your whole table. Only a
+composite index built with the same `DESC NULLS LAST` clause can. `npm run
+setup` prints this statement for your actual table/columns at the end of the
+wizard; for the example config above it would be:
+
+```sql
+CREATE INDEX CONCURRENTLY kasbly_connector_sort_idx ON "public"."Car" ("updatedAt" DESC NULLS LAST, "id" DESC);
+```
+
+The connector runs with `default_transaction_read_only = ON`, so it can never
+create this index itself — run it against your database by hand.
+
 Example:
 
 ```bash

@@ -390,24 +390,50 @@ describe('inventory routes', () => {
 
     const page1Response = await app.inject({ method: 'GET', url: '/inventory?page=1&pageSize=20' });
     const page2Response = await app.inject({ method: 'GET', url: '/inventory?page=2&pageSize=20' });
+    // A retry of page 2 before any later page must not fall back to the naive
+    // offset just because serving page 2 overwrote a single per-shape cursor
+    // (#26519).
+    const page2RepeatResponse = await app.inject({
+      method: 'GET',
+      url: '/inventory?page=2&pageSize=20',
+    });
+    const page3Response = await app.inject({ method: 'GET', url: '/inventory?page=3&pageSize=20' });
+    // Back-navigation after page 3 must still resume from page 1's boundary,
+    // not the naive offset that would re-serve the rows page 1 borrowed.
+    const page2AfterPage3Response = await app.inject({
+      method: 'GET',
+      url: '/inventory?page=2&pageSize=20',
+    });
 
     expect(page1Response.statusCode).toBe(200);
     expect(page2Response.statusCode).toBe(200);
+    expect(page2RepeatResponse.statusCode).toBe(200);
+    expect(page3Response.statusCode).toBe(200);
+    expect(page2AfterPage3Response.statusCode).toBe(200);
 
-    const page1Ids = (page1Response.json() as { items: { externalId: string }[] }).items.map(
-      (item) => item.externalId,
-    );
-    const page2Ids = (page2Response.json() as { items: { externalId: string }[] }).items.map(
-      (item) => item.externalId,
-    );
+    const itemIds = (payload: string) =>
+      (JSON.parse(payload) as { items: { externalId: string }[] }).items.map(
+        (item) => item.externalId,
+      );
+    const page1Ids = itemIds(page1Response.payload);
+    const page2Ids = itemIds(page2Response.payload);
+    const page2RepeatIds = itemIds(page2RepeatResponse.payload);
+    const page3Ids = itemIds(page3Response.payload);
+    const page2AfterPage3Ids = itemIds(page2AfterPage3Response.payload);
 
     expect(page1Ids).toHaveLength(20);
     expect(page2Ids).toHaveLength(20);
+    expect(page3Ids).toHaveLength(20);
 
-    // The union of both pages' item ids must contain no duplicates.
+    // The union of consecutive pages' item ids must contain no duplicates.
     const overlap = page1Ids.filter((id) => page2Ids.includes(id));
     expect(overlap).toEqual([]);
     expect(new Set([...page1Ids, ...page2Ids]).size).toBe(page1Ids.length + page2Ids.length);
+    expect(page2Ids.filter((id) => page3Ids.includes(id))).toEqual([]);
+    expect(page1Ids.filter((id) => page3Ids.includes(id))).toEqual([]);
+
+    expect(page2RepeatIds).toEqual(page2Ids);
+    expect(page2AfterPage3Ids).toEqual(page2Ids);
 
     await app.close();
   });

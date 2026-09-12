@@ -974,6 +974,24 @@ export async function runWizard(): Promise<void> {
         'attribute) or set a listing URL template on the source in Kasbly.',
     );
   }
+  // GET /inventory (and the /health sample it shares) always sorts `<sortColumn> DESC
+  // NULLS LAST, <idColumn> DESC` (postgres.adapter.ts's buildOrderByClause) — Postgres'
+  // default DESC sort is NULLS FIRST, so only this exact composite index can serve that
+  // order. A plain btree(sortColumn) index cannot. The connector runs read-only and can
+  // never create it itself, so print the statement for the operator to run by hand.
+  const sortIndexColumn = updatedAtColumn ?? idColumn;
+  const sortIndexClause =
+    sortIndexColumn === idColumn
+      ? `${quoteIfNeeded(sortIndexColumn)} DESC NULLS LAST`
+      : `${quoteIfNeeded(sortIndexColumn)} DESC NULLS LAST, ${quoteIfNeeded(idColumn)} DESC`;
+  console.log(
+    '   Create this index so GET /inventory can use it (the connector is read-only and ' +
+      'cannot create it itself); without it, every inventory page sorts the whole table:',
+  );
+  console.log(
+    `   CREATE INDEX CONCURRENTLY kasbly_connector_sort_idx ON ` +
+      `${quoteIfNeeded(selectedSchema)}.${quoteIfNeeded(selectedTableName)} (${sortIndexClause});`,
+  );
   console.log('');
 
   await db.destroy();
@@ -1151,13 +1169,17 @@ export function serializeEnvValue(value: string): string {
     return `'${value}'`;
   }
 
-  if (!value.includes('`')) {
-    return `\`${value}\``;
-  }
-
-  if (!value.includes('"')) {
+  // Backticks are dotenv-only quoting: Docker Compose's `env_file` parser does
+  // not strip them, so a value containing `'` must go straight to double
+  // quotes instead (#26518). Guard those against `"` and `\` too — dotenv
+  // keeps `\"`/`\\` literal while Compose unescapes them, the other point
+  // where the two parsers diverge.
+  if (!/["\\]/.test(value)) {
     return `"${value}"`;
   }
 
-  throw new Error('Environment value contains every supported dotenv quote delimiter');
+  throw new Error(
+    'Environment value contains both a single quote and a double quote or backslash; ' +
+      'no quoting works in both dotenv and Docker Compose env_file — set this variable manually.',
+  );
 }

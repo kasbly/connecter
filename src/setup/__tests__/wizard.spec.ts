@@ -432,6 +432,21 @@ describe('serializeEnvValue', () => {
       expect(parse(`DB_PASSWORD=${serializeEnvValue(value)}\n`).DB_PASSWORD).toBe(value);
     },
   );
+
+  it('double-quotes a value containing a single quote instead of using dotenv-only backticks', () => {
+    // Backticks are dotenv-only quoting: Docker Compose's `env_file` parser
+    // does not strip them and keeps the literal characters in the value
+    // (#26518). Double quotes are the one delimiter both parsers agree on.
+    expect(serializeEnvValue("R3ad'Only!")).toBe('"R3ad\'Only!"');
+    expect(serializeEnvValue("R3ad'Only!")).not.toContain('`');
+  });
+
+  it.each(['a\'b"c', "a'b\\c"])(
+    'throws instead of writing an unparseable value %j when a single quote collides with a double quote or backslash',
+    (value) => {
+      expect(() => serializeEnvValue(value)).toThrow(/single quote.*double quote or backslash/);
+    },
+  );
 });
 
 describe('runWizard', () => {
@@ -1430,6 +1445,7 @@ describe('runWizard', () => {
               { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
               { name: 'published', type: 'boolean', nullable: false, isPrimaryKey: false },
               { name: 'deleted_at', type: 'timestamp', nullable: true, isPrimaryKey: false },
+              { name: 'updatedAt', type: 'timestamp', nullable: true, isPrimaryKey: false },
               { name: 'makeEn', type: 'text', nullable: true, isPrimaryKey: false },
               { name: 'year', type: 'integer', nullable: true, isPrimaryKey: false },
               { name: 'legacy_attribute', type: 'text', nullable: true, isPrimaryKey: false },
@@ -1525,6 +1541,16 @@ describe('runWizard', () => {
       expect(consoleLog).toHaveBeenCalledWith(
         expect.stringContaining(
           'No status column mapped: every listing will be reported as ACTIVE',
+        ),
+      );
+      // GET /inventory sorts by updatedAtColumn (here auto-suggested from the
+      // `updatedAt` column) then idColumn DESC — only a composite index built with
+      // that exact DESC NULLS LAST clause can serve it (#26520).
+      expect(inventory['updatedAtColumn']).toBe('"updatedAt"');
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'CREATE INDEX CONCURRENTLY kasbly_connector_sort_idx ON "merchant_data"."products" ' +
+            '("updatedAt" DESC NULLS LAST, "id" DESC);',
         ),
       );
     } finally {
@@ -1849,6 +1875,16 @@ describe('runWizard', () => {
       );
       expect(consoleLog).toHaveBeenCalledWith(
         expect.stringContaining('the rest use the unknown-status policy chosen next'),
+      );
+      // No updatedAtColumn is configured here, so the sort collapses onto idColumn
+      // alone — the same column would otherwise appear twice in the ORDER BY/index
+      // (buildOrderByClause drops a tiebreaker equal to the sort column itself).
+      expect(inventory).not.toHaveProperty('updatedAtColumn');
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'CREATE INDEX CONCURRENTLY kasbly_connector_sort_idx ON "catalog"."products" ' +
+            '("id" DESC NULLS LAST);',
+        ),
       );
     } finally {
       consoleLog.mockRestore();

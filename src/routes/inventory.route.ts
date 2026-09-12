@@ -63,8 +63,8 @@ function mapValidatedInventoryItem(
 const MAX_BACKFILL_FETCHES = 4;
 
 /**
- * Bound on how many distinct (conditions, sort, pageSize) shapes {@link
- * registerInventoryRoutes} remembers a raw-offset boundary for. Only shapes
+ * Bound on how many distinct (conditions, sort, pageSize, page) boundaries
+ * {@link registerInventoryRoutes} remembers a raw-offset for. Only pages
  * that actually hit a wire-contract backfill ever get an entry, so in
  * practice this caps memory for merchants whose feed keeps producing invalid
  * rows across many distinct searches/filters, not normal traffic.
@@ -83,12 +83,13 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
   // Pre-compute the columns we need — avoids SELECT * on every request
   const selectColumns = getRequiredColumns(resourceConfig);
 
-  // Remembers, per (conditions, sort, pageSize) shape, the raw row offset
-  // where the most recently served page's scan stopped. Populated only when
-  // a page's wire-contract backfill (#25984) pulls rows from beyond its own
-  // page-sized raw window, so a later request for the next page can resume
-  // the raw scan exactly there instead of re-deriving offset from `page` and
-  // re-serving rows already handed out on the previous page (#26344).
+  // Remembers, per (conditions, sort, pageSize, page) boundary, the raw row
+  // offset where that page's scan stopped. Populated only when a page's
+  // wire-contract backfill (#25984) pulls rows from beyond its own page-sized
+  // raw window, so a later request for the next page — or a retry of that
+  // next page after later traffic for the same shape — can resume the raw
+  // scan exactly there instead of re-deriving offset from `page` and
+  // re-serving rows already handed out (#26344, #26519).
   const backfillCursors = new Map<string, BackfillCursor>();
 
   const cacheBackfillCursor = (key: string, cursor: BackfillCursor): void => {
@@ -232,14 +233,14 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       // but if the previous page's backfill (#25984) had to borrow rows past
       // its own page-sized window, those rows are already served — resuming
       // at the naive offset would serve them again on this page too (#26344).
-      // Resume from the remembered boundary instead, when this request is
-      // for the page right after the one that produced it.
+      // Resume from the remembered (shape, page) boundary (#26519) instead of
+      // a single per-shape cursor that later pages would overwrite.
       const cursorKey = JSON.stringify({ conditions, sort, pageSize: pagination.pageSize });
-      const cachedCursor = backfillCursors.get(cursorKey);
+      const boundaryKey = (page: number) => `${cursorKey}|${page}`;
       const startOffset =
-        pagination.page > 1 && cachedCursor?.afterPage === pagination.page - 1
-          ? cachedCursor.rawOffset
-          : (pagination.page - 1) * pagination.pageSize;
+        (pagination.page > 1
+          ? backfillCursors.get(boundaryKey(pagination.page - 1))?.rawOffset
+          : undefined) ?? (pagination.page - 1) * pagination.pageSize;
 
       const first = await runQuery({ ...pagination, rawOffset: startOffset });
       const { total, totalIsCapped } = first;
@@ -289,7 +290,7 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       // so there is nothing worth caching.
       if (items.length === pagination.pageSize) {
         const consumedRaw = rawRowsConsumedForTarget(batches, items.length);
-        cacheBackfillCursor(cursorKey, {
+        cacheBackfillCursor(boundaryKey(pagination.page), {
           afterPage: pagination.page,
           rawOffset: startOffset + consumedRaw,
         });
