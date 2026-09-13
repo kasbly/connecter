@@ -681,8 +681,8 @@ describe('PostgresAdapter list count (#17420)', () => {
       dataRows: [{ id: '1', price: 10, color: 'White' }],
     });
 
-    expect(dataQuery.sql).toContain(`color ILIKE ? ESCAPE '\\'`);
-    expect(countQuery.sql).toContain(`color ILIKE ? ESCAPE '\\'`);
+    expect(dataQuery.sql).toContain(`color::text ILIKE ? ESCAPE '\\'`);
+    expect(countQuery.sql).toContain(`color::text ILIKE ? ESCAPE '\\'`);
     expect(dataQuery.sql).not.toContain('color = ?');
     expect(countQuery.sql).not.toContain('color = ?');
     // ILIKE with no %/_ wildcards is exact equality, case-insensitive (#25604).
@@ -698,10 +698,29 @@ describe('PostgresAdapter list count (#17420)', () => {
 
     const { countQuery, dataQuery } = await runListQuery({ count: 1, conditions });
 
-    expect(dataQuery.sql).toContain(`color ILIKE ? ESCAPE '\\'`);
-    expect(countQuery.sql).toContain(`color ILIKE ? ESCAPE '\\'`);
+    expect(dataQuery.sql).toContain(`color::text ILIKE ? ESCAPE '\\'`);
+    expect(countQuery.sql).toContain(`color::text ILIKE ? ESCAPE '\\'`);
     expect(dataQuery.bindings[0]).toBe(String.raw`50\%\_off\\white`);
     expect(countQuery.bindings[0]).toBe(String.raw`50\%\_off\\white`);
+  });
+
+  it('casts the column to text for a `type: string` filter against an enum column, so ILIKE has an operator to resolve (#26694)', async () => {
+    // Postgres has no `~~*` operator for an enum column (e.g. `fuel_kind`):
+    // `fuel ILIKE 'petrol'` raises 42883, even though plain `fuel = 'petrol'`
+    // works because Postgres coerces the unknown literal. `::text` mirrors the
+    // cast the `IN` branch already applies for enum/integer status columns.
+    const conditions: QueryCondition[] = [{ column: 'fuel', operator: '=', value: 'petrol' }];
+
+    const { countQuery, dataQuery } = await runListQuery({
+      count: 1,
+      conditions,
+      dataRows: [{ id: '1', price: 10, fuel: 'Petrol' }],
+    });
+
+    expect(dataQuery.sql).toContain(`fuel::text ILIKE ? ESCAPE '\\'`);
+    expect(countQuery.sql).toContain(`fuel::text ILIKE ? ESCAPE '\\'`);
+    expect(dataQuery.bindings[0]).toBe('petrol');
+    expect(countQuery.bindings[0]).toBe('petrol');
   });
 
   it('applies IN filters with their bindings to both data and bounded count queries', async () => {

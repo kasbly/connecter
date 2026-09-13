@@ -76,10 +76,15 @@ All endpoints (except `/health`) require an `X-API-Key` header.
 
 ### `GET /health`
 
-Returns service status, database connectivity, whether the configured inventory
-resource can be queried, and audit-log persistence. The resource check is cached
-briefly to keep health checks lightweight. A failed mapping check or an enabled audit
-log that cannot write, rotate, or prune returns HTTP 503 with an operator-facing error.
+Returns a liveness verdict only: service status, database connectivity, whether the
+configured inventory resource can be queried, and audit-log persistence — no
+diagnostic detail. The resource check is cached briefly to keep health checks
+lightweight. A failed mapping check or an enabled audit log that cannot write, rotate,
+or prune returns HTTP 503, but the _why_ is not in this response: `/health` is the
+connector's one unauthenticated route, so it never echoes the driver error text (which
+would otherwise embed the generated SQL, your schema/table name, and the full mapped
+column list), unmapped source status values, or catalogue-derived listing ids to an
+anonymous caller (#26697). Fetch `GET /diagnostics` with your API key for that detail.
 
 ```json
 {
@@ -88,6 +93,27 @@ log that cannot write, rotate, or prune returns HTTP 503 with an operator-facing
   "database": "connected",
   "resources": "ok",
   "audit": "ok",
+  "uptime": 42
+}
+```
+
+### `GET /diagnostics`
+
+Same liveness verdict as `GET /health`, plus the operator-facing detail behind it:
+`resourceError` (the driver error from a failed inventory probe), `auditError`,
+`auditLastSuccessfulAppendAt`, `unknownStatusValues`, `wireContractViolationIds`, and
+`unservableImageIds`. Requires an `X-API-Key` header like every other endpoint. Kasbly's
+Test-connection and connectivity-health checks call this automatically when a read
+fails; use it yourself when troubleshooting a merchant's mapping.
+
+```json
+{
+  "status": "degraded",
+  "version": "1.0.0",
+  "database": "connected",
+  "resources": "misconfigured",
+  "audit": "ok",
+  "resourceError": "Inventory resource probe failed for table \"cars\" (columns: id, title, price): column \"price\" does not exist",
   "uptime": 42
 }
 ```
@@ -331,7 +357,7 @@ listing as `ACTIVE`: an absent mapping is read as "this catalog is entirely live
 Once a status column **is** mapped, a source value that none of the `statusValues` lists recognize
 is treated as drift rather than a declaration. Those rows are reported as `unknownStatusPolicy`
 (default `DRAFT`) and stay out of customer-facing search until you add the value to `statusValues`.
-`/health` names any such values under `unknownStatusValues`.
+`/diagnostics` names any such values under `unknownStatusValues`.
 
 Status filters use the same mapping: `filter.status=SOLD` queries every source value configured
 under `statusValues.SOLD`. A token with no configured source values returns an empty page rather

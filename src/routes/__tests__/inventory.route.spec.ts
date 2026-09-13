@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
-import type { DatabaseAdapter, QueryResult } from '../../db/adapter.interface.js';
+import type { DatabaseAdapter, QueryCondition, QueryResult } from '../../db/adapter.interface.js';
 import type { InventoryResourceConfig } from '../../config/config.types.js';
 import { registerInventoryRoutes } from '../inventory.route.js';
 
@@ -434,6 +434,153 @@ describe('inventory routes', () => {
 
     expect(page2RepeatIds).toEqual(page2Ids);
     expect(page2AfterPage3Ids).toEqual(page2Ids);
+
+    await app.close();
+  });
+
+  it('GET /inventory does not cache a backfill cursor for a page that never backfilled, so unrelated search traffic cannot evict a genuine one (#26696)', async () => {
+    // Primary shape: pageSize 20, three invalid raw rows (3, 7, 11) inside
+    // page 1's raw window force a genuine backfill that borrows rows 21-23 —
+    // rawOffset 23, not the naive 20 — exactly like the #26344 scenario above.
+    const totalRawRows = 100;
+    const invalidRawIds = new Set(['3', '7', '11']);
+    const primaryRawRows = Array.from({ length: totalRawRows }, (_, i) => {
+      const id = String(i + 1);
+      return invalidRawIds.has(id)
+        ? { id, name: 'Bad Row', price: 'TBD', updatedAt: '2026-01-01T00:00:00Z' }
+        : { id, name: `Good Row ${id}`, price: 9.99, updatedAt: '2026-01-01T00:00:00Z' };
+    });
+
+    const query = vi.fn().mockImplementation((_table, conditions: QueryCondition[], pagination) => {
+      const category = conditions.find((condition) => condition.column === 'category')?.value;
+      if (category === 'primary') {
+        const offset = pagination.rawOffset ?? (pagination.page - 1) * pagination.pageSize;
+        return Promise.resolve({
+          rows: primaryRawRows.slice(offset, offset + pagination.pageSize),
+          total: totalRawRows,
+        });
+      }
+      // Noise shape: a clean, entirely-valid full page that never backfills —
+      // per the fix, this must never occupy a `backfillCursors` slot.
+      return Promise.resolve({
+        rows: Array.from({ length: pagination.pageSize }, (_, i) => ({
+          id: `${String(category)}-${i}`,
+          name: 'Clean Row',
+          price: 9.99,
+          updatedAt: '2026-01-01T00:00:00Z',
+        })),
+        total: 1000,
+      });
+    });
+    const mockAdapter = createMockDbAdapter({ query });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const itemIds = (payload: string) =>
+      (JSON.parse(payload) as { items: { externalId: string }[] }).items.map(
+        (item) => item.externalId,
+      );
+
+    const page1Response = await app.inject({
+      method: 'GET',
+      url: '/inventory?filter.category=primary&page=1&pageSize=20',
+    });
+    const page1Ids = itemIds(page1Response.payload);
+    expect(page1Ids).toHaveLength(20);
+
+    // 250 unrelated, non-backfilling full-page requests — comfortably past
+    // the 200-entry cap. Before #26696's fix, each of these occupied a
+    // `backfillCursors` slot as a no-op entry and would have evicted the
+    // primary shape's genuine cursor long before this loop finishes.
+    for (let i = 0; i < 250; i++) {
+      const noiseResponse = await app.inject({
+        method: 'GET',
+        url: `/inventory?filter.category=noise-${i}&page=1&pageSize=20`,
+      });
+      expect(noiseResponse.statusCode).toBe(200);
+    }
+
+    const page2Response = await app.inject({
+      method: 'GET',
+      url: '/inventory?filter.category=primary&page=2&pageSize=20',
+    });
+    const page2Ids = itemIds(page2Response.payload);
+
+    expect(page2Ids).toHaveLength(20);
+    // If the primary shape's genuine cursor had been evicted by the noise
+    // traffic, page 2 would fall back to the naive offset (20) and re-serve
+    // the raw rows (21-23) that page 1's backfill already borrowed.
+    expect(page1Ids.filter((id) => page2Ids.includes(id))).toEqual([]);
+
+    await app.close();
+  });
+
+  it('GET /inventory keeps subtracting withheld rows from total on later pages (#26695)', async () => {
+    // 60 raw listings, newest-first. Ids 45-60 fail the wire contract (the
+    // #25984 "bad import at the top of updated_at DESC" case). Page 1
+    // back-fills past them and correctly advertises 44/9; later pages must
+    // keep that servable total instead of snapping back to the raw SQL 60/12.
+    // A caller that walks the advertised totalPages would otherwise re-serve
+    // already-returned items once the short last real page has no cursor.
+    const totalRawRows = 60;
+    const pageSize = 5;
+    const servableTotal = 44;
+    const rawRows = Array.from({ length: totalRawRows }, (_, i) => {
+      const id = totalRawRows - i;
+      return id >= 45
+        ? { id: String(id), name: 'Bad Row', price: 'TBD', updatedAt: '2026-01-01T00:00:00Z' }
+        : {
+            id: String(id),
+            name: `Good Row ${id}`,
+            price: 9.99,
+            updatedAt: '2026-01-01T00:00:00Z',
+          };
+    });
+    const query = vi.fn().mockImplementation((_table, _conditions, pagination) => {
+      const offset = pagination.rawOffset ?? (pagination.page - 1) * pagination.pageSize;
+      return Promise.resolve({
+        rows: rawRows.slice(offset, offset + pagination.pageSize),
+        total: totalRawRows,
+      });
+    });
+    const mockAdapter = createMockDbAdapter({ query });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const servedIds: string[] = [];
+    let page = 1;
+    let advertisedPages = 1;
+    do {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/inventory?page=${page}&pageSize=${pageSize}`,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json() as {
+        items: { externalId: string }[];
+        total: number;
+        totalPages: number;
+      };
+      expect(body.total).toBe(servableTotal);
+      expect(body.totalPages).toBe(Math.ceil(servableTotal / pageSize));
+      servedIds.push(...body.items.map((item) => item.externalId));
+      advertisedPages = body.totalPages;
+      page += 1;
+    } while (page <= advertisedPages);
+
+    expect(servedIds).toHaveLength(servableTotal);
+    expect(new Set(servedIds).size).toBe(servableTotal);
+    expect(servedIds).toEqual(
+      Array.from({ length: servableTotal }, (_, i) => String(servableTotal - i)),
+    );
 
     await app.close();
   });

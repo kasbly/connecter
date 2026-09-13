@@ -116,6 +116,16 @@ export async function probeInventoryResource(
   // inventory response, but they are column expressions the resource can use.
   // Include them in the probe so startup catches those latent mapping errors.
   const searchableColumns = resourceConfig.searchableColumns ?? [];
+  // `type: string` filters run through the same `ILIKE` case-insensitive
+  // match as a searchable column (`applyBaseFilterAndConditions`'s `=`
+  // branch), so a `filterableColumns` entry mapped to a non-text column
+  // (enum/uuid/date) is exactly as exposed to `42883` as a searchable one —
+  // fold it into the same operator probe below instead of only proving the
+  // column exists via SELECT (#26694).
+  const stringFilterColumns = Object.values(resourceConfig.filterableColumns ?? {})
+    .filter((filterConfig) => filterConfig.type === 'string')
+    .map(({ column }) => column);
+  const operatorProbeColumns = Array.from(new Set([...searchableColumns, ...stringFilterColumns]));
   const selectColumns = Array.from(
     new Set([
       ...getRequiredColumns(resourceConfig),
@@ -150,16 +160,17 @@ export async function probeInventoryResource(
 
   try {
     ({ rows } = await runProbeQuery([], DEFAULT_PAGE_SIZE));
-    // Selecting a searchable column only proves it exists. Real search emits
-    // `ILIKE` per column, which PostgreSQL rejects for integer/enum/uuid/date
-    // (`42883`). This forces that operator resolution as a zero-row
-    // `WHERE FALSE` check — never a real query over the merchant's table
-    // (#26342) — rather than emptying the mapping sample.
-    if (searchableColumns.length > 0) {
+    // Selecting a searchable or filter column only proves it exists. Real
+    // search and `filter.<name>=` both emit `ILIKE` per column, which
+    // PostgreSQL rejects for integer/enum/uuid/date (`42883`). This forces
+    // that operator resolution as a zero-row `WHERE FALSE` check — never a
+    // real query over the merchant's table (#26342) — rather than emptying
+    // the mapping sample.
+    if (operatorProbeColumns.length > 0) {
       await dbAdapter.probeSearchableColumns({
         ...(resourceConfig.schema ? { schema: resourceConfig.schema } : {}),
         table: resourceConfig.table,
-        columns: searchableColumns,
+        columns: operatorProbeColumns,
         probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
         ...(resourceConfig.baseFilter ? { baseFilter: resourceConfig.baseFilter } : {}),
       });
@@ -433,6 +444,82 @@ export function createResourceHealthCheck(
   };
 }
 
+interface HealthSnapshot {
+  dbHealthy: boolean;
+  resourceHealth?: ResourceHealth;
+  auditHealth: AuditHealth;
+}
+
+async function computeHealthSnapshot(
+  dbAdapter: DatabaseAdapter,
+  getResourceHealth: ResourceHealthCheck,
+  getAuditHealth: AuditHealthCheck,
+): Promise<HealthSnapshot> {
+  const dbHealthy = await dbAdapter.healthCheck().catch(() => false);
+  const resourceHealth = dbHealthy ? await getResourceHealth() : undefined;
+  const auditHealth = getAuditHealth();
+  return { dbHealthy, resourceHealth, auditHealth };
+}
+
+/**
+ * The liveness verdict: safe to hand to an anonymous caller. No config, SQL,
+ * schema/table name, column list, or catalogue data appears here (#26697).
+ */
+function buildLivenessBody(snapshot: HealthSnapshot): Record<string, unknown> {
+  const { dbHealthy, resourceHealth, auditHealth } = snapshot;
+  return {
+    status: dbHealthy && resourceHealth?.ok && auditHealth.ok ? 'ok' : 'degraded',
+    version: getVersion(),
+    database: dbHealthy ? 'connected' : 'disconnected',
+    resources: resourceHealth ? (resourceHealth.ok ? 'ok' : 'misconfigured') : 'unavailable',
+    audit: auditHealth.enabled ? (auditHealth.ok ? 'ok' : 'degraded') : 'disabled',
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+  };
+}
+
+/**
+ * Everything the liveness body deliberately withholds: the driver error text
+ * (which embeds the generated SQL, schema/table name, and full mapped column
+ * list — see `probeInventoryResource`), the audit error, and catalogue-derived
+ * values (unmapped source statuses, withheld/unservable listing ids). Callable
+ * only from a route the API-key guard protects (#26697).
+ */
+function buildDiagnosticFields(snapshot: HealthSnapshot): Record<string, unknown> {
+  const { resourceHealth, auditHealth } = snapshot;
+  return {
+    ...(resourceHealth?.error ? { resourceError: resourceHealth.error } : {}),
+    ...(auditHealth.error ? { auditError: auditHealth.error } : {}),
+    ...(auditHealth.lastSuccessfulAppendAt
+      ? { auditLastSuccessfulAppendAt: auditHealth.lastSuccessfulAppendAt }
+      : {}),
+    ...(resourceHealth?.unknownStatusValues?.length
+      ? { unknownStatusValues: resourceHealth.unknownStatusValues }
+      : {}),
+    ...(resourceHealth?.wireContractViolationIds?.length
+      ? { wireContractViolationIds: resourceHealth.wireContractViolationIds }
+      : {}),
+    ...(resourceHealth?.unservableImageIds?.length
+      ? { unservableImageIds: resourceHealth.unservableImageIds }
+      : {}),
+  };
+}
+
+function isHealthy(snapshot: HealthSnapshot): boolean {
+  const { dbHealthy, resourceHealth, auditHealth } = snapshot;
+  return Boolean(dbHealthy && resourceHealth?.ok && auditHealth.ok);
+}
+
+/**
+ * Registers the connector's two health surfaces.
+ *
+ * `GET /health` stays unauthenticated (the README promises it, and Docker's
+ * healthcheck and the bundled Caddy deployment depend on it answering with no
+ * key) but now returns a liveness verdict only. `GET /diagnostics` returns the
+ * same verdict plus the operator-facing detail `/health` used to leak to any
+ * anonymous caller — it rides the API-key guard already installed as a global
+ * `onRequest` hook in `server.ts` (the same mechanism protecting `/inventory`
+ * and `/audit-log`), so no auth logic is duplicated here (#26697).
+ */
 export function registerHealthRoute(
   app: FastifyInstance,
   dbAdapter: DatabaseAdapter,
@@ -440,33 +527,14 @@ export function registerHealthRoute(
   getAuditHealth: AuditHealthCheck = () => ({ enabled: false, ok: true }),
 ): void {
   app.get('/health', async (_request, reply) => {
-    const dbHealthy = await dbAdapter.healthCheck().catch(() => false);
-    const resourceHealth = dbHealthy ? await getResourceHealth() : undefined;
-    const auditHealth = getAuditHealth();
-    const uptimeSeconds = Math.floor((Date.now() - startTime) / 1000);
-    if (!dbHealthy || !resourceHealth?.ok || !auditHealth.ok) reply.code(503);
+    const snapshot = await computeHealthSnapshot(dbAdapter, getResourceHealth, getAuditHealth);
+    if (!isHealthy(snapshot)) reply.code(503);
+    return buildLivenessBody(snapshot);
+  });
 
-    return {
-      status: dbHealthy && resourceHealth?.ok && auditHealth.ok ? 'ok' : 'degraded',
-      version: getVersion(),
-      database: dbHealthy ? 'connected' : 'disconnected',
-      resources: resourceHealth ? (resourceHealth.ok ? 'ok' : 'misconfigured') : 'unavailable',
-      audit: auditHealth.enabled ? (auditHealth.ok ? 'ok' : 'degraded') : 'disabled',
-      ...(resourceHealth?.error ? { resourceError: resourceHealth.error } : {}),
-      ...(auditHealth.error ? { auditError: auditHealth.error } : {}),
-      ...(auditHealth.lastSuccessfulAppendAt
-        ? { auditLastSuccessfulAppendAt: auditHealth.lastSuccessfulAppendAt }
-        : {}),
-      ...(resourceHealth?.unknownStatusValues?.length
-        ? { unknownStatusValues: resourceHealth.unknownStatusValues }
-        : {}),
-      ...(resourceHealth?.wireContractViolationIds?.length
-        ? { wireContractViolationIds: resourceHealth.wireContractViolationIds }
-        : {}),
-      ...(resourceHealth?.unservableImageIds?.length
-        ? { unservableImageIds: resourceHealth.unservableImageIds }
-        : {}),
-      uptime: uptimeSeconds,
-    };
+  app.get('/diagnostics', async (_request, reply) => {
+    const snapshot = await computeHealthSnapshot(dbAdapter, getResourceHealth, getAuditHealth);
+    if (!isHealthy(snapshot)) reply.code(503);
+    return { ...buildLivenessBody(snapshot), ...buildDiagnosticFields(snapshot) };
   });
 }

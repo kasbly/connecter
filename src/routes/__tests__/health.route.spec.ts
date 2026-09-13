@@ -63,7 +63,7 @@ describe('health route', () => {
     await app.close();
   });
 
-  it('returns 503 with resource probe details when the inventory mapping is invalid', async () => {
+  it('returns 503 with a liveness verdict but no diagnostic detail on /health when the inventory mapping is invalid (#26697)', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(true, false);
     registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
@@ -75,12 +75,31 @@ describe('health route', () => {
       status: 'degraded',
       database: 'connected',
       resources: 'misconfigured',
+    });
+    // The unauthenticated route must never echo the driver error — it embeds
+    // the merchant's generated SQL, schema/table name, and mapped column list.
+    expect(response.json()).not.toHaveProperty('resourceError');
+    await app.close();
+  });
+
+  it('returns 503 with the resource probe detail on /diagnostics when the inventory mapping is invalid', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true, false);
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      status: 'degraded',
+      database: 'connected',
+      resources: 'misconfigured',
       resourceError: expect.stringContaining('column "price" does not exist'),
     });
     await app.close();
   });
 
-  it('returns 503 with audit details when enabled audit logging cannot persist', async () => {
+  it('returns 503 without the audit error detail on /health when enabled audit logging cannot persist (#26697)', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(true);
     registerHealthRoute(
@@ -91,6 +110,24 @@ describe('health route', () => {
     );
 
     const response = await app.inject({ method: 'GET', url: '/health' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ status: 'degraded', audit: 'degraded' });
+    expect(response.json()).not.toHaveProperty('auditError');
+    await app.close();
+  });
+
+  it('returns 503 with the audit error detail on /diagnostics when enabled audit logging cannot persist', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, inventoryResource),
+      () => ({ enabled: true, ok: false, error: 'EACCES: permission denied' }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     expect(response.statusCode).toBe(503);
     expect(response.json()).toMatchObject({
@@ -109,7 +146,10 @@ describe('health route', () => {
       ...inventoryResource,
       baseFilter: 'published = true',
       searchableColumns: ['sku'],
-      filterableColumns: { condition: { column: 'condition', type: 'string' as const } },
+      filterableColumns: {
+        condition: { column: 'condition', type: 'string' as const },
+        year: { column: 'year', type: 'number' as const },
+      },
       relations: {
         images: {
           table: 'images',
@@ -131,14 +171,18 @@ describe('health route', () => {
       { page: 1, pageSize: 20 },
       { column: 'id', direction: 'desc' },
       'published = true',
-      expect.arrayContaining(['id', 'title', 'price', 'sku', 'condition']),
+      expect.arrayContaining(['id', 'title', 'price', 'sku', 'condition', 'year']),
     );
     // The searchable-column check is a dedicated zero-row probe, not a second
     // real page query — it must never re-enter `dbAdapter.query` (#26342).
+    // `condition` (a `type: string` filter) rides the same operator probe as
+    // `sku`, a genuinely searchable column, because both compile to `ILIKE`
+    // (#26694). `year` (`type: number`) never emits `ILIKE`, so it is
+    // excluded.
     expect(dbAdapter.probeSearchableColumns).toHaveBeenCalledTimes(1);
     expect(dbAdapter.probeSearchableColumns).toHaveBeenCalledWith({
       table: 'inventory',
-      columns: ['sku'],
+      columns: ['sku', 'condition'],
       probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
       baseFilter: 'published = true',
     });
@@ -170,7 +214,7 @@ describe('health route', () => {
       }),
     );
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     // The probe never touches `dbAdapter.query` a second time — it is a
     // dedicated, non-executing statement (no page query, no count query) —
@@ -181,6 +225,47 @@ describe('health route', () => {
     expect(probeSearchableColumns).toHaveBeenCalledWith({
       table: 'inventory',
       columns: ['name', 'state'],
+      probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
+    });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      status: 'degraded',
+      database: 'connected',
+      resources: 'misconfigured',
+      resourceError: expect.stringContaining('operator does not exist'),
+    });
+    await app.close();
+  });
+
+  it('fails the resource when a `type: string` filter column is mapped to a non-text (enum) column (#26694)', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    const probeSearchableColumns = vi.fn().mockRejectedValue(
+      Object.assign(new Error('operator does not exist: fuel_kind ~~* unknown'), {
+        code: '42883',
+      }),
+    );
+    dbAdapter.probeSearchableColumns = probeSearchableColumns;
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        filterableColumns: { fuelType: { column: 'fuel', type: 'string' as const } },
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    // Without this, `filter.fuelType=petrol` against an enum column would
+    // only fail live, at query time, with a bare "Internal server error" —
+    // while `/health` kept reporting `resources: "ok"`. Routing the filter
+    // column through the same non-executing operator probe as a searchable
+    // column catches the enum/uuid/date mismatch at startup instead.
+    expect(dbAdapter.query).toHaveBeenCalledTimes(1);
+    expect(probeSearchableColumns).toHaveBeenCalledWith({
+      table: 'inventory',
+      columns: ['fuel'],
       probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
     });
     expect(response.statusCode).toBe(503);
@@ -210,7 +295,7 @@ describe('health route', () => {
       }),
     );
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
@@ -243,7 +328,7 @@ describe('health route', () => {
       }),
     );
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     expect(dbAdapter.distinctValues).toHaveBeenCalledWith({
       table: 'inventory',
@@ -288,7 +373,7 @@ describe('health route', () => {
       }),
     );
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     expect(dbAdapter.distinctValues).toHaveBeenCalledWith({
       table: 'inventory',
@@ -355,7 +440,7 @@ describe('health route', () => {
     });
     registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
@@ -378,7 +463,7 @@ describe('health route', () => {
     });
     registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     expect(response.statusCode).toBe(503);
     expect(response.json()).toMatchObject({
@@ -408,7 +493,7 @@ describe('health route', () => {
       });
     registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     // A contiguous bad import batch fills exactly the first `updatedAt DESC`
     // page while the rest of a large catalog is fine — that must not take
@@ -445,7 +530,7 @@ describe('health route', () => {
       });
     registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     // Every row on both pages fails the same way — a systematic mapping
     // break (e.g. price pointed at a text column) — so the resource must
@@ -507,7 +592,7 @@ describe('health route', () => {
       }),
     );
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     // Every row on both pages has a relation image value that is a jsonb
     // object rather than a string, which the wire contract rejects as
@@ -546,7 +631,7 @@ describe('health route', () => {
       }),
     );
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     expect(response.statusCode).toBe(503);
     expect(response.json()).toMatchObject({ resourceError: expect.stringContaining('images[1]') });
@@ -577,7 +662,7 @@ describe('health route', () => {
       }),
     );
 
-    const response = await app.inject({ method: 'GET', url: '/health' });
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     // The WordPress/Magento shape: the photos cannot be served, but the
     // listings can. Failing the resource here 503s the whole catalog and
@@ -622,6 +707,66 @@ describe('health route', () => {
     await app.inject({ method: 'GET', url: '/health' });
 
     expect(dbAdapter.query).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+
+  it('shares the cached resource probe between /health and /diagnostics', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
+
+    await app.inject({ method: 'GET', url: '/health' });
+    await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(dbAdapter.query).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+
+  // #26697: `/health` has no API key, so it must stay a bare liveness verdict
+  // no matter what fails; `/diagnostics` carries the same verdict plus the
+  // detail. This is the contract every test above already exercises
+  // case-by-case — this test states it once, directly, for every diagnostic
+  // field at once.
+  it('never leaks any diagnostic field on /health while /diagnostics reports all of them, for the same underlying failure', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true, false);
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, inventoryResource),
+      () => ({ enabled: true, ok: false, error: 'EACCES: permission denied' }),
+    );
+
+    const healthResponse = await app.inject({ method: 'GET', url: '/health' });
+    const diagnosticsResponse = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(healthResponse.statusCode).toBe(503);
+    const healthBody = healthResponse.json();
+    expect(healthBody).toMatchObject({
+      status: 'degraded',
+      database: 'connected',
+      resources: 'misconfigured',
+      audit: 'degraded',
+    });
+    for (const diagnosticField of [
+      'resourceError',
+      'auditError',
+      'auditLastSuccessfulAppendAt',
+      'unknownStatusValues',
+      'wireContractViolationIds',
+      'unservableImageIds',
+    ]) {
+      expect(healthBody).not.toHaveProperty(diagnosticField);
+    }
+
+    expect(diagnosticsResponse.statusCode).toBe(503);
+    const diagnosticsBody = diagnosticsResponse.json();
+    // Same liveness verdict, plus the detail /health withheld.
+    expect(diagnosticsBody).toMatchObject({
+      ...healthBody,
+      resourceError: expect.stringContaining('column "price" does not exist'),
+      auditError: 'EACCES: permission denied',
+    });
     await app.close();
   });
 });

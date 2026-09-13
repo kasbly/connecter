@@ -192,3 +192,94 @@ describe('buildApp database timeout handling', () => {
     }
   });
 });
+
+// #26697: `/health` is the one route the API-key guard deliberately skips
+// (`auth/api-key.guard.ts`), so it must never carry the driver error text,
+// schema/table name, or mapped column list a failed probe would otherwise
+// produce. `/diagnostics` carries that detail, gated by the same guard that
+// protects `/inventory` and `/audit-log`.
+describe('health and diagnostics auth boundary', () => {
+  function buildConfig() {
+    return connectorConfigSchema.parse({
+      version: 1,
+      auth: { apiKeys: [{ key: 'test-key', label: 'test' }] },
+      database: {
+        type: 'postgres',
+        host: 'database.internal',
+        database: 'inventory',
+        user: 'connector',
+        password: 'password',
+      },
+      resources: {
+        inventory: {
+          table: 'cars',
+          idColumn: 'id',
+          fields: { externalId: 'id', title: 'title', price: 'price', currency: "'SAR'" },
+        },
+      },
+    });
+  }
+
+  function buildMisconfiguredAdapter(): DatabaseAdapter {
+    return {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      query: vi.fn().mockRejectedValue(new Error('column "price" does not exist')),
+      queryById: vi.fn(),
+      queryRelation: vi.fn(),
+      probeSearchableColumns: vi.fn(),
+      healthCheck: vi.fn().mockResolvedValue(true),
+      introspect: vi.fn(),
+    };
+  }
+
+  it('serves a liveness-only body from /health with no API key, even when the resource probe fails', async () => {
+    const app = await buildApp({ config: buildConfig(), dbAdapter: buildMisconfiguredAdapter() });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/health' });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({
+        status: 'degraded',
+        database: 'connected',
+        resources: 'misconfigured',
+      });
+      expect(response.json()).not.toHaveProperty('resourceError');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects an unauthenticated /diagnostics request the same way as any other protected route', async () => {
+    const app = await buildApp({ config: buildConfig(), dbAdapter: buildMisconfiguredAdapter() });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toEqual({ error: 'Missing or invalid X-API-Key header' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('serves the full diagnostic detail from /diagnostics with a valid API key', async () => {
+    const app = await buildApp({ config: buildConfig(), dbAdapter: buildMisconfiguredAdapter() });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/diagnostics',
+        headers: { 'x-api-key': 'test-key' },
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({
+        status: 'degraded',
+        database: 'connected',
+        resources: 'misconfigured',
+        resourceError: expect.stringContaining('column "price" does not exist'),
+      });
+    } finally {
+      await app.close();
+    }
+  });
+});

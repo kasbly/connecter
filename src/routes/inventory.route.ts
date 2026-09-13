@@ -75,6 +75,8 @@ const MAX_BACKFILL_CURSOR_ENTRIES = 200;
 interface BackfillCursor {
   afterPage: number;
   rawOffset: number;
+  /** Wire-contract rows withheld from the start of the scan through `rawOffset`. */
+  omittedSoFar: number;
 }
 
 export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDeps): void {
@@ -237,10 +239,10 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       // a single per-shape cursor that later pages would overwrite.
       const cursorKey = JSON.stringify({ conditions, sort, pageSize: pagination.pageSize });
       const boundaryKey = (page: number) => `${cursorKey}|${page}`;
-      const startOffset =
-        (pagination.page > 1
-          ? backfillCursors.get(boundaryKey(pagination.page - 1))?.rawOffset
-          : undefined) ?? (pagination.page - 1) * pagination.pageSize;
+      const previousCursor =
+        pagination.page > 1 ? backfillCursors.get(boundaryKey(pagination.page - 1)) : undefined;
+      const startOffset = previousCursor?.rawOffset ?? (pagination.page - 1) * pagination.pageSize;
+      const cursorOmittedSoFar = previousCursor?.omittedSoFar ?? 0;
 
       const first = await runQuery({ ...pagination, rawOffset: startOffset });
       const { total, totalIsCapped } = first;
@@ -287,13 +289,23 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       // consumed, so a request for the next page resumes right after them
       // instead of re-deriving an offset that overlaps rows already served
       // above (#26344). A short/exhausted page has no next page to resume,
-      // so there is nothing worth caching.
+      // so there is nothing worth caching. Nor is a page that never
+      // backfilled: if the raw offset it consumed matches the naive
+      // `page * pageSize` boundary exactly, the entry would be a no-op
+      // indistinguishable from having no cursor at all, and it would still
+      // occupy one of the `MAX_BACKFILL_CURSOR_ENTRIES` slots — letting
+      // ordinary search traffic evict the one cursor that actually carries
+      // information (#26696).
       if (items.length === pagination.pageSize) {
         const consumedRaw = rawRowsConsumedForTarget(batches, items.length);
-        cacheBackfillCursor(boundaryKey(pagination.page), {
-          afterPage: pagination.page,
-          rawOffset: startOffset + consumedRaw,
-        });
+        const rawOffset = startOffset + consumedRaw;
+        if (rawOffset !== pagination.page * pagination.pageSize) {
+          cacheBackfillCursor(boundaryKey(pagination.page), {
+            afterPage: pagination.page,
+            rawOffset,
+            omittedSoFar: cursorOmittedSoFar + (consumedRaw - items.length),
+          });
+        }
       }
 
       // Rows withheld for a wire-contract violation (#24913) are never served,
@@ -301,10 +313,11 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       // customer-facing match count ("I found N options") and as the Sources
       // "N listings available" badge. Keeping the raw SQL count promises rows
       // this page — and every later page — will not deliver (#25791). Tallied
-      // over every row examined while backfilling this page (#25984), not just
-      // the rows the initial fetch happened to return.
+      // over every row examined while backfilling this page (#25984) plus
+      // withheld rows already recorded on earlier pages of this scan (#26695),
+      // not just the rows the initial fetch happened to return.
       const omittedCount = rowsExamined - validated.length;
-      const servableTotal = Math.max(total - omittedCount, items.length);
+      const servableTotal = Math.max(total - (cursorOmittedSoFar + omittedCount), items.length);
 
       const result = {
         items,

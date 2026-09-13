@@ -56,6 +56,14 @@ describe('startConnector', () => {
 
     try {
       const response = await app.inject({ method: 'GET', url: '/health' });
+      // `/health` has no API key at all (#26697), so the diagnostic detail
+      // this test cares about is read from the authenticated `/diagnostics`
+      // route instead — that is what "reachable" means once the probe fails.
+      const diagnosticsResponse = await app.inject({
+        method: 'GET',
+        url: '/diagnostics',
+        headers: { 'x-api-key': 'test-key' },
+      });
       const inventoryResponse = await app.inject({
         method: 'GET',
         url: '/inventory',
@@ -64,7 +72,10 @@ describe('startConnector', () => {
 
       expect(listen).toHaveBeenCalledWith({ port: 4000, host: '127.0.0.1' });
       expect(response.statusCode).toBe(503);
-      expect(response.json()).toMatchObject({
+      expect(response.json()).toMatchObject({ database: 'connected', resources: 'misconfigured' });
+      expect(response.json()).not.toHaveProperty('resourceError');
+      expect(diagnosticsResponse.statusCode).toBe(503);
+      expect(diagnosticsResponse.json()).toMatchObject({
         database: 'connected',
         resources: 'misconfigured',
         resourceError: expect.stringContaining('column "price" does not exist'),

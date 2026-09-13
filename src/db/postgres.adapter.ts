@@ -201,8 +201,12 @@ export class PostgresAdapter implements DatabaseAdapter {
       // String `=` is exact-but-case-insensitive (ILIKE with no wildcards), so
       // filter.color=white matches a catalogue value stored as 'White' (#25604).
       // Numeric `=` stays a bound equality because its value is a JS number.
+      // `::text` mirrors the `IN` branch above: without it, PostgreSQL has no
+      // `ILIKE` operator for a non-text column (enum/uuid/date), and any
+      // `filterableColumns` entry of `type: string` mapped to one 500s with
+      // `42883` (#26694).
       if (condition.operator === '=' && typeof condition.value === 'string') {
-        queryBuilder = queryBuilder.whereRaw(`${condition.column} ILIKE ? ESCAPE '\\'`, [
+        queryBuilder = queryBuilder.whereRaw(`${condition.column}::text ILIKE ? ESCAPE '\\'`, [
           escapeLikePattern(condition.value),
         ]);
         continue;
