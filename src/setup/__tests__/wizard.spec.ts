@@ -1198,7 +1198,7 @@ describe('runWizard', () => {
 
     vi.clearAllMocks();
     resourceProbeMocks.probeInventoryResource.mockResolvedValueOnce({
-      unknownStatusValues: [],
+      unknownStatusValues: ['UNDER_OFFER'],
       wireContractViolationIds: ['42'],
       unservableImageIds: ['43'],
     });
@@ -1267,6 +1267,15 @@ describe('runWizard', () => {
       // A relative image path is an advisory, never a reason to refuse the
       // save — setup still writes the config (#25790).
       expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('"43"'));
+      // The pre-save probe's unknownStatusValues must reach the operator the same
+      // way `npm run validate` already surfaces it (cli.ts) — otherwise a status
+      // value the probe found unmapped is saved and silently hidden under
+      // unknownStatusPolicy with no warning at all (#26873).
+      expect(consoleWarn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Unmapped inventory status values found in the source: "UNDER_OFFER"',
+        ),
+      );
       expect(readFileSync(join(directory, 'connector.config.yml'), 'utf-8')).toContain(
         'available_products',
       );
@@ -1833,6 +1842,14 @@ describe('runWizard', () => {
       process.chdir(directory);
       await runWizard();
 
+      // Pins #25985/#26873: the initial sample must follow the same default sort
+      // (recency, falling back to id) as the /health probe's distinctValues call,
+      // not an unordered LIMIT served in physical heap order. No updatedAtColumn
+      // is mapped here, so the sort collapses onto idColumn alone.
+      expect(db.raw).toHaveBeenCalledWith(
+        expect.stringContaining('ORDER BY "id" DESC NULLS LAST LIMIT'),
+        expect.anything(),
+      );
       expect(db.raw).toHaveBeenCalledWith(
         expect.stringContaining('SELECT DISTINCT "value" FROM (SELECT ?? AS "value"'),
         [
@@ -1886,6 +1903,118 @@ describe('runWizard', () => {
             '("id" DESC NULLS LAST);',
         ),
       );
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('samples status values in recency order, so a status only on recently-updated rows is still offered for mapping (#25985)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    vi.clearAllMocks();
+
+    // A real, unordered `LIMIT` scan over a large table reads rows in physical
+    // heap order and would only ever see this catalogue's overwhelming majority
+    // value, 'AVAILABLE'. 'UNDER_OFFER' only appears on a handful of
+    // recently-updated rows — first under the resource's default recency sort,
+    // but nowhere near the front of the table's heap order. The stub below
+    // stands in for a real database: it returns 'UNDER_OFFER' only when the
+    // query text actually carries the ORDER BY the runtime `/health` probe
+    // uses. Without that clause (the pre-fix behaviour), it falls back to the
+    // heap-order-only sample, 'UNDER_OFFER' is never seen, the prompt for it
+    // below never fires, and this test fails.
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+      raw: vi.fn((sql: string) => {
+        const isSortedByRecency = /ORDER BY "updated_at" DESC NULLS LAST, "id" DESC LIMIT/.test(
+          sql,
+        );
+        const values = isSortedByRecency ? ['UNDER_OFFER', 'AVAILABLE'] : ['AVAILABLE'];
+        return Promise.resolve({ rows: values.map((value) => ({ value })) });
+      }),
+    });
+
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('products');
+      if (message.startsWith('Which column is the unique listing id')) {
+        return Promise.resolve('id');
+      }
+      if (message.startsWith('How should newly observed')) return Promise.resolve('DRAFT');
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      if (message === 'Which Kasbly status matches "UNDER_OFFER"?') {
+        return Promise.resolve('RESERVED');
+      }
+      if (message === 'Which Kasbly status matches "AVAILABLE"?') return Promise.resolve('ACTIVE');
+      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+      if (fieldMatch && ['title', 'price', 'currency', 'status'].includes(fieldMatch[1]!)) {
+        return Promise.resolve(fieldMatch[1]);
+      }
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog_db');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('catalog');
+      if (message.startsWith('Public DNS name')) {
+        return Promise.resolve('connector.merchant.example');
+      }
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(message.startsWith('Which columns should be searchable') ? ['title'] : []),
+    );
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 100,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'status', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'updated_at', type: 'timestamp', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      expect(promptMocks.select).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Which Kasbly status matches "UNDER_OFFER"?' }),
+      );
+      const generated = yaml.load(
+        readFileSync(join(directory, 'connector.config.yml'), 'utf-8'),
+      ) as { resources: { inventory: Record<string, unknown> } };
+      const statusValues = generated.resources.inventory['statusValues'] as Record<
+        string,
+        string[]
+      >;
+      expect(statusValues['RESERVED']).toEqual(['UNDER_OFFER']);
+      expect(statusValues['ACTIVE']).toEqual(['AVAILABLE']);
     } finally {
       consoleLog.mockRestore();
       process.chdir(previousDirectory);

@@ -31,10 +31,13 @@ import {
 import { UNMAPPED_STATUS_FALLBACK } from '../mapping/field-mapper.js';
 import { createDatabaseAdapter } from '../db/adapter.factory.js';
 import {
+  formatUnknownStatusWarning,
   formatUnservableImageWarning,
   formatWireContractViolationWarning,
   probeInventoryResource,
 } from '../routes/health.route.js';
+import { buildOrderByClause } from '../db/postgres.adapter.js';
+import { getDefaultSort } from '../mapping/query-builder.js';
 
 interface DatabaseTlsSettings {
   enabled: boolean;
@@ -112,13 +115,30 @@ async function collectStatusValues(
   schema: string,
   table: string,
   column: string,
+  idColumn: string,
+  updatedAtColumn: string | null | undefined,
 ): Promise<StatusValuesConfig> {
+  // Without an explicit ORDER BY, Postgres serves the bounded scan below in
+  // physical heap order, which skews toward old/never-updated rows and can miss
+  // a status value that only shows up on rows changed after the scan cap on a
+  // large table (#25985) — the same failure mode `distinctValues` in
+  // postgres.adapter.ts guards against for the runtime `/health` probe. Follow
+  // the resource's default sort (recency, falling back to id) here too, so this
+  // sample sees the same rows that probe would.
+  const sort = getDefaultSort({
+    table,
+    idColumn: quoteIfNeeded(idColumn),
+    ...(updatedAtColumn ? { updatedAtColumn: quoteIfNeeded(updatedAtColumn) } : {}),
+    fields: {},
+  });
+  const orderByClause = buildOrderByClause(sort);
+
   // Keep the distinct operation outside a bounded subquery. A bare DISTINCT must
   // inspect the complete merchant table before returning any values. Fetch one value
   // more than the wizard will prompt for: that extra row is the only evidence that
   // the column overflows the cap, and without it the warning below can never fire.
   const result = await db.raw<{ rows: Array<{ value: unknown }> }>(
-    'SELECT DISTINCT "value" FROM (SELECT ?? AS "value" FROM ??.?? WHERE ?? IS NOT NULL LIMIT ?) AS "sampled_rows" LIMIT ?',
+    `SELECT DISTINCT "value" FROM (SELECT ?? AS "value" FROM ??.?? WHERE ?? IS NOT NULL ORDER BY ${orderByClause} LIMIT ?) AS "sampled_rows" LIMIT ?`,
     [column, schema, table, column, STATUS_VALUE_SCAN_LIMIT, STATUS_VALUE_PROMPT_LIMIT + 1],
   );
   const values = result.rows.map((row) => row.value);
@@ -480,6 +500,8 @@ export async function runWizard(): Promise<void> {
         selectedSchema,
         selectedTableName,
         selectedValue,
+        idColumn,
+        updatedAtColumn,
       );
       // Every value left unmapped means there is nothing to write; omitting the key
       // keeps the generated config free of an empty block that reads as a mapping.
@@ -919,10 +941,14 @@ export async function runWizard(): Promise<void> {
   });
   try {
     await validationAdapter.connect();
-    const { wireContractViolationIds, unservableImageIds } = await probeInventoryResource(
-      validationAdapter,
-      config.resources.inventory,
-    );
+    const { unknownStatusValues, wireContractViolationIds, unservableImageIds } =
+      await probeInventoryResource(validationAdapter, config.resources.inventory);
+    // Mirrors `npm run validate` (cli.ts): an unmapped source status is silently
+    // reported as unknownStatusPolicy and withheld from customers, so the
+    // operator must be told before the config is saved, not just at the next
+    // `/health` check (#26873).
+    const statusWarning = formatUnknownStatusWarning(unknownStatusValues, unknownStatusPolicy);
+    if (statusWarning) console.warn(`Warning: ${statusWarning}`);
     const warning = formatWireContractViolationWarning(wireContractViolationIds);
     if (warning) console.warn(`Warning: ${warning}`);
     const imageWarning = formatUnservableImageWarning(unservableImageIds);
