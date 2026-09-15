@@ -373,7 +373,8 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   /**
    * Forces PostgreSQL to resolve `ILIKE` against every configured searchable
-   * column without ever reading a row of the merchant's table.
+   * column and `::text ILIKE` against every `type: string` filter column
+   * without ever reading a row of the merchant's table.
    *
    * `WHERE FALSE AND (...)` is the same trick {@link queryRelation} uses to
    * validate a relation's shape with no rows: operator resolution happens
@@ -386,17 +387,23 @@ export class PostgresAdapter implements DatabaseAdapter {
    * `ORDER BY`, no `LIMIT`/`OFFSET`, and no count query at all.
    */
   async probeSearchableColumns(query: SearchableColumnsProbeQuery): Promise<void> {
-    if (query.columns.length === 0) return;
+    const filterColumns = query.filterColumns ?? [];
+    if (query.columns.length === 0 && filterColumns.length === 0) return;
     const db = this.getDb();
 
     // Same OR-within-the-group shape `applyBaseFilterAndConditions` gives a
     // real search: any configured column may resolve `ILIKE`, so all of them
     // must be checked in one statement rather than short-circuiting on the
-    // first.
-    const searchClause = query.columns
-      .map((column) => `${column} ILIKE ? ESCAPE '\\'`)
-      .join(' OR ');
-    const bindings = query.columns.map(() => `%${escapeLikePattern(query.probeTerm)}%`);
+    // first. Searchable columns stay uncast (live search has no `::text`).
+    // String-filter columns use `${column}::text ILIKE`, matching the live
+    // `=` branch, so enum/integer status can pass `/health` (#26694, #27056).
+    const searchClause = [
+      ...query.columns.map((column) => `${column} ILIKE ? ESCAPE '\\'`),
+      ...filterColumns.map((column) => `${column}::text ILIKE ? ESCAPE '\\'`),
+    ].join(' OR ');
+    const bindings = [...query.columns, ...filterColumns].map(
+      () => `%${escapeLikePattern(query.probeTerm)}%`,
+    );
 
     let sql = `SELECT 1 FROM ${qualifiedTable(query.schema, query.table)} WHERE FALSE AND (${searchClause})`;
     if (query.baseFilter) {

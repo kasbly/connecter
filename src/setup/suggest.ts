@@ -344,6 +344,10 @@ export function suggestFilterableColumns(
 
     const isNumeric = NUMERIC_TYPES.has(col.type.toLowerCase());
     const isText = isTextColumn(col);
+    // PostgreSQL reports enums as USER-DEFINED (citext is already `isText`).
+    // The live `=` branch casts these with `::text ILIKE`, so color / fuelType
+    // / transmission enums should be string-filterable the way status already is.
+    const isEnum = col.type.trim().toLowerCase() === 'user-defined';
 
     // Kasbly always requests ACTIVE inventory. A mapped source-status column
     // must therefore be exposed as the canonical `status` filter, including
@@ -383,8 +387,8 @@ export function suggestFilterableColumns(
         });
         usedFilterNames.add(maxFilterName);
       }
-    } else if (isText) {
-      // Only suggest text filters for columns with bounded domains (make, fuelType, etc.)
+    } else if (isText || isEnum) {
+      // Only suggest string filters for columns with bounded domains (make, fuelType, etc.)
       // Skip very free-text columns like title, description
       const FREE_TEXT = new Set(['title', 'description', 'desc', 'details', 'body']);
       if (FREE_TEXT.has(mappedName.toLowerCase())) continue;

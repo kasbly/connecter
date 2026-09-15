@@ -175,14 +175,15 @@ describe('health route', () => {
     );
     // The searchable-column check is a dedicated zero-row probe, not a second
     // real page query — it must never re-enter `dbAdapter.query` (#26342).
-    // `condition` (a `type: string` filter) rides the same operator probe as
-    // `sku`, a genuinely searchable column, because both compile to `ILIKE`
-    // (#26694). `year` (`type: number`) never emits `ILIKE`, so it is
-    // excluded.
+    // `sku` stays in uncast `columns` (live search has no `::text`).
+    // `condition` (a `type: string` filter) is probed with `::text ILIKE`
+    // via `filterColumns`, matching the live `=` branch (#26694, #27056).
+    // `year` (`type: number`) never emits `ILIKE`, so it is excluded.
     expect(dbAdapter.probeSearchableColumns).toHaveBeenCalledTimes(1);
     expect(dbAdapter.probeSearchableColumns).toHaveBeenCalledWith({
       table: 'inventory',
-      columns: ['sku', 'condition'],
+      columns: ['sku'],
+      filterColumns: ['condition'],
       probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
       baseFilter: 'published = true',
     });
@@ -237,14 +238,10 @@ describe('health route', () => {
     await app.close();
   });
 
-  it('fails the resource when a `type: string` filter column is mapped to a non-text (enum) column (#26694)', async () => {
+  it('reports a healthy resource when a `type: string` filter column is mapped to an enum column (#27056)', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(true);
-    const probeSearchableColumns = vi.fn().mockRejectedValue(
-      Object.assign(new Error('operator does not exist: fuel_kind ~~* unknown'), {
-        code: '42883',
-      }),
-    );
+    const probeSearchableColumns = vi.fn().mockResolvedValue(undefined);
     dbAdapter.probeSearchableColumns = probeSearchableColumns;
     registerHealthRoute(
       app,
@@ -257,23 +254,22 @@ describe('health route', () => {
 
     const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
-    // Without this, `filter.fuelType=petrol` against an enum column would
-    // only fail live, at query time, with a bare "Internal server error" —
-    // while `/health` kept reporting `resources: "ok"`. Routing the filter
-    // column through the same non-executing operator probe as a searchable
-    // column catches the enum/uuid/date mismatch at startup instead.
+    // Live `filter.fuelType=petrol` casts with `::text ILIKE`, so an enum
+    // column is a supported mapping. The probe must use the same cast
+    // (`filterColumns`) rather than uncast `ILIKE`, which would 503 a
+    // catalog the query path can serve (#26694 leftover, #27056).
     expect(dbAdapter.query).toHaveBeenCalledTimes(1);
     expect(probeSearchableColumns).toHaveBeenCalledWith({
       table: 'inventory',
-      columns: ['fuel'],
+      columns: [],
+      filterColumns: ['fuel'],
       probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
     });
-    expect(response.statusCode).toBe(503);
+    expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      status: 'degraded',
+      status: 'ok',
       database: 'connected',
-      resources: 'misconfigured',
-      resourceError: expect.stringContaining('operator does not exist'),
+      resources: 'ok',
     });
     await app.close();
   });

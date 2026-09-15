@@ -463,6 +463,41 @@ describe('suggestFilterableColumns', () => {
     },
   );
 
+  it('suggests PostgreSQL enum attributes as string filters (color / fuelType / transmission)', () => {
+    const columns = [
+      col('id', 'integer', true),
+      { ...col('color', 'USER-DEFINED'), udtName: 'car_color' },
+      { ...col('fuel_type', 'USER-DEFINED'), udtName: 'fuel_kind' },
+      { ...col('transmission', 'USER-DEFINED'), udtName: 'gearbox' },
+    ];
+    const fieldMappings = [
+      {
+        columnName: 'color',
+        suggestedMapping: 'color',
+        confidence: 'medium' as const,
+        mappingType: 'attribute' as const,
+      },
+      {
+        columnName: 'fuel_type',
+        suggestedMapping: 'fuelType',
+        confidence: 'medium' as const,
+        mappingType: 'attribute' as const,
+      },
+      {
+        columnName: 'transmission',
+        suggestedMapping: 'transmission',
+        confidence: 'medium' as const,
+        mappingType: 'attribute' as const,
+      },
+    ];
+
+    const suggestions = suggestFilterableColumns(columns, fieldMappings, []);
+    const filterNames = suggestions.map((s) => s.filterName);
+
+    expect(filterNames).toEqual(['color', 'fuelType', 'transmission']);
+    expect(suggestions.every((s) => s.filterType === 'string')).toBe(true);
+  });
+
   it('skips free-text columns like title and description', () => {
     const columns = [col('id', 'integer', true), col('title', 'text'), col('description', 'text')];
     const fieldMappings = [

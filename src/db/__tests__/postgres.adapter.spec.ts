@@ -190,6 +190,42 @@ describe('PostgresAdapter searchable-column probe', () => {
 
     expect(rawMock).not.toHaveBeenCalled();
   });
+
+  it('casts string-filter columns to text for ILIKE, matching the live `=` branch (#27056)', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.probeSearchableColumns({
+      table: 'cars',
+      columns: ['make'],
+      filterColumns: ['fuel', 'status'],
+      probeTerm: '\\0probe',
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      "SELECT 1 FROM \"public\".\"cars\" WHERE FALSE AND (make ILIKE ? ESCAPE '\\' OR fuel::text ILIKE ? ESCAPE '\\' OR status::text ILIKE ? ESCAPE '\\')",
+      ['%\\\\0probe%', '%\\\\0probe%', '%\\\\0probe%'],
+    );
+  });
+
+  it('still probes when only string-filter columns are configured', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.probeSearchableColumns({
+      table: 'cars',
+      columns: [],
+      filterColumns: ['fuel'],
+      probeTerm: '\\0probe',
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT 1 FROM "public"."cars" WHERE FALSE AND (fuel::text ILIKE ? ESCAPE \'\\\')',
+      ['%\\\\0probe%'],
+    );
+  });
 });
 
 describe('PostgresAdapter distinct status probe', () => {

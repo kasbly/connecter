@@ -116,16 +116,19 @@ export async function probeInventoryResource(
   // inventory response, but they are column expressions the resource can use.
   // Include them in the probe so startup catches those latent mapping errors.
   const searchableColumns = resourceConfig.searchableColumns ?? [];
-  // `type: string` filters run through the same `ILIKE` case-insensitive
-  // match as a searchable column (`applyBaseFilterAndConditions`'s `=`
-  // branch), so a `filterableColumns` entry mapped to a non-text column
-  // (enum/uuid/date) is exactly as exposed to `42883` as a searchable one —
-  // fold it into the same operator probe below instead of only proving the
-  // column exists via SELECT (#26694).
-  const stringFilterColumns = Object.values(resourceConfig.filterableColumns ?? {})
-    .filter((filterConfig) => filterConfig.type === 'string')
-    .map(({ column }) => column);
-  const operatorProbeColumns = Array.from(new Set([...searchableColumns, ...stringFilterColumns]));
+  // `type: string` filters compile to `${column}::text ILIKE` on the live
+  // `=` branch (`applyBaseFilterAndConditions`). Probe them the same way so
+  // an enum/integer status mapping the query path can serve is not classified
+  // as a broken resource (#26694, #27056). Searchable columns stay uncast —
+  // live search still has no `::text`, and the wizard hides non-text columns
+  // from that checkbox.
+  const stringFilterColumns = Array.from(
+    new Set(
+      Object.values(resourceConfig.filterableColumns ?? {})
+        .filter((filterConfig) => filterConfig.type === 'string')
+        .map(({ column }) => column),
+    ),
+  ).filter((column) => !searchableColumns.includes(column));
   const selectColumns = Array.from(
     new Set([
       ...getRequiredColumns(resourceConfig),
@@ -161,16 +164,16 @@ export async function probeInventoryResource(
   try {
     ({ rows } = await runProbeQuery([], DEFAULT_PAGE_SIZE));
     // Selecting a searchable or filter column only proves it exists. Real
-    // search and `filter.<name>=` both emit `ILIKE` per column, which
-    // PostgreSQL rejects for integer/enum/uuid/date (`42883`). This forces
-    // that operator resolution as a zero-row `WHERE FALSE` check — never a
-    // real query over the merchant's table (#26342) — rather than emptying
-    // the mapping sample.
-    if (operatorProbeColumns.length > 0) {
+    // search emits uncast `ILIKE` (non-text columns still `42883`); string
+    // filters emit `::text ILIKE`. This forces that operator resolution as a
+    // zero-row `WHERE FALSE` check — never a real query over the merchant's
+    // table (#26342) — rather than emptying the mapping sample.
+    if (searchableColumns.length > 0 || stringFilterColumns.length > 0) {
       await dbAdapter.probeSearchableColumns({
         ...(resourceConfig.schema ? { schema: resourceConfig.schema } : {}),
         table: resourceConfig.table,
-        columns: operatorProbeColumns,
+        columns: searchableColumns,
+        ...(stringFilterColumns.length > 0 ? { filterColumns: stringFilterColumns } : {}),
         probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
         ...(resourceConfig.baseFilter ? { baseFilter: resourceConfig.baseFilter } : {}),
       });

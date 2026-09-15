@@ -61,6 +61,11 @@ export interface SearchableColumnsProbeQuery {
   table: string;
   /** Column expressions from the resource's `searchableColumns` config. */
   columns: string[];
+  /**
+   * `type: string` filter columns. Probed with `${column}::text ILIKE` to
+   * match the live `=` branch (#26694). Searchable `columns` stay uncast.
+   */
+  filterColumns?: string[];
   /** Throwaway term guaranteed to match nothing; only its operator resolution matters. */
   probeTerm: string;
   baseFilter?: string;
@@ -121,13 +126,15 @@ export interface DatabaseAdapter {
   queryRelation(query: RelationQuery): Promise<Map<string, Record<string, unknown>[]>>;
   /**
    * Zero-row check that the database can resolve `ILIKE` against every
-   * configured searchable column, without reading a single row of the
+   * configured searchable column and `::text ILIKE` against every
+   * `type: string` filter column, without reading a single row of the
    * merchant's table. Mirrors {@link queryRelation}'s `WHERE FALSE` pattern:
    * operator resolution happens during parse analysis, before the planner
-   * folds the `WHERE FALSE` constant, so a non-text column (integer, enum,
-   * uuid, date) still raises an operator-resolution error (e.g. Postgres
-   * `42883`) here — it just never costs a sequential scan of a large
-   * production table to find out (#26342).
+   * folds the `WHERE FALSE` constant. Searchable columns stay uncast so a
+   * non-text mapping (integer, uuid, date) still raises Postgres `42883`;
+   * filter columns use the same `::text` cast as the live `=` branch
+   * (#26694, #27056). Never costs a sequential scan of a large production
+   * table (#26342).
    */
   probeSearchableColumns(query: SearchableColumnsProbeQuery): Promise<void>;
   /**
