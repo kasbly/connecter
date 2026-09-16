@@ -76,6 +76,20 @@ const SOFT_DELETE_PATTERNS = [/^deleted_?at$/i, /^removed_?at$/i, /^archived_?at
 // Image table indicators
 const IMAGE_COLUMN_PATTERNS = [/url$/i, /^image/i, /^photo/i, /^picture/i, /^thumbnail/i, /^src$/i];
 
+// A composite FK's "from" columns that typically discriminate a shared/multi-tenant
+// deployment rather than identify a specific parent row. Excluding these from a
+// composite group leaves the column that still uniquely identifies the row in the
+// common single-tenant / dedicated-DB deployment this connector targets.
+const TENANT_COLUMN_PATTERNS = [
+  /^tenant_?id$/i,
+  /^org(anization)?_?id$/i,
+  /^account_?id$/i,
+  /^shop_?id$/i,
+  /^store_?id$/i,
+  /^merchant_?id$/i,
+  /^company_?id$/i,
+];
+
 export function suggestFieldMappings(columns: IntrospectedColumn[]): FieldSuggestion[] {
   const suggestions: FieldSuggestion[] = [];
   const usedColumns = new Set<string>();
@@ -151,6 +165,25 @@ export function suggestSoftDeleteColumn(columns: IntrospectedColumn[]): string |
   return null;
 }
 
+/**
+ * Pick the single column pair to use for a (possibly composite) FK constraint
+ * group. A single-column group is used as-is. For a composite group, prefer
+ * the pair whose "from" column doesn't look like a tenant/shared discriminator
+ * — that column alone still uniquely identifies the parent row in a
+ * single-tenant deployment. Returns null when the heuristic can't identify
+ * exactly one such pair (0 or multiple candidates), since guessing wrong would
+ * silently join the wrong rows.
+ */
+function pickRepresentativePair(group: ForeignKeyInfo[]): ForeignKeyInfo | null {
+  if (group.length === 1) return group[0]!;
+
+  const nonTenantPairs = group.filter(
+    (fk) => !TENANT_COLUMN_PATTERNS.some((p) => p.test(fk.fromColumn)),
+  );
+  if (nonTenantPairs.length !== 1) return null;
+  return nonTenantPairs[0]!;
+}
+
 export function suggestRelations(
   mainTable: string,
   tables: IntrospectedTable[],
@@ -170,14 +203,18 @@ export function suggestRelations(
     else byConstraint.set(key, [fk]);
   }
 
-  // Find tables that have a foreign key pointing to the main table
+  // Find tables that have a foreign key pointing to the main table.
   // RelationConfig only models a single foreignKey/referenceKey pair, so a
   // composite foreign key (constraint group with more than one column pair)
-  // can't be expressed without silently dropping columns. Skip it rather than
-  // guess which pair the operator wants.
+  // can't be expressed in full. Rather than dropping the whole relation —
+  // which silently ships child rows (e.g. photos) with no way to join them
+  // back — pick the one column pair that still identifies a specific parent
+  // row (see pickRepresentativePair). If the heuristic can't tell which
+  // column that is, fall back to skipping, same as before.
   const relatedFks = [...byConstraint.values()]
-    .filter((group) => group.length === 1 && group[0]!.toTable === mainTable)
-    .map((group) => group[0]!);
+    .filter((group) => group[0]!.toTable === mainTable)
+    .map((group) => pickRepresentativePair(group))
+    .filter((fk): fk is ForeignKeyInfo => fk !== null);
 
   for (const fk of relatedFks) {
     const relatedTable = tables.find((t) => t.name === fk.fromTable);

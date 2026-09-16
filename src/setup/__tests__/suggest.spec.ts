@@ -246,7 +246,7 @@ describe('suggestRelations', () => {
     expect(suggestions).toEqual([]);
   });
 
-  it('skips a composite foreign key instead of guessing a column pair (#25986)', () => {
+  it('picks the non-tenant column of a composite foreign key instead of skipping the relation (#27057)', () => {
     const tables: IntrospectedTable[] = [
       {
         name: 'Cat',
@@ -277,6 +277,54 @@ describe('suggestRelations', () => {
         fromColumn: 'tenantId',
         toTable: 'Cat',
         toColumn: 'tenantId',
+      },
+    ];
+
+    // tenantId is a shared discriminator across every row of a single-tenant
+    // deployment; sku alone still identifies the specific parent Cat, so the
+    // relation should be offered keyed on sku rather than dropped entirely.
+    const suggestions = suggestRelations('Cat', tables, fks);
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]).toMatchObject({
+      table: 'CatPhotos',
+      foreignKeyColumn: 'sku',
+      toColumn: 'sku',
+      relationType: 'images',
+    });
+  });
+
+  it('skips a composite foreign key when no column pair can be identified as the non-tenant one (#27057)', () => {
+    const tables: IntrospectedTable[] = [
+      {
+        name: 'Cat',
+        kind: 'table',
+        rowCount: 100,
+        columns: [col('regionId', 'integer', true), col('branchId', 'integer', true)],
+      },
+      {
+        name: 'CatPhotos',
+        kind: 'table',
+        rowCount: 1000,
+        columns: [col('regionId', 'integer'), col('branchId', 'integer'), col('url', 'text')],
+      },
+    ];
+    // Neither column pair matches a known tenant-style pattern, so there's no
+    // safe way to guess which half of the composite key the operator wants —
+    // keep skipping rather than joining on the wrong column.
+    const fks: ForeignKeyInfo[] = [
+      {
+        constraintName: 'cat_photos_cat_fkey',
+        fromTable: 'CatPhotos',
+        fromColumn: 'regionId',
+        toTable: 'Cat',
+        toColumn: 'regionId',
+      },
+      {
+        constraintName: 'cat_photos_cat_fkey',
+        fromTable: 'CatPhotos',
+        fromColumn: 'branchId',
+        toTable: 'Cat',
+        toColumn: 'branchId',
       },
     ];
 
