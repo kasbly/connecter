@@ -1415,6 +1415,8 @@ describe('runWizard', () => {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
     // This rerun replaces Caddy, so it keeps the proxy allowlist it already has.
+    // Choosing "custom" also means the wizard never asks for a public DNS
+    // name (#27229): only the bundled Caddy proxy's start recipe uses one.
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('custom'));
     for (const answer of [
       'database.example.com',
@@ -1422,7 +1424,6 @@ describe('runWizard', () => {
       'catalog',
       'reader',
       'merchant_data',
-      'connector.merchant.example',
       '10.0.0.0/8',
     ]) {
       promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
@@ -1513,15 +1514,15 @@ describe('runWizard', () => {
           default: '10.0.0.0/8',
         }),
       );
-      expect(promptMocks.input).toHaveBeenCalledWith(
-        expect.objectContaining({
-          message: expect.stringContaining('Public DNS name'),
-          default: 'connector.merchant.example',
-        }),
+      // "custom" does not require a public DNS name/Let's-Encrypt domain
+      // (#27229): the wizard never prompts for one, and a value from a
+      // previous "bundled" run is dropped rather than carried over unused.
+      expect(promptMocks.input).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: expect.stringContaining('Public DNS name') }),
       );
-      expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN']).toBe(
-        'connector.merchant.example',
-      );
+      expect(
+        parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN'],
+      ).toBeUndefined();
       expect(inventory.fields).toEqual({
         externalId: '"id"',
         title: '"title"',
@@ -2142,5 +2143,176 @@ describe('runWizard', () => {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  // #27229: only the bundled Caddy topology's traffic actually arrives from
+  // Caddy's fixed address (172.30.0.2). Telling a "custom"/"none" operator to
+  // run `docker compose up -d` anyway starts a proxy the connector no longer
+  // trusts, so every request collapses onto Caddy's IP for rate limiting and
+  // the audit log. These three cases pin the topology-specific next steps.
+  describe('topology-specific "next steps" (#27229)', () => {
+    /** Minimal happy-path prompt wiring shared by the three topology cases below. */
+    function mockMinimalRunPrompts(topology: 'bundled' | 'custom' | 'none'): void {
+      promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+        if (message.startsWith('Database type')) return Promise.resolve('postgres');
+        if (message.startsWith('Which table contains')) return Promise.resolve('products');
+        if (message.startsWith('Which column is the unique listing id')) {
+          return Promise.resolve('id');
+        }
+        if (message.startsWith('Which reverse proxy')) return Promise.resolve(topology);
+        const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+        if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
+          return Promise.resolve(fieldMatch[1]);
+        }
+        return Promise.resolve('\0unmapped');
+      });
+      promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+        if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+        if (message.startsWith('Port')) return Promise.resolve('5432');
+        if (message.startsWith('Database name')) return Promise.resolve('catalog');
+        if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+        if (message.startsWith('Public DNS name')) {
+          return Promise.resolve('connector.merchant.example');
+        }
+        if (message.startsWith('Trusted proxy')) return Promise.resolve('203.0.113.5');
+        return Promise.resolve('reader');
+      });
+      promptMocks.password.mockResolvedValue('p@ss#word');
+      promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+        Promise.resolve(!message.startsWith('Does this database require TLS')),
+      );
+      promptMocks.checkbox.mockResolvedValue([]);
+      vi.mocked(introspectDatabase).mockResolvedValueOnce({
+        db: Object.assign(vi.fn(), { destroy: vi.fn().mockResolvedValue(undefined) }) as never,
+        result: {
+          tables: [
+            {
+              name: 'products',
+              kind: 'table',
+              rowCount: 10,
+              columns: [
+                { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+                { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+                { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+                { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              ],
+            },
+          ],
+          foreignKeys: [],
+        },
+        retriedWithTls: false,
+      });
+    }
+
+    it('recommends `docker compose up -d` and the HTTPS domain only for the bundled Caddy proxy', async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      vi.clearAllMocks();
+      mockMinimalRunPrompts('bundled');
+
+      try {
+        process.chdir(directory);
+        await runWizard();
+
+        expect(consoleLog).toHaveBeenCalledWith(
+          expect.stringContaining('Start the connector: docker compose up -d'),
+        );
+        expect(consoleLog).toHaveBeenCalledWith(
+          expect.stringContaining('curl -fsS https://connector.merchant.example/health'),
+        );
+        expect(consoleLog).toHaveBeenCalledWith(
+          expect.stringContaining('Give Kasbly this URL: https://connector.merchant.example'),
+        );
+        expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN']).toBe(
+          'connector.merchant.example',
+        );
+      } finally {
+        consoleLog.mockRestore();
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it('recommends binding :4000 behind the operator’s own proxy for "custom", never `docker compose up -d` as the start command, and skips the public DNS prompt', async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      vi.clearAllMocks();
+      mockMinimalRunPrompts('custom');
+
+      try {
+        process.chdir(directory);
+        await runWizard();
+
+        expect(consoleLog).toHaveBeenCalledWith(
+          expect.stringContaining('Start the connector: npm run build && npm start'),
+        );
+        expect(consoleLog).toHaveBeenCalledWith(
+          expect.stringContaining('curl -fsS http://localhost:4000/health'),
+        );
+        // The bundled Caddy service must not be recommended: its traffic would
+        // arrive from Caddy's fixed address, which is not in this topology's
+        // trustedProxies allowlist, so every request would collapse onto it.
+        expect(consoleLog).not.toHaveBeenCalledWith(
+          '\n   Start the connector: docker compose up -d',
+        );
+        expect(promptMocks.input).not.toHaveBeenCalledWith(
+          expect.objectContaining({ message: expect.stringContaining('Public DNS name') }),
+        );
+        expect(
+          parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN'],
+        ).toBeUndefined();
+      } finally {
+        consoleLog.mockRestore();
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it('recommends `npm start` and a plain HTTP URL for "none", never `docker compose up -d` as the start command, and skips the public DNS prompt', async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      vi.clearAllMocks();
+      mockMinimalRunPrompts('none');
+
+      try {
+        process.chdir(directory);
+        await runWizard();
+
+        expect(consoleLog).toHaveBeenCalledWith(
+          expect.stringContaining('Start the connector: npm run build && npm start'),
+        );
+        expect(consoleLog).toHaveBeenCalledWith(
+          expect.stringContaining('curl -fsS http://localhost:4000/health'),
+        );
+        expect(consoleLog).toHaveBeenCalledWith(
+          expect.stringContaining('Give Kasbly this URL: http://<this-host>:4000'),
+        );
+        // "docker compose up -d" as printed for "bundled" starts Caddy, which
+        // this topology's operator no longer trusts — it must not appear as
+        // the recommended start command here (mentioning it only as the
+        // "remove the caddy service first" alternative is fine).
+        expect(consoleLog).not.toHaveBeenCalledWith(
+          '\n   Start the connector: docker compose up -d',
+        );
+        expect(promptMocks.input).not.toHaveBeenCalledWith(
+          expect.objectContaining({ message: expect.stringContaining('Public DNS name') }),
+        );
+        const config = loadExistingSetupConfig(
+          join(directory, 'connector.config.yml'),
+          join(directory, '.env'),
+        );
+        expect(config.server.trustedProxies).toBeUndefined();
+        expect(
+          parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN'],
+        ).toBeUndefined();
+      } finally {
+        consoleLog.mockRestore();
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
   });
 });

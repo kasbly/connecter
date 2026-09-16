@@ -28,7 +28,7 @@ npm ci
 npm run setup
 ```
 
-The wizard connects to your database, introspects tables/columns/foreign keys, and auto-generates `connector.config.yml` + `.env` with sensible defaults. It also asks for the public DNS name and the reverse proxy in front of the connector, so the generated files carry the `CONNECTOR_DOMAIN` and `server.trustedProxies` values the bundled Docker deployment needs — `docker compose up -d` runs unchanged afterwards.
+The wizard connects to your database, introspects tables/columns/foreign keys, and auto-generates `connector.config.yml` + `.env` with sensible defaults. It also asks which reverse proxy will front the connector. Choosing the bundled Caddy proxy also asks for a public DNS name, writes `CONNECTOR_DOMAIN` and `server.trustedProxies`, and ends by recommending `docker compose up -d`. Choosing your own proxy or none skips the public-DNS-name prompt entirely and instead recommends `npm run build && npm start` — the bundled Caddy service must not be started in either case, since its traffic would arrive from Caddy's fixed internal address rather than from the internet or your own proxy.
 
 ### 2. Manual Setup
 

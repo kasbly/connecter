@@ -252,12 +252,26 @@ export function isPublicHostname(value: string): boolean {
   );
 }
 
+/** Which start recipe the wizard's final "next steps" print block recommends. */
+export type ProxyTopology = 'bundled' | 'custom' | 'none';
+
+interface ProxyTopologySelection {
+  topology: ProxyTopology;
+  trustedProxies: string | undefined;
+}
+
 /**
  * The connector reads forwarded headers only from this allowlist, so the value
  * has to match the proxy actually deployed in front of it. `undefined` means no
  * proxy: the raw socket peer is used, which is the fail-closed default.
+ *
+ * The choice also decides the start recipe the wizard recommends at the end:
+ * only `bundled` starts the Compose file's Caddy service, which is the only
+ * topology Caddy's fixed internal address (172.30.0.2) is meaningful for.
  */
-async function collectTrustedProxies(existing: string | undefined): Promise<string | undefined> {
+async function collectTrustedProxies(
+  existing: string | undefined,
+): Promise<ProxyTopologySelection> {
   const topology = await select({
     message: 'Which reverse proxy will sit in front of the connector?',
     choices: [
@@ -274,8 +288,8 @@ async function collectTrustedProxies(existing: string | undefined): Promise<stri
         : ('custom' as const),
   });
 
-  if (topology === 'none') return undefined;
-  if (topology === 'bundled') return BUNDLED_PROXY_ADDRESS;
+  if (topology === 'none') return { topology, trustedProxies: undefined };
+  if (topology === 'bundled') return { topology, trustedProxies: BUNDLED_PROXY_ADDRESS };
 
   const proxies = await input({
     message: 'Trusted proxy IPs/CIDRs (comma-separated):',
@@ -283,7 +297,7 @@ async function collectTrustedProxies(existing: string | undefined): Promise<stri
     validate: (value) =>
       value.trim() ? true : 'Enter the direct proxy IPs/CIDRs, or choose "None" instead.',
   });
-  return proxies.trim();
+  return { topology, trustedProxies: proxies.trim() };
 }
 
 export async function runWizard(): Promise<void> {
@@ -811,20 +825,30 @@ export async function runWizard(): Promise<void> {
     }
   }
 
-  // Both values below are required by the deployment this wizard ends by
-  // recommending: `docker compose up -d` refuses to resolve without
-  // CONNECTOR_DOMAIN, and without trustedProxies every request behind the
-  // bundled proxy is attributed to Caddy's internal address.
-  const connectorDomain = (
-    await input({
-      message: 'Public DNS name for this connector (its A/AAAA record must point at this host):',
-      default: existingEnv['CONNECTOR_DOMAIN'],
-      validate: (value) =>
-        isPublicHostname(value) ||
-        'Enter a DNS name such as connector.merchant.example — no scheme, port, or path.',
-    })
-  ).trim();
-  const trustedProxies = await collectTrustedProxies(existingConfig?.server.trustedProxies);
+  // The reverse-proxy topology decides whether the wizard's final "next
+  // steps" run the bundled Compose deployment (`docker compose up -d`) or
+  // tell the operator to bind :4000 themselves, so it has to be known before
+  // asking for a public DNS name. Only the bundled Caddy proxy needs one —
+  // `docker compose up -d` refuses to resolve without CONNECTOR_DOMAIN, and
+  // without trustedProxies every request behind it is attributed to Caddy's
+  // internal address — so `custom`/`none` skip the prompt entirely rather
+  // than demanding a domain the printed instructions never use.
+  const { topology: proxyTopology, trustedProxies } = await collectTrustedProxies(
+    existingConfig?.server.trustedProxies,
+  );
+  const connectorDomain =
+    proxyTopology === 'bundled'
+      ? (
+          await input({
+            message:
+              'Public DNS name for this connector (its A/AAAA record must point at this host):',
+            default: existingEnv['CONNECTOR_DOMAIN'],
+            validate: (value) =>
+              isPublicHostname(value) ||
+              'Enter a DNS name such as connector.merchant.example — no scheme, port, or path.',
+          })
+        ).trim()
+      : undefined;
 
   // Build config object
   // Everything below is selected by this wizard, so rebuild it instead of
@@ -982,14 +1006,39 @@ export async function runWizard(): Promise<void> {
     ...(tls.ca ? { DB_SSL_CA: tls.ca } : {}),
     CONNECTOR_API_KEY: currentApiKey,
     CONNECTOR_API_KEY_PENDING: pendingApiKey ?? null,
-    CONNECTOR_DOMAIN: connectorDomain,
+    // Rebuilt rather than passed through, so switching away from the bundled
+    // proxy on a rerun also drops a CONNECTOR_DOMAIN value a previous run
+    // wrote — `custom`/`none` never use it.
+    CONNECTOR_DOMAIN: connectorDomain ?? null,
   });
   writePrivateFile(envPath, envContent);
   console.log(`✅ Environment saved to ${envPath}`);
 
-  console.log('\n   Start the connector: docker compose up -d');
-  console.log(`   Verify the public endpoint: curl -fsS https://${connectorDomain}/health`);
-  console.log(`   Give Kasbly this URL: https://${connectorDomain}`);
+  // Topology-specific: only `bundled` starts the Compose file's Caddy
+  // service, which is the only deployment `docker compose up -d` is correct
+  // for. `custom`/`none` traffic reaches the connector directly (or from the
+  // operator's own proxy) rather than from Caddy at 172.30.0.2, so starting
+  // Caddy anyway would put an untrusted hop in front of the connector.
+  if (proxyTopology === 'bundled') {
+    console.log('\n   Start the connector: docker compose up -d');
+    console.log(`   Verify the public endpoint: curl -fsS https://${connectorDomain}/health`);
+    console.log(`   Give Kasbly this URL: https://${connectorDomain}`);
+  } else if (proxyTopology === 'custom') {
+    console.log(
+      '\n   Start the connector: npm run build && npm start (binds :4000; the bundled ' +
+        'Caddy service is not started)',
+    );
+    console.log('   Put your own reverse proxy in front of this host on port 4000.');
+    console.log('   Verify locally: curl -fsS http://localhost:4000/health');
+    console.log('   Give Kasbly the public HTTPS URL your reverse proxy exposes.');
+  } else {
+    console.log(
+      '\n   Start the connector: npm run build && npm start (or `docker compose up -d` ' +
+        'after removing the caddy service from docker-compose.yml)',
+    );
+    console.log('   Verify locally: curl -fsS http://localhost:4000/health');
+    console.log('   Give Kasbly this URL: http://<this-host>:4000 (no public DNS name needed)');
+  }
   // Without one of these, every AI inventory card ends with a dead 🔗 after a
   // successful Test connection — Kasbly only builds a customer link from
   // `attributes.url`/`listingUrl` or a Kasbly-side listingUrlTemplate (#25311).
