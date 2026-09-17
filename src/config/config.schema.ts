@@ -83,6 +83,7 @@ const relationSchema = z.object({
   imageUrlField: z.string().optional(),
   filter: z.string().optional(),
   flatten: z.string().optional(),
+  publishAs: z.string().optional(),
   orderBy: z
     .object({
       column: z.string().min(1),

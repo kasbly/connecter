@@ -79,6 +79,14 @@ export interface RelationConfig {
   filter?: string;
   flatten?: string;
   orderBy?: RelationOrderByConfig;
+  /**
+   * Customer-facing attribute key for a `flatten`/generic relation's output.
+   * The map key this config lives under is a disambiguated `table__foreignKey`
+   * key (#26144), which keeps two FKs onto the same child table from colliding
+   * internally — it is not meant to double as the published name. When set,
+   * `attributes[...]` is written under this name instead of the map key.
+   */
+  publishAs?: string;
 }
 
 export interface InventoryResourceConfig {

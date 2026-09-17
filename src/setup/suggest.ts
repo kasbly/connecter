@@ -76,6 +76,19 @@ const SOFT_DELETE_PATTERNS = [/^deleted_?at$/i, /^removed_?at$/i, /^archived_?at
 // Image table indicators
 const IMAGE_COLUMN_PATTERNS = [/url$/i, /^image/i, /^photo/i, /^picture/i, /^thumbnail/i, /^src$/i];
 
+// A type/kind/category-like column on an image relation table. When present,
+// it discriminates customer-facing gallery/featured photos from thumbnails,
+// icons, and invoices the same table also stores (see the README's
+// `type = 'gallery' OR type = 'featured'` example).
+const IMAGE_TYPE_COLUMN_PATTERNS = [
+  /^type$/i,
+  /^kind$/i,
+  /^category$/i,
+  /^role$/i,
+  /^image_?type$/i,
+  /^photo_?type$/i,
+];
+
 // A composite FK's "from" columns that typically discriminate a shared/multi-tenant
 // deployment rather than identify a specific parent row. Excluding these from a
 // composite group leaves the column that still uniquely identifies the row in the
@@ -159,6 +172,22 @@ export function suggestPublishedColumn(columns: IntrospectedColumn[]): string | 
 export function suggestSoftDeleteColumn(columns: IntrospectedColumn[]): string | null {
   for (const col of columns) {
     for (const pattern of SOFT_DELETE_PATTERNS) {
+      if (pattern.test(col.name)) return col.name;
+    }
+  }
+  return null;
+}
+
+/**
+ * Find a type/kind/category-like column on an images relation table, used to
+ * offer a `filter:` clause that keeps only customer-facing photos. Returns
+ * null when no such column exists — plain photo-only tables get no filter,
+ * which is not a regression from today's unfiltered behavior.
+ */
+export function suggestImageTypeColumn(columns: IntrospectedColumn[]): string | null {
+  for (const col of columns) {
+    if (col.isPrimaryKey) continue;
+    for (const pattern of IMAGE_TYPE_COLUMN_PATTERNS) {
       if (pattern.test(col.name)) return col.name;
     }
   }

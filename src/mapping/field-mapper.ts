@@ -281,11 +281,15 @@ export function mapRowToInventoryItem(
           images.push(...normalizeImageUrls(relationRow[relationConfig.imageUrlField]));
         }
       } else if (relationConfig.flatten) {
-        attributes[relationName] = relRows
+        // `publishAs` (when set by the wizard) is the semantic name AI card
+        // templates expect (e.g. `features`); the map key itself stays the
+        // disambiguated `table__foreignKey` key so two FKs onto the same
+        // child table can't collide (#26144).
+        attributes[relationConfig.publishAs ?? relationName] = relRows
           .map((r) => r[relationConfig.flatten!])
           .filter((v): v is string => typeof v === 'string');
       } else {
-        attributes[relationName] = relRows;
+        attributes[relationConfig.publishAs ?? relationName] = relRows;
       }
     }
   }

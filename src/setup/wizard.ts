@@ -25,6 +25,7 @@ import {
   suggestRelations,
   suggestSearchableColumns,
   suggestFilterableColumns,
+  suggestImageTypeColumn,
   isTextColumn,
   type FilterableColumnSuggestion,
 } from './suggest.js';
@@ -172,6 +173,71 @@ async function collectStatusValues(
   }
 
   return statusValues;
+}
+
+/**
+ * How many distinct values of a relation table's type/kind/category column
+ * the wizard offers as filter choices. Mirrors STATUS_VALUE_PROMPT_LIMIT's
+ * reasoning: an unbounded checkbox prompt for a high-cardinality column has
+ * no good escape but Ctrl-C.
+ */
+export const IMAGE_TYPE_VALUE_SCAN_LIMIT = 5_000;
+export const IMAGE_TYPE_VALUE_PROMPT_LIMIT = 25;
+
+/**
+ * Sample distinct non-null values of one column on a relation table, capped
+ * so a high-cardinality or huge child table can't hang setup. Used to build
+ * the images relation's `filter:` choices.
+ *
+ * A child table (e.g. one row per photo) is routinely *larger* than its
+ * parent catalog, not smaller, so this is exposed to the same heap-order skew
+ * `collectStatusValues` guards against for #25985: an unordered bounded scan
+ * can miss a type value (e.g. a `'featured'` tag added to only the most
+ * recently inserted rows) that never appears in the first
+ * `IMAGE_TYPE_VALUE_SCAN_LIMIT` rows. When the relation table has a primary
+ * key, order the scan by it (descending) as a best-effort recency proxy —
+ * imperfect for non-sequential keys like UUIDs, but strictly better than an
+ * arbitrary heap-order sample, and free since the column is always indexed.
+ */
+async function collectDistinctColumnValues(
+  db: Awaited<ReturnType<typeof introspectDatabase>>['db'],
+  schema: string,
+  table: string,
+  column: string,
+  orderColumn?: string,
+): Promise<string[]> {
+  const orderByClause = orderColumn ? `ORDER BY ${quoteIfNeeded(orderColumn)} DESC ` : '';
+  const result = await db.raw<{ rows: Array<{ value: unknown }> }>(
+    `SELECT DISTINCT "value" FROM (SELECT ?? AS "value" FROM ??.?? WHERE ?? IS NOT NULL ${orderByClause}LIMIT ?) AS "sampled_rows" LIMIT ?`,
+    [column, schema, table, column, IMAGE_TYPE_VALUE_SCAN_LIMIT, IMAGE_TYPE_VALUE_PROMPT_LIMIT + 1],
+  );
+  return Array.from(new Set(result.rows.map((row) => String(row.value)))).sort();
+}
+
+/**
+ * The map key a relation config lives under is a disambiguated
+ * `table__foreignKey` key so two FKs onto the same child table can't
+ * collide (#26144) — it was never meant to double as the customer-facing
+ * attribute name. A child table conventionally named `<MainTable><Noun>`
+ * (e.g. `CarFeatures` off `Car`) publishes under just the noun, lower-cased
+ * (`features`), matching the README's example and what `search_inventory`'s
+ * AI card templates read from `attributes`. Falls back to the whole table
+ * name (lower-cased) when it doesn't share the main table's prefix.
+ */
+export function derivePublishedRelationName(table: string, mainTable: string): string {
+  const lowerTable = table.toLowerCase();
+  const lowerMain = mainTable.toLowerCase();
+
+  let noun = table;
+  if (lowerTable.startsWith(lowerMain) && lowerTable.length > lowerMain.length) {
+    noun = table.slice(mainTable.length);
+  } else if (lowerTable.startsWith(`${lowerMain}s`) && lowerTable.length > lowerMain.length + 1) {
+    // Plural main-table prefix, e.g. `cars_features` off a `car`/`cars` table.
+    noun = table.slice(mainTable.length + 1);
+  }
+  noun = noun.replace(/^[_-]+/, '') || table;
+
+  return noun.charAt(0).toLowerCase() + noun.slice(1);
 }
 
 /** Build the selectable mapping choices for one standard inventory field. */
@@ -676,6 +742,11 @@ export async function runWizard(): Promise<void> {
     result.foreignKeys,
   );
   const relations: Record<string, RelationConfig> = {};
+  // Tracks published (customer-facing) attribute names already used this run,
+  // so a second flatten/generic relation that derives the same semantic name
+  // (e.g. two child tables both nicknamed "features") gets a `_2` suffix
+  // instead of silently overwriting the first relation's attribute.
+  const usedPublishedNames = new Set<string>();
 
   for (const suggestion of relationSuggestions) {
     const relTable = result.tables.find((t) => t.name === suggestion.table);
@@ -702,9 +773,24 @@ export async function runWizard(): Promise<void> {
     });
 
     if (addRelation) {
-      const selectableColumns = relTable.columns.filter(
-        (col) => col.name !== suggestion.foreignKeyColumn && !col.isPrimaryKey,
-      );
+      // A type/kind/category-like column (e.g. Image.type) distinguishes
+      // customer-facing gallery/featured photos from thumbnails, icons, and
+      // invoices the same table can also store — detect it up front so it can
+      // both be offered in the "expose" checkbox below and drive the filter
+      // prompt further down.
+      const typeColumn =
+        suggestion.relationType === 'images' ? suggestImageTypeColumn(relTable.columns) : null;
+      const selectableColumns = relTable.columns.filter((col) => {
+        if (col.name === suggestion.foreignKeyColumn || col.isPrimaryKey) return false;
+        // Only the URL field (via `imageUrlField`) and the type column (via
+        // `filter`) ever influence a mapped item for an images relation —
+        // every other column would be queried and then silently discarded,
+        // which reads as "expose" without exposing anything (#27231).
+        if (suggestion.relationType === 'images') {
+          return /url$/i.test(col.name) || /^src$/i.test(col.name) || col.name === typeColumn;
+        }
+        return true;
+      });
       const defaultColumn =
         suggestion.relationType === 'images'
           ? selectableColumns.find((col) => /url$/i.test(col.name) || /^src$/i.test(col.name))
@@ -719,7 +805,10 @@ export async function runWizard(): Promise<void> {
         choices: selectableColumns.map((col) => ({
           name: col.name,
           value: col.name,
-          checked: Boolean(existingRelation?.fields[col.name]) || col.name === defaultColumn?.name,
+          checked:
+            Boolean(existingRelation?.fields[col.name]) ||
+            col.name === defaultColumn?.name ||
+            col.name === typeColumn,
         })),
       });
       const selectedColumnNames = new Set(selectedColumns);
@@ -760,6 +849,47 @@ export async function runWizard(): Promise<void> {
             };
           }
         }
+
+        // Offer a filter matching the README's `type = 'gallery' OR type =
+        // 'featured'` shape when a type/kind/category column exists; `filter`
+        // is a raw SQL predicate the relation query applies directly against
+        // the source column (see queryRelation), independent of the `fields`
+        // map above, so this runs whether or not the operator also chose to
+        // carry the column into `fields`. Leave `filter` unset when there's
+        // no such column (nothing to filter on).
+        if (typeColumn) {
+          const pkColumn = relTable.columns.find((col) => col.isPrimaryKey);
+          const distinctTypeValues = await collectDistinctColumnValues(
+            db,
+            selectedSchema,
+            suggestion.table,
+            typeColumn,
+            pkColumn?.name,
+          );
+          if (distinctTypeValues.length > 0) {
+            const presentedValues = distinctTypeValues.slice(0, IMAGE_TYPE_VALUE_PROMPT_LIMIT);
+            if (distinctTypeValues.length > presentedValues.length) {
+              console.log(
+                `\n"${typeColumn}" has more than ${IMAGE_TYPE_VALUE_PROMPT_LIMIT} distinct values. Offering the first ${presentedValues.length}; re-run setup after narrowing the column down if a customer-facing value is missing.`,
+              );
+            }
+            const includedValues = await checkbox({
+              message: `Which "${typeColumn}" values on ${suggestion.table} are customer-facing photos? (unchecked values — e.g. thumbnails, icons, invoices — are left out of images[])`,
+              choices: presentedValues.map((value) => ({
+                name: value,
+                value,
+                checked: existingRelation?.filter
+                  ? existingRelation.filter.includes(toConfigLiteral(value))
+                  : /gallery|featured|photo|primary|main|hero/i.test(value),
+              })),
+            });
+            if (includedValues.length > 0) {
+              relation['filter'] = includedValues
+                .map((value) => `${quoteIfNeeded(typeColumn)} = ${toConfigLiteral(value)}`)
+                .join(' OR ');
+            }
+          }
+        }
       } else if (suggestion.relationType === 'features') {
         // Find the name/value column to flatten
         const nameCol = relTable.columns.find(
@@ -768,6 +898,23 @@ export async function runWizard(): Promise<void> {
         if (nameCol && selectedColumnNames.has(nameCol.name)) {
           relation['flatten'] = nameCol.name;
         }
+      }
+
+      // The map key (`relationName`) stays the disambiguated `table__foreignKey`
+      // key so two FKs onto the same child table can't collide (#26144). A
+      // flatten/generic relation's runtime *output* attribute is published
+      // under a separate, stable semantic name instead — the disambiguated
+      // key is an internal collision guard, not a customer-facing name.
+      if (suggestion.relationType === 'features' || suggestion.relationType === 'generic') {
+        const basePublishedName =
+          existingRelation?.publishAs ??
+          derivePublishedRelationName(suggestion.table, selectedTableName);
+        let publishedName = basePublishedName;
+        for (let suffix = 2; usedPublishedNames.has(publishedName); suffix++) {
+          publishedName = `${basePublishedName}_${suffix}`;
+        }
+        usedPublishedNames.add(publishedName);
+        relation['publishAs'] = publishedName;
       }
 
       relations[relationName] = relation;
