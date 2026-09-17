@@ -288,15 +288,18 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       // Record exactly how many raw rows (from `startOffset`) this page
       // consumed, so a request for the next page resumes right after them
       // instead of re-deriving an offset that overlaps rows already served
-      // above (#26344). A short/exhausted page has no next page to resume,
-      // so there is nothing worth caching. Nor is a page that never
-      // backfilled: if the raw offset it consumed matches the naive
-      // `page * pageSize` boundary exactly, the entry would be a no-op
-      // indistinguishable from having no cursor at all, and it would still
-      // occupy one of the `MAX_BACKFILL_CURSOR_ENTRIES` slots — letting
-      // ordinary search traffic evict the one cursor that actually carries
-      // information (#26696).
-      if (items.length === pagination.pageSize) {
+      // above (#26344). Cache whenever the page served rows and the result
+      // set is not exhausted: a short page whose backfill budget ran out
+      // still has a next page, and skipping the cursor re-serves the rows
+      // already handed out (#27419). A truly exhausted page has no next
+      // page to resume, so there is nothing worth caching. Nor is a page
+      // that never backfilled: if the raw offset it consumed matches the
+      // naive `page * pageSize` boundary exactly, the entry would be a
+      // no-op indistinguishable from having no cursor at all, and it would
+      // still occupy one of the `MAX_BACKFILL_CURSOR_ENTRIES` slots —
+      // letting ordinary search traffic evict the one cursor that actually
+      // carries information (#26696).
+      if (items.length > 0 && !exhausted) {
         const consumedRaw = rawRowsConsumedForTarget(batches, items.length);
         const rawOffset = startOffset + consumedRaw;
         if (rawOffset !== pagination.page * pagination.pageSize) {

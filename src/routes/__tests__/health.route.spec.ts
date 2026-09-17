@@ -561,14 +561,14 @@ describe('health route', () => {
       .fn()
       .mockResolvedValueOnce(
         new Map([
-          ['1', [{ image_url: { url: 'https://example.com/a.jpg' } }]],
-          ['2', [{ image_url: { url: 'https://example.com/b.jpg' } }]],
+          ['1', [{ image_url: 42 }]],
+          ['2', [{ image_url: 43 }]],
         ]),
       )
       .mockResolvedValueOnce(
         new Map([
-          ['3', [{ image_url: { url: 'https://example.com/c.jpg' } }]],
-          ['4', [{ image_url: { url: 'https://example.com/d.jpg' } }]],
+          ['3', [{ image_url: 44 }]],
+          ['4', [{ image_url: 45 }]],
         ]),
       );
     registerHealthRoute(
@@ -590,12 +590,13 @@ describe('health route', () => {
 
     const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
-    // Every row on both pages has a relation image value that is a jsonb
-    // object rather than a string, which the wire contract rejects as
-    // malformed. Evaluating page 2 against page 1's relation data (keyed by
-    // ids "1"/"2") would resolve every page-2 lookup to no relation rows,
-    // hide the malformed value, and let the probe fail open exactly where
-    // this second-page check exists to catch it (residual of #25983).
+    // Every row on both pages has a relation image value that is a number
+    // rather than a string, which the wire contract rejects as malformed
+    // (an object shape would instead be advisory-unservable, see #27421).
+    // Evaluating page 2 against page 1's relation data (keyed by ids "1"/"2")
+    // would resolve every page-2 lookup to no relation rows, hide the
+    // malformed value, and let the probe fail open exactly where this
+    // second-page check exists to catch it (residual of #25983).
     expect(response.statusCode).toBe(503);
     expect(response.json()).toMatchObject({
       resources: 'misconfigured',
@@ -631,6 +632,48 @@ describe('health route', () => {
 
     expect(response.statusCode).toBe(503);
     expect(response.json()).toMatchObject({ resourceError: expect.stringContaining('images[1]') });
+    await app.close();
+  });
+
+  it('keeps the resource healthy when every sampled row stores a jsonb images column of objects (#27421)', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [
+        { id: '1', title: 'Test', price: 100, image_urls: [{ src: 'https://example.com/a.jpg' }] },
+        {
+          id: '2',
+          title: 'Also test',
+          price: 200,
+          image_urls: [{ src: 'https://example.com/b.jpg' }],
+        },
+      ],
+      total: 2,
+    });
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        fields: { ...inventoryResource.fields, images: 'image_urls' },
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    // A jsonb images column shaped as objects instead of plain strings fails
+    // identically on every sampled row, same as a relative path (#25790).
+    // `normalizeImageUrls` already drops each unusable entry, so the listing
+    // itself (title/price/currency) is still valid - this must stay an
+    // advisory, not flip the whole resource to misconfigured/503 (#27421).
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'ok',
+      resources: 'ok',
+      unservableImageIds: ['1', '2'],
+    });
+    expect(response.json()).not.toHaveProperty('resourceError');
+    expect(response.json()).not.toHaveProperty('wireContractViolationIds');
     await app.close();
   });
 

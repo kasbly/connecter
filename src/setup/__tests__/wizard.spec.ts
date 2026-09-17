@@ -7,6 +7,7 @@ import * as yaml from 'js-yaml';
 import {
   FIELD_MAPPING_TARGETS,
   backupPrivateFile,
+  derivePublishedRelationName,
   getFieldMappingPrompt,
   getIdColumnPrompt,
   isPublicHostname,
@@ -213,6 +214,37 @@ describe('getIdColumnPrompt', () => {
       { name: 'sku', value: 'sku' },
       { name: 'title', value: 'title' },
     ]);
+  });
+});
+
+describe('derivePublishedRelationName', () => {
+  it('strips a singular main-table prefix', () => {
+    expect(derivePublishedRelationName('CarFeatures', 'Car')).toBe('features');
+  });
+
+  it('strips a plural main-table prefix when the main table is itself plural', () => {
+    expect(derivePublishedRelationName('cars_features', 'cars')).toBe('features');
+  });
+
+  it('falls back to the whole table name when the child does not share the main table prefix', () => {
+    // `car_features` doesn't start with `cars`, so this is the documented fallback.
+    expect(derivePublishedRelationName('car_features', 'cars')).toBe('car_features');
+  });
+
+  it('strips a pluralized prefix off a singular main table (#27422)', () => {
+    expect(derivePublishedRelationName('cars_features', 'car')).toBe('features');
+  });
+
+  it('strips a pluralized prefix off a singular main table for another noun (#27422)', () => {
+    expect(derivePublishedRelationName('products_attributes', 'product')).toBe('attributes');
+  });
+
+  it('falls back to the whole table name lower-cased when the table equals the main table', () => {
+    expect(derivePublishedRelationName('Car', 'Car')).toBe('car');
+  });
+
+  it('falls back to the whole table name lower-cased when the main table is not a prefix at all', () => {
+    expect(derivePublishedRelationName('Inventory', 'Car')).toBe('inventory');
   });
 });
 

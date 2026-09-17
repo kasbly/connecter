@@ -539,6 +539,27 @@ describe('validateInventoryItemWireContract', () => {
     ).not.toThrow();
     expect(() => validateInventoryItemWireContract(item, ['car-123.jpg'])).not.toThrow();
   });
+
+  it('serves a listing whose only image value is an object shape, e.g. a jsonb column of {src, alt} objects (#27421)', () => {
+    const item = {
+      externalId: 'sku-1',
+      title: 'Coffee',
+      description: null,
+      price: 1,
+      currency: 'SAR',
+      category: '',
+      status: 'ACTIVE',
+      images: [],
+      attributes: {},
+      updatedAt: null,
+    };
+
+    expect(() =>
+      validateInventoryItemWireContract(item, [
+        [{ src: 'https://example.com/coffee.jpg', alt: 'Coffee' }],
+      ]),
+    ).not.toThrow();
+  });
 });
 
 describe('getImageValueProblems', () => {
@@ -564,6 +585,23 @@ describe('getImageValueProblems', () => {
       'images: invalid JSON image array',
     ]);
     expect(getImageValueProblems(['{"a":1}']).malformed).toEqual([]);
+  });
+
+  it('reports an object-shaped image value as unservable, not malformed (#27421)', () => {
+    // A jsonb images column storing objects instead of plain strings, e.g.
+    // `[{"src": "https://example.com/a.jpg", "alt": "Car"}]`. The mapper
+    // already can't interpret it as a URL (`normalizeImageUrls` drops it), so
+    // it belongs in the same advisory tier as a relative path (#25790), not
+    // the tier that withholds the whole listing.
+    expect(getImageValueProblems([[{ src: 'https://example.com/a.jpg', alt: 'Car' }]])).toEqual({
+      malformed: [],
+      unservable: ['images[0]: image values must be URL strings (got an object)'],
+    });
+
+    expect(getImageValueProblems([{ url: 'https://example.com/a.jpg' }])).toEqual({
+      malformed: [],
+      unservable: ['images: image values must be URL strings (got an object)'],
+    });
   });
 
   it('reports nothing for absolute URLs, empty values, and nested arrays', () => {

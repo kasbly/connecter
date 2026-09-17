@@ -370,6 +370,24 @@ describe('isSafeOrderByColumn', () => {
     expect(isSafeOrderByColumn('"fuelType"')).toBe(true);
   });
 
+  // #27420: `quoteIfNeeded` (setup/wizard.ts) always double-quotes generated
+  // identifiers, including ones that only needed quoting for something other
+  // than case — a space, a hyphen, non-ASCII scripts. Those are not valid bare
+  // identifiers, but a correctly quoted-and-escaped form of them is safe to
+  // interpolate, and the wizard never produces anything else.
+  it('accepts quoted identifiers that needed quoting for a reason other than case', () => {
+    expect(isSafeOrderByColumn('"Item Number"')).toBe(true);
+    expect(isSafeOrderByColumn('"제목"')).toBe(true);
+    expect(isSafeOrderByColumn('"العنوان"')).toBe(true);
+    expect(isSafeOrderByColumn('"make-en"')).toBe(true);
+    expect(isSafeOrderByColumn('"1stColumn"')).toBe(true);
+    expect(isSafeOrderByColumn('"$price"')).toBe(true);
+  });
+
+  it('accepts a quoted identifier containing a properly escaped double quote', () => {
+    expect(isSafeOrderByColumn('"say ""hi"""')).toBe(true);
+  });
+
   it.each([
     ['empty string', ''],
     [
@@ -385,7 +403,10 @@ describe('isSafeOrderByColumn', () => {
     ['leading digit', '1=1'],
     ['whitespace inside identifier', 'price updatedAt'],
     ['unterminated quote', '"price'],
+    ['another unterminated quote', '"unterminated'],
     ['nested quotes with content', '"price" OR "1"="1"'],
+    ['stacked query, unquoted', 'id; DROP TABLE x'],
+    ['stacked query appended after a quoted identifier', '"id"; DROP TABLE x; --'],
   ])('rejects %s (%j)', (_label, payload) => {
     expect(isSafeOrderByColumn(payload)).toBe(false);
   });

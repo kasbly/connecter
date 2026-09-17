@@ -229,11 +229,14 @@ export function derivePublishedRelationName(table: string, mainTable: string): s
   const lowerMain = mainTable.toLowerCase();
 
   let noun = table;
-  if (lowerTable.startsWith(lowerMain) && lowerTable.length > lowerMain.length) {
-    noun = table.slice(mainTable.length);
-  } else if (lowerTable.startsWith(`${lowerMain}s`) && lowerTable.length > lowerMain.length + 1) {
+  if (lowerTable.startsWith(`${lowerMain}s`) && lowerTable.length > lowerMain.length + 1) {
     // Plural main-table prefix, e.g. `cars_features` off a `car`/`cars` table.
+    // Tested before the singular-prefix branch below since `lowerMain + 's'`
+    // starting is a strict subset of `lowerMain` starting — the singular
+    // branch would otherwise always win and this one would never run.
     noun = table.slice(mainTable.length + 1);
+  } else if (lowerTable.startsWith(lowerMain) && lowerTable.length > lowerMain.length) {
+    noun = table.slice(mainTable.length);
   }
   noun = noun.replace(/^[_-]+/, '') || table;
 

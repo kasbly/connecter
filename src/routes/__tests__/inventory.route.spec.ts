@@ -519,6 +519,69 @@ describe('inventory routes', () => {
     await app.close();
   });
 
+  it('GET /inventory does not re-serve a short page when the backfill budget is exhausted (#27419)', async () => {
+    // 60 listings, newest 22 fail the wire contract. Customer search uses
+    // pageSize 5, so the backfill budget is 25 raw rows — enough to reach
+    // listings 38-36 but not to fill the page. That short non-exhausted
+    // page must still cache a cursor; otherwise page 2 falls back to the
+    // naive offset and re-serves 38-36.
+    const totalRawRows = 60;
+    const pageSize = 5;
+    const invalidCount = 22;
+    const firstValidId = totalRawRows - invalidCount;
+    const rawRows = Array.from({ length: totalRawRows }, (_, i) => {
+      const id = totalRawRows - i;
+      return id > firstValidId
+        ? { id: String(id), name: 'Bad Row', price: 'TBD', updatedAt: '2026-01-01T00:00:00Z' }
+        : {
+            id: String(id),
+            name: `Good Row ${id}`,
+            price: 9.99,
+            updatedAt: '2026-01-01T00:00:00Z',
+          };
+    });
+    const query = vi.fn().mockImplementation((_table, _conditions, pagination) => {
+      const offset = pagination.rawOffset ?? (pagination.page - 1) * pagination.pageSize;
+      return Promise.resolve({
+        rows: rawRows.slice(offset, offset + pagination.pageSize),
+        total: totalRawRows,
+      });
+    });
+    const mockAdapter = createMockDbAdapter({ query });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const itemIds = (payload: string) =>
+      (JSON.parse(payload) as { items: { externalId: string }[] }).items.map(
+        (item) => item.externalId,
+      );
+
+    const page1Response = await app.inject({
+      method: 'GET',
+      url: `/inventory?page=1&pageSize=${pageSize}`,
+    });
+    const page2Response = await app.inject({
+      method: 'GET',
+      url: `/inventory?page=2&pageSize=${pageSize}`,
+    });
+
+    expect(page1Response.statusCode).toBe(200);
+    expect(page2Response.statusCode).toBe(200);
+
+    const page1Ids = itemIds(page1Response.payload);
+    const page2Ids = itemIds(page2Response.payload);
+
+    expect(page1Ids).toEqual(['38', '37', '36']);
+    expect(page2Ids).toEqual(['35', '34', '33', '32', '31']);
+    expect(page1Ids.filter((id) => page2Ids.includes(id))).toEqual([]);
+
+    await app.close();
+  });
+
   it('GET /inventory keeps subtracting withheld rows from total on later pages (#26695)', async () => {
     // 60 raw listings, newest-first. Ids 45-60 fail the wire contract (the
     // #25984 "bad import at the top of updated_at DESC" case). Page 1

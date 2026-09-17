@@ -15,13 +15,23 @@ import type {
 
 /**
  * Matches a bare SQL identifier (`price`, `updatedAt`) or a single double-quoted
- * identifier (`"makeEn"`) — the only two column-expression shapes
- * `InventoryResourceConfig` produces (see connector.config.example.yml). The quote
- * marks must be balanced (both present or both absent) — an unterminated quote is
- * refused rather than silently accepted. Anything else — whitespace, parentheses,
- * semicolons, quoted content, SQL keywords used as expressions — is refused too.
+ * identifier (`"makeEn"`, `"Item Number"`, `"제목"`) — the only two column-expression
+ * shapes `InventoryResourceConfig` produces (see connector.config.example.yml).
+ *
+ * The quoted form accepts any content as long as every embedded `"` is doubled
+ * (`""`), matching exactly what `quoteIfNeeded` (setup/wizard.ts) generates — it
+ * always wraps the identifier in quotes and doubles any `"` inside. This is what
+ * lets a column name that only needed quoting for something other than case
+ * (spaces, hyphens, non-ASCII scripts, a leading digit, a `$`) through: those are
+ * intentionally NOT valid bare identifiers, but they are still safe once quoted,
+ * because a lone `"` can never appear unescaped inside the identifier body — it
+ * would either be doubled (staying inside the identifier) or end the quoted form
+ * right there, so the pattern's own `"..."$` anchor cannot be broken out of
+ * early. The unquoted form still refuses whitespace, parentheses, semicolons,
+ * and unterminated quotes — a lone `"` with no balancing partner never matches
+ * either alternative.
  */
-export const SAFE_ORDER_BY_COLUMN_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*|"[A-Za-z_][A-Za-z0-9_]*")$/;
+export const SAFE_ORDER_BY_COLUMN_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*|"(?:[^"]|"")+")$/;
 
 export function isSafeOrderByColumn(column: string): boolean {
   return SAFE_ORDER_BY_COLUMN_PATTERN.test(column);
