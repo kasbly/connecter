@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DatabaseConfig } from '../../config/config.types.js';
+import type { DatabaseConfig, InventoryResourceConfig } from '../../config/config.types.js';
 import {
   PostgresAdapter,
   isSafeOrderByColumn,
@@ -8,6 +8,7 @@ import {
   DEFAULT_COUNT_LIMIT,
 } from '../postgres.adapter.js';
 import type { QueryCondition, SortOptions } from '../adapter.interface.js';
+import { buildQuery } from '../../mapping/query-builder.js';
 
 const { knexMock, rawMock } = vi.hoisted(() => {
   const rawMock = vi.fn().mockResolvedValue(undefined);
@@ -727,6 +728,41 @@ describe('PostgresAdapter list count (#17420)', () => {
     // Same predicates as the data query — the count must not silently widen or
     // narrow the result set it reports on.
     expect(dataQuery.bindings.slice(0, 3)).toEqual([2024, '%sonata%', '%sonata%']);
+  });
+
+  it('AND-separates a two-term search into two parenthesized ILIKE groups, not one flat OR (#27614)', async () => {
+    // Free-text search is documented as AND-between-terms, OR-between-columns
+    // (query-builder.ts:174). buildQuery is what tags each term's conditions
+    // with a distinct `_group`; the adapter is what turns that into separate
+    // `.where()` calls instead of one OR of every ILIKE. Going through
+    // buildQuery here — rather than hand-writing two `_group` values — means
+    // dropping `_group: term` from the producer fails this test too.
+    const searchConfig: InventoryResourceConfig = {
+      table: 'Car',
+      idColumn: 'id',
+      fields: { title: 'title', price: 'price' },
+      searchableColumns: ['title', '"makeEn"'],
+    };
+    const { conditions } = buildQuery({ search: 'Hyundai Sonata' }, searchConfig);
+
+    const { countQuery, dataQuery } = await runListQuery({ count: 3, conditions });
+
+    // Two AND-ed parenthesized ILIKE groups — one per search term — not a
+    // single flat OR of all four column/term ILIKE predicates.
+    const expectedGroups =
+      `(title ILIKE ? ESCAPE '\\' or "makeEn" ILIKE ? ESCAPE '\\') and ` +
+      `(title ILIKE ? ESCAPE '\\' or "makeEn" ILIKE ? ESCAPE '\\')`;
+    expect(dataQuery.sql).toContain(expectedGroups);
+    expect(countQuery.sql).toContain(expectedGroups);
+    expect(dataQuery.bindings.slice(0, 4)).toEqual([
+      '%Hyundai%',
+      '%Hyundai%',
+      '%Sonata%',
+      '%Sonata%',
+    ]);
+    // Same predicates as the data query — the count must not silently widen or
+    // narrow the result set it reports on.
+    expect(countQuery.bindings.slice(0, 4)).toEqual(dataQuery.bindings.slice(0, 4));
   });
 
   it('matches filter.color=white against a stored White value via case-insensitive exact ILIKE', async () => {

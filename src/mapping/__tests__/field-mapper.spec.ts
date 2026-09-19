@@ -434,6 +434,57 @@ describe('mapRowToInventoryItem', () => {
     expect(result.attributes.features).toEqual(['ABS', 'Airbag']);
   });
 
+  it('publishes a flattened wizard-generated relation under publishAs, not the disambiguated table__fk map key (#27613)', () => {
+    const configWithRelations: InventoryResourceConfig = {
+      ...baseConfig,
+      relations: {
+        CarFeatures__carId: {
+          table: 'CarFeatures',
+          foreignKey: '"carId"',
+          referenceKey: 'id',
+          fields: { name: '"featureName"' },
+          flatten: 'name',
+          publishAs: 'features',
+        },
+      },
+    };
+
+    const featureData = new Map<string, Record<string, unknown>[]>();
+    featureData.set('123', [{ name: 'ABS' }, { name: 'Airbag' }]);
+    const relationData = new Map<string, Map<string, Record<string, unknown>[]>>();
+    relationData.set('CarFeatures__carId', featureData);
+
+    const row = { id: '123', title: 'Test', price: 100 };
+    const result = mapRowToInventoryItem(row, configWithRelations, relationData);
+    expect(result.attributes.features).toEqual(['ABS', 'Airbag']);
+    expect(result.attributes.CarFeatures__carId).toBeUndefined();
+  });
+
+  it('publishes a non-flatten wizard-generated relation under publishAs, not the disambiguated table__fk map key (#27613)', () => {
+    const configWithRelations: InventoryResourceConfig = {
+      ...baseConfig,
+      relations: {
+        CarFeatures__carId: {
+          table: 'CarFeatures',
+          foreignKey: '"carId"',
+          referenceKey: 'id',
+          fields: { name: '"featureName"' },
+          publishAs: 'features',
+        },
+      },
+    };
+
+    const featureData = new Map<string, Record<string, unknown>[]>();
+    featureData.set('123', [{ name: 'ABS' }, { name: 'Airbag' }]);
+    const relationData = new Map<string, Map<string, Record<string, unknown>[]>>();
+    relationData.set('CarFeatures__carId', featureData);
+
+    const row = { id: '123', title: 'Test', price: 100 };
+    const result = mapRowToInventoryItem(row, configWithRelations, relationData);
+    expect(result.attributes.features).toEqual([{ name: 'ABS' }, { name: 'Airbag' }]);
+    expect(result.attributes.CarFeatures__carId).toBeUndefined();
+  });
+
   it('joins image relations when the child FK is a string and the parent key is a number', () => {
     const configWithRelations: InventoryResourceConfig = {
       ...baseConfig,

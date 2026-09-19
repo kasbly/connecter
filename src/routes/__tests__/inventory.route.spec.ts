@@ -189,6 +189,34 @@ describe('inventory routes', () => {
     await app.close();
   });
 
+  it('GET /inventory?search= reaches the adapter as ILIKE conditions (#27612)', async () => {
+    const mockAdapter = createMockDbAdapter();
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/inventory?search=Hyundai',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(mockAdapter.query).toHaveBeenCalledWith(
+      'Product',
+      expect.arrayContaining([
+        expect.objectContaining({ column: 'name', operator: 'ILIKE', value: 'Hyundai' }),
+      ]),
+      expect.anything(),
+      expect.anything(),
+      undefined,
+      expect.anything(),
+    );
+
+    await app.close();
+  });
+
   it('GET /inventory reports unsupported filters and still queries configured filters', async () => {
     const mockAdapter = createMockDbAdapter();
     const app = Fastify();
