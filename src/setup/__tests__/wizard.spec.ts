@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'dotenv';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as yaml from 'js-yaml';
@@ -720,6 +720,136 @@ describe('runWizard', () => {
       );
       expect(resourceProbeMocks.adapter.connect).toHaveBeenCalledOnce();
       expect(resourceProbeMocks.adapter.disconnect).toHaveBeenCalledOnce();
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves connector.config.yml unwritten when the DB password defeats .env quoting (#27786)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      'description',
+      '\0unmapped',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    // Step 6 asks which proxy fronts the connector; take the bundled Caddy.
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'merchant_data',
+      'connector.merchant.example',
+    ]) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    // Carries both a single quote and a double quote: serializeEnvValue can't
+    // quote this for either dotenv or Docker Compose's env_file parser and
+    // throws. The password prompt is mocked here (its own `validate` never
+    // runs), which is exactly the path an existing-config rerun takes too
+    // (`existingConfig?.database.password` skips the prompt outright) — so
+    // this exercises the write-ordering fix, not the prompt-level guard.
+    promptMocks.password.mockResolvedValueOnce(`tr'ust"no1`);
+    promptMocks.confirm.mockImplementation(({ message }) =>
+      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve([]);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title', 'description']);
+      }
+      if (message.startsWith('Which filters should be available')) {
+        return Promise.resolve(['minPrice', 'maxPrice', 'currency']);
+      }
+      return Promise.resolve(['url']);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'materialized view',
+            rowCount: 100,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'title', type: 'character', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'makeEn', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'year', type: 'integer', nullable: true, isPrimaryKey: false },
+            ],
+          },
+          {
+            name: 'product_images',
+            kind: 'table',
+            rowCount: 200,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'product_sku', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'sort_order', type: 'integer', nullable: false, isPrimaryKey: false },
+            ],
+          },
+          {
+            name: 'variant_images',
+            kind: 'table',
+            rowCount: 200,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'product_id', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [
+          {
+            constraintName: 'product_images_product_sku_fkey',
+            fromTable: 'product_images',
+            fromColumn: 'product_sku',
+            toTable: 'products',
+            toColumn: 'sku',
+          },
+          {
+            constraintName: 'variant_images_product_id_fkey',
+            fromTable: 'variant_images',
+            fromColumn: 'product_id',
+            toTable: 'products',
+            toColumn: 'id',
+          },
+        ],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await expect(runWizard()).rejects.toThrow(/single quote.*double quote or backslash/);
+      // Both files must be untouched: the config write must not have run ahead
+      // of the (throwing) .env build (#27786).
+      expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
+      expect(existsSync(join(directory, '.env'))).toBe(false);
     } finally {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
@@ -2079,7 +2209,7 @@ describe('runWizard', () => {
     );
     writeFileSync(
       join(directory, '.env'),
-      'DB_HOST=database.example.com\nDB_NAME=catalog\nDB_USER=reader\nDB_PASSWORD=p@ss#word\nCONNECTOR_API_KEY=kc_existing\nCONNECTOR_DOMAIN=connector.merchant.example\n',
+      'DB_HOST=database.example.com\nDB_NAME=catalog\nDB_USER=reader\nDB_PASSWORD=p@ss#word\nCONNECTOR_API_KEY=kc_existing\nCONNECTOR_DOMAIN=connector.merchant.example\nCONNECTOR_BIND=0.0.0.0\n',
     );
 
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
@@ -2204,6 +2334,13 @@ describe('runWizard', () => {
       );
       expect(
         parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN'],
+      ).toBeUndefined();
+      // The operator's own proxy is on this host, so a CONNECTOR_BIND=0.0.0.0
+      // left over from a previous "none" run is dropped, not carried over
+      // (#27785) — the Docker port falls back to docker-compose.yml's
+      // loopback default.
+      expect(
+        parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_BIND'],
       ).toBeUndefined();
       expect(inventory.fields).toEqual({
         externalId: '"id"',
@@ -2909,6 +3046,11 @@ describe('runWizard', () => {
         expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN']).toBe(
           'connector.merchant.example',
         );
+        // Caddy is the only proxy in front of the connector, so the Docker port
+        // stays on docker-compose.yml's loopback default (#27785).
+        expect(
+          parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_BIND'],
+        ).toBeUndefined();
       } finally {
         consoleLog.mockRestore();
         process.chdir(previousDirectory);
@@ -2944,6 +3086,11 @@ describe('runWizard', () => {
         );
         expect(
           parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN'],
+        ).toBeUndefined();
+        // The operator's own proxy is on this same host, so the Docker port
+        // stays on docker-compose.yml's loopback default (#27785).
+        expect(
+          parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_BIND'],
         ).toBeUndefined();
       } finally {
         consoleLog.mockRestore();
@@ -2990,6 +3137,13 @@ describe('runWizard', () => {
         expect(
           parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN'],
         ).toBeUndefined();
+        // No proxy at all sits in front of the connector, so the published
+        // Docker port has to bind every interface, not just loopback, or
+        // `docker compose up -d` (after removing the caddy service) leaves
+        // it unreachable from Kasbly (#27785).
+        expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_BIND']).toBe(
+          '0.0.0.0',
+        );
       } finally {
         consoleLog.mockRestore();
         process.chdir(previousDirectory);

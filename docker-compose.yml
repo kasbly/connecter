@@ -1,6 +1,14 @@
 services:
   connector:
     build: .
+    # Loopback by default: the bundled Caddy proxy below is the only intended
+    # path to the connector, and `custom` puts the operator's own proxy on
+    # this same host. The `none` topology (no proxy at all) is the one case
+    # that needs the connector reachable from the network, so `npm run setup`
+    # writes CONNECTOR_BIND=0.0.0.0 to .env when that topology is chosen (see
+    # wizard.ts) — this default only applies when CONNECTOR_BIND is unset.
+    ports:
+      - '${CONNECTOR_BIND:-127.0.0.1}:4000:4000'
     volumes:
       - ./connector.config.yml:/app/connector.config.yml:ro
       - ./logs:/app/logs
@@ -23,7 +31,11 @@ services:
       - '80:80'
       - '443:443'
     environment:
-      CONNECTOR_DOMAIN: ${CONNECTOR_DOMAIN:?Set CONNECTOR_DOMAIN in .env to the public DNS name for this connector}
+      # Not `:?required` — `custom`/`none` never set CONNECTOR_DOMAIN, and Compose
+      # interpolates the whole file (including services not being started) before
+      # selecting one, so `docker compose up -d connector` on those topologies would
+      # otherwise abort demanding a public DNS name this service is the only consumer of.
+      CONNECTOR_DOMAIN: ${CONNECTOR_DOMAIN}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

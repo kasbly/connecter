@@ -742,6 +742,49 @@ describe('inventory routes', () => {
     await app.close();
   });
 
+  it('GET /inventory only counts once across a backfill, skipping the count on every extra fetch (#27787)', async () => {
+    // Same bounded-backfill shape as above (every page is full and entirely
+    // invalid), but this test pins the count-dedup contract itself: `total`/
+    // `totalIsCapped` are only ever needed from the first fetch, so every
+    // fetch after it must ask the adapter to skip its bounded COUNT query —
+    // otherwise the adapter runs (and discards) that count up to
+    // MAX_BACKFILL_FETCHES extra times per request (#17420 residual).
+    const query = vi.fn().mockImplementation(() =>
+      Promise.resolve({
+        rows: Array.from({ length: 5 }, (_, i) => ({
+          id: `bad-${i}`,
+          name: 'Bad Row',
+          price: 'TBD',
+          updatedAt: '2026-01-01T00:00:00Z',
+        })),
+        total: 1000,
+      }),
+    );
+    const mockAdapter = createMockDbAdapter({ query });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const response = await app.inject({ method: 'GET', url: '/inventory?pageSize=5' });
+
+    expect(response.statusCode).toBe(200);
+    expect(query).toHaveBeenCalledTimes(5);
+
+    const pageOptionsPerCall = query.mock.calls.map((call) => call[2] as { skipCount?: boolean });
+    // Exactly one call — the first, whose `total`/`totalIsCapped` are the
+    // ones actually served to the caller — is allowed to run the count.
+    const countingCalls = pageOptionsPerCall.filter((options) => options.skipCount !== true);
+    expect(countingCalls).toHaveLength(1);
+    expect(pageOptionsPerCall[0]?.skipCount).not.toBe(true);
+    // Every backfill fetch after the first must opt out of the count.
+    expect(pageOptionsPerCall.slice(1).every((options) => options.skipCount === true)).toBe(true);
+
+    await app.close();
+  });
+
   it('GET /inventory reports total 0 when every row on the page violates the wire contract', async () => {
     const mockAdapter = createMockDbAdapter({
       query: vi.fn().mockResolvedValue({

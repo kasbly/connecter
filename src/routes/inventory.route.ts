@@ -271,6 +271,10 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
           page: pagination.page + extraFetch + 1,
           pageSize: pagination.pageSize,
           rawOffset: startOffset + (extraFetch + 1) * pagination.pageSize,
+          // `total`/`totalIsCapped` are already captured from the first fetch
+          // above; every extra backfill fetch shares the same conditions and
+          // baseFilter, so its count would be redundant (#27787).
+          skipCount: true,
         };
         const backfill = await runQuery(backfillPage);
         rowsExamined += backfill.rows.length;

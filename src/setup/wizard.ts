@@ -425,7 +425,23 @@ export async function runWizard(): Promise<void> {
   // Password prompts deliberately have no default. Reuse the validated existing
   // value on edits so a mapping-only change does not require re-entering it.
   const dbPassword =
-    existingConfig?.database.password ?? (await password({ message: 'Password:', mask: true }));
+    existingConfig?.database.password ??
+    (await password({
+      message: 'Password:',
+      mask: true,
+      // A password carrying both a single quote and a double quote or backslash
+      // makes serializeEnvValue throw when the .env is written at the end of the
+      // wizard — by then connector.config.yml may already be on disk with no
+      // matching .env (#27786). Reject it here, before ~30 more prompts run.
+      validate: (value) => {
+        try {
+          serializeEnvValue(value);
+          return true;
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      },
+    }));
   const requiresTls = await confirm({
     message: 'Does this database require TLS?',
     default: existingConfig?.database.ssl ?? shouldDefaultToTls(dbHost),
@@ -1144,10 +1160,11 @@ export async function runWizard(): Promise<void> {
   if (hasExistingEnv) backupPrivateFile(envPath);
   // js-yaml v5 replaced `quotingType: '"'` with `quoteStyle: 'double'`.
   const yamlContent = yaml.dump(config, { lineWidth: 120, quoteStyle: 'double' });
-  writePrivateFile(configPath, yamlContent);
-  console.log(`✅ Configuration saved to ${configPath}`);
-
-  // Update generated values while preserving operator-owned .env settings.
+  // Build the .env content BEFORE writing connector.config.yml. mergeEnvironmentFile
+  // (via serializeEnvValue) can still throw here for a rerun that reuses an
+  // existingConfig password never run through the prompt's own validate — building
+  // it first means that throw happens before either file is touched, instead of
+  // after connector.config.yml is already saved with no matching .env (#27786).
   const envContent = mergeEnvironmentFile(hasExistingEnv ? readFileSync(envPath, 'utf-8') : '', {
     DB_HOST: dbHost,
     DB_NAME: dbName,
@@ -1160,7 +1177,16 @@ export async function runWizard(): Promise<void> {
     // proxy on a rerun also drops a CONNECTOR_DOMAIN value a previous run
     // wrote — `custom`/`none` never use it.
     CONNECTOR_DOMAIN: connectorDomain ?? null,
+    // docker-compose.yml publishes the connector's port on CONNECTOR_BIND
+    // (default 127.0.0.1). `none` has no reverse proxy in front of it at
+    // all, so it is the one topology that needs the connector reachable
+    // from the network; `bundled`/`custom` both put a proxy on this host
+    // (Caddy, or the operator's own), so they drop back to the loopback
+    // default rather than writing a value (#27785).
+    CONNECTOR_BIND: proxyTopology === 'none' ? '0.0.0.0' : null,
   });
+  writePrivateFile(configPath, yamlContent);
+  console.log(`✅ Configuration saved to ${configPath}`);
   writePrivateFile(envPath, envContent);
   console.log(`✅ Environment saved to ${envPath}`);
 

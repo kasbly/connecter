@@ -28,7 +28,7 @@ npm ci
 npm run setup
 ```
 
-The wizard connects to your database, introspects tables/columns/foreign keys, and auto-generates `connector.config.yml` + `.env` with sensible defaults. It also asks which reverse proxy will front the connector. Choosing the bundled Caddy proxy also asks for a public DNS name, writes `CONNECTOR_DOMAIN` and `server.trustedProxies`, and ends by recommending `docker compose up -d`. Choosing your own proxy or none skips the public-DNS-name prompt entirely and instead recommends `npm run build && npm start` — the bundled Caddy service must not be started in either case, since its traffic would arrive from Caddy's fixed internal address rather than from the internet or your own proxy.
+The wizard connects to your database, introspects tables/columns/foreign keys, and auto-generates `connector.config.yml` + `.env` with sensible defaults. It also asks which reverse proxy will front the connector. Choosing the bundled Caddy proxy also asks for a public DNS name, writes `CONNECTOR_DOMAIN` and `server.trustedProxies`, and ends by recommending `docker compose up -d`. Choosing your own proxy or none skips the public-DNS-name prompt entirely and instead recommends `npm run build && npm start` — the bundled Caddy service must not be started in either case, since its traffic would arrive from Caddy's fixed internal address rather than from the internet or your own proxy. Choosing "None" also writes `CONNECTOR_BIND=0.0.0.0` so that if you run the Docker deployment instead (after removing the `caddy` service from `docker-compose.yml`), its published port is actually reachable from the network.
 
 ### 2. Manual Setup
 
@@ -374,23 +374,25 @@ than comparing the Kasbly token against your status column.
 
 ## Environment Variables
 
-| Variable            | Required | Description                                                   |
-| ------------------- | -------- | ------------------------------------------------------------- |
-| `DB_HOST`           | Yes      | Database hostname                                             |
-| `DB_NAME`           | Yes      | Database name                                                 |
-| `DB_USER`           | Yes      | Database username                                             |
-| `DB_PASSWORD`       | Yes      | Database password                                             |
-| `DB_SSL_CA`         | No       | PEM CA bundle referenced by `database.sslCa` for a private CA |
-| `CONNECTOR_API_KEY` | Yes      | API key shared with Kasbly                                    |
-| `CONNECTOR_DOMAIN`  | Docker   | Public DNS name used by the bundled HTTPS proxy               |
-| `CONFIG_PATH`       | No       | Config file path (default: `./connector.config.yml`)          |
+| Variable            | Required | Description                                                                                                                                |
+| ------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DB_HOST`           | Yes      | Database hostname                                                                                                                          |
+| `DB_NAME`           | Yes      | Database name                                                                                                                              |
+| `DB_USER`           | Yes      | Database username                                                                                                                          |
+| `DB_PASSWORD`       | Yes      | Database password                                                                                                                          |
+| `DB_SSL_CA`         | No       | PEM CA bundle referenced by `database.sslCa` for a private CA                                                                              |
+| `CONNECTOR_API_KEY` | Yes      | API key shared with Kasbly                                                                                                                 |
+| `CONNECTOR_DOMAIN`  | Docker   | Public DNS name used by the bundled HTTPS proxy                                                                                            |
+| `CONNECTOR_BIND`    | No       | Host interface Docker publishes port 4000 on (default `127.0.0.1`; `npm run setup` writes `0.0.0.0` for the "None" reverse-proxy topology) |
+| `CONFIG_PATH`       | No       | Config file path (default: `./connector.config.yml`)                                                                                       |
 
 ## Docker HTTPS Deployment
 
 The bundled Compose deployment is the supported production path. It includes Caddy, which
 terminates HTTPS, automatically obtains and renews a publicly trusted certificate, and proxies
-requests to the connector over an internal Docker network. The connector itself is not exposed on
-the host, so Kasbly must use the HTTPS URL.
+requests to the connector over an internal Docker network. The connector's Docker port is published
+on loopback only (`CONNECTOR_BIND`, default `127.0.0.1`), so it is not reachable over the network
+and Kasbly must use the HTTPS URL.
 
 1. Create a public DNS `A` (and, when applicable, `AAAA`) record for the hostname you will use,
    pointing to this server. Allow inbound TCP ports 80 and 443; Caddy uses port 80 to complete the

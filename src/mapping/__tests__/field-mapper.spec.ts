@@ -10,7 +10,7 @@ import {
   resolveInventoryStatus,
   validateInventoryItemWireContract,
 } from '../field-mapper.js';
-import type { InventoryResourceConfig } from '../../config/config.types.js';
+import type { InventoryResourceConfig, StatusValuesConfig } from '../../config/config.types.js';
 
 const baseConfig: InventoryResourceConfig = {
   table: 'Car',
@@ -261,6 +261,23 @@ describe('mapRowToInventoryItem', () => {
   it('uses the documented case-insensitive defaults for canonical status values', () => {
     expect(resolveInventoryStatus('sold', undefined)).toBe('SOLD');
     expect(getSourceStatusValues('SOLD', undefined)).toEqual(['SOLD', 'sold']);
+  });
+
+  it('agrees with the filter direction on a statusValues block that omits ACTIVE', () => {
+    // README:352-355 — a present `statusValues` block is read literally; a key
+    // left out means "no listings in that status", never filled in from the
+    // built-in English defaults. `resolveInventoryStatus` (reads) and
+    // `getSourceStatusValues` (filter.status compilation) must reach the same
+    // verdict for the same partial block, or an unfiltered read reports rows
+    // as ACTIVE while `filter.status=ACTIVE` compiles to `WHERE 1 = 0`.
+    const partialStatusValues: StatusValuesConfig = { SOLD: ['sold'], RESERVED: ['reserved'] };
+
+    expect(resolveInventoryStatus('active', partialStatusValues)).toBeUndefined();
+    expect(getSourceStatusValues('ACTIVE', partialStatusValues)).toBeUndefined();
+
+    // Keys the block does provide still resolve normally.
+    expect(resolveInventoryStatus('sold', partialStatusValues)).toBe('SOLD');
+    expect(getSourceStatusValues('SOLD', partialStatusValues)).toEqual(['sold']);
   });
 
   it('processes image relations', () => {

@@ -275,6 +275,22 @@ export class PostgresAdapter implements DatabaseAdapter {
 
     dataQuery = this.applyBaseFilterAndConditions(dataQuery, db, conditions, baseFilter);
 
+    const dataPromise = dataQuery
+      .orderByRaw(buildOrderByClause(sort))
+      .limit(pagination.pageSize)
+      .offset(offset) as Promise<Record<string, unknown>[]>;
+
+    // The inventory route's wire-contract backfill (#25984) re-enters `query`
+    // with the same conditions/baseFilter purely to pull more raw rows once
+    // the first fetch's page came up short after validation — the count is
+    // identical (modulo the cap) on every one of those calls. Skip it there
+    // instead of paying for a redundant bounded COUNT against the merchant's
+    // live database on every extra fetch (#17420 residual, see #27787).
+    if (pagination.skipCount) {
+      const rows = await dataPromise;
+      return { rows, total: 0, totalIsCapped: false };
+    }
+
     // Build the count query separately, over a LIMITed subquery so Postgres can
     // stop scanning once the cap is reached instead of walking every matching
     // row on the merchant's table (#17420).
@@ -287,13 +303,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     const countQuery = db.count('* as count').from(countRows.limit(countLimit).as('bounded_count'));
 
     // Run count and data queries in parallel
-    const [countResult, rows] = await Promise.all([
-      countQuery.first(),
-      dataQuery
-        .orderByRaw(buildOrderByClause(sort))
-        .limit(pagination.pageSize)
-        .offset(offset) as Promise<Record<string, unknown>[]>,
-    ]);
+    const [countResult, rows] = await Promise.all([countQuery.first(), dataPromise]);
 
     const total = Number((countResult as Record<string, unknown>)?.count ?? 0);
     return { rows, total, totalIsCapped: total >= countLimit };

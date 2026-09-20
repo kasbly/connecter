@@ -623,6 +623,7 @@ async function runListQuery(options: {
   baseFilter?: string;
   schema?: string;
   sort?: SortOptions;
+  skipCount?: boolean;
 }) {
   const { db, captured } = createRecordingKnex({
     dataRows: options.dataRows ?? [],
@@ -637,7 +638,11 @@ async function runListQuery(options: {
   const result = await adapter.query(
     'Car',
     options.conditions ?? [],
-    { page: options.page ?? 1, pageSize: options.pageSize ?? 20 },
+    {
+      page: options.page ?? 1,
+      pageSize: options.pageSize ?? 20,
+      ...(options.skipCount !== undefined ? { skipCount: options.skipCount } : {}),
+    },
     options.sort ?? { column: 'price', direction: 'asc' },
     options.baseFilter ?? 'published = true',
     ['id', 'price'],
@@ -646,11 +651,14 @@ async function runListQuery(options: {
 
   const countQuery = captured.find((query) => query.sql.includes('count(*)'));
   const dataQuery = captured.find((query) => !query.sql.includes('count(*)'));
-  if (!countQuery || !dataQuery) {
+  if (!dataQuery) {
+    throw new Error(`Expected a data query, got: ${JSON.stringify(captured)}`);
+  }
+  if (!options.skipCount && !countQuery) {
     throw new Error(`Expected a count and a data query, got: ${JSON.stringify(captured)}`);
   }
 
-  return { result, countQuery, dataQuery };
+  return { result, countQuery: countQuery as CompiledQuery, dataQuery, allQueries: captured };
 }
 
 async function runQueryById(options: {
@@ -908,6 +916,52 @@ describe('PostgresAdapter list count (#17420)', () => {
     expect(dataQuery.sql).toContain('order by updatedAt DESC NULLS LAST, id DESC');
     expect(dataQuery.sql).toContain('limit ?');
     expect(dataQuery.sql).toContain('offset ?');
+  });
+});
+
+describe('PostgresAdapter skipCount (#27787)', () => {
+  beforeEach(() => {
+    knexMock.mockClear();
+    rawMock.mockClear();
+  });
+
+  it('runs no count query at all when skipCount is set', async () => {
+    const { allQueries } = await runListQuery({ count: 20, skipCount: true });
+
+    expect(allQueries).toHaveLength(1);
+    expect(allQueries.some((query) => query.sql.includes('count(*)'))).toBe(false);
+  });
+
+  it('returns the skip defaults for total/totalIsCapped instead of running the bounded count', async () => {
+    const { result } = await runListQuery({
+      count: 20,
+      dataRows: [{ id: '1', price: 10 }],
+      skipCount: true,
+    });
+
+    expect(result.total).toBe(0);
+    expect(result.totalIsCapped).toBe(false);
+    expect(result.rows).toEqual([{ id: '1', price: 10 }]);
+  });
+
+  it('still returns the requested rows, unaffected by skipping the count', async () => {
+    const { dataQuery, result } = await runListQuery({
+      count: 20,
+      dataRows: [{ id: '1', price: 10 }],
+      page: 2,
+      pageSize: 5,
+      skipCount: true,
+    });
+
+    expect(dataQuery.sql).toContain('limit ?');
+    expect(dataQuery.sql).toContain('offset ?');
+    expect(result.rows).toEqual([{ id: '1', price: 10 }]);
+  });
+
+  it('runs the count as normal when skipCount is not set', async () => {
+    const { allQueries } = await runListQuery({ count: 20 });
+
+    expect(allQueries.some((query) => query.sql.includes('count(*)'))).toBe(true);
   });
 });
 

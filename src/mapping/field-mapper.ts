@@ -220,13 +220,18 @@ export function resolveInventoryStatus(
   const normalizedValue = String(value).trim().toLowerCase();
   if (!normalizedValue) return undefined;
 
-  // Reading a row keeps the per-key default as a safety net: an unrecognized
-  // source value would otherwise drop to `unknownStatusPolicy` and pull a live
-  // listing out of search. The filter direction below cannot afford the same
-  // guess, because there the synthesized word is sent to PostgreSQL.
+  // A `statusValues` block that is present is read literally, matching the
+  // filter direction below and the README: a key the merchant left out of the
+  // block means "this catalogue has no listings in that status", not "assume
+  // the English default". Filling a missing key in from
+  // `DEFAULT_STATUS_VALUES` let a source value such as `active` resolve here
+  // while `getSourceStatusValues` reported the same status as having no
+  // source values at all, so `filter.status=ACTIVE` returned zero rows for a
+  // catalogue every unfiltered read reported as fully active. Only an
+  // entirely absent block falls back to the defaults.
   const mappings = statusValues ?? DEFAULT_STATUS_VALUES;
   return INVENTORY_STATUSES.find((status) =>
-    (mappings[status] ?? DEFAULT_STATUS_VALUES[status]).some(
+    (mappings[status] ?? []).some(
       (sourceValue) => sourceValue.trim().toLowerCase() === normalizedValue,
     ),
   );

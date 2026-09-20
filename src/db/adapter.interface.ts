@@ -19,6 +19,16 @@ export interface PaginationOptions {
    * `(page - 1) * pageSize`, or the two pages serve overlapping rows (#26344).
    */
   rawOffset?: number;
+  /**
+   * Skip the bounded `COUNT` query entirely and return `{ total: 0,
+   * totalIsCapped: false }` instead. The inventory route's wire-contract
+   * backfill (#25984) re-enters `query` with the same conditions and
+   * `baseFilter` as the page's first fetch purely to pull more raw rows —
+   * the count is identical (modulo the cap) on every one of those calls, so
+   * paying for it beyond the first fetch is pure waste against the
+   * merchant's live database (#17420 residual, see #27787).
+   */
+  skipCount?: boolean;
 }
 
 export interface SortOptions {
