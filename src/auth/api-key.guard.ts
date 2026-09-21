@@ -18,6 +18,16 @@ export function findMatchingKey(apiKey: string, keys: AuthKeyConfig[]): AuthKeyC
   return undefined;
 }
 
+/**
+ * Routes the API key guard deliberately lets through unauthenticated — currently just
+ * `/health`, probed by the Docker Compose healthcheck with no key. Exported so other
+ * request-scoped concerns (e.g. the audit hook in server.ts) can key off the same
+ * signal instead of hardcoding a second path list that could drift from this one.
+ */
+export function isApiKeyExempt(path: string): boolean {
+  return path === '/health';
+}
+
 export function createApiKeyGuard(authConfig: AuthConfig) {
   return function apiKeyGuard(
     request: FastifyRequest,
@@ -25,7 +35,7 @@ export function createApiKeyGuard(authConfig: AuthConfig) {
     done: HookHandlerDoneFunction,
   ): void {
     // Skip auth for health endpoint
-    if (request.url.split('?')[0] === '/health') {
+    if (isApiKeyExempt(request.url.split('?')[0] ?? request.url)) {
       done();
       return;
     }

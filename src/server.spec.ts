@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -190,6 +191,107 @@ describe('buildApp database timeout handling', () => {
     } finally {
       await rm(auditDir, { recursive: true, force: true });
     }
+  });
+});
+
+// #27937: the Docker Compose healthcheck hits `/health` with no API key every 30s
+// (2,880 times/day). The audit hook used to log every response including those
+// probes, so `GET /audit-log`'s bounded newest-first scan filled up with
+// `path: "/health"` rows and buried real API traffic within hours of uptime.
+// `/health` is exempt from the audit log the same way it's exempt from the API-key
+// guard (`isApiKeyExempt` in `auth/api-key.guard.ts`) — liveness is already surfaced
+// via `GET /diagnostics` (`audit: ok | degraded`).
+describe('onResponse audit hook', () => {
+  function buildConfig(auditFile: string) {
+    return connectorConfigSchema.parse({
+      version: 1,
+      auth: { apiKeys: [{ key: 'test-key', label: 'test' }] },
+      database: {
+        type: 'postgres',
+        host: 'database.internal',
+        database: 'inventory',
+        user: 'connector',
+        password: 'password',
+      },
+      resources: {
+        inventory: {
+          table: 'cars',
+          idColumn: 'id',
+          fields: { externalId: 'id', title: 'title', price: 'price', currency: "'SAR'" },
+        },
+      },
+      audit: { enabled: true, filePath: auditFile, maxFileSizeMB: 50, retentionDays: 90 },
+    });
+  }
+
+  function buildHealthyAdapter(): DatabaseAdapter {
+    return {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      query: vi.fn().mockResolvedValue({ rows: [], total: 0, totalIsCapped: false }),
+      queryById: vi.fn(),
+      queryRelation: vi.fn(),
+      probeSearchableColumns: vi.fn(),
+      healthCheck: vi.fn().mockResolvedValue(true),
+      introspect: vi.fn(),
+    };
+  }
+
+  it('does not append an audit line for /health, but still audits /inventory', async () => {
+    const auditDir = await mkdtemp(join(tmpdir(), 'kasbly-connector-audit-'));
+    const auditFile = join(auditDir, 'audit.log');
+    const app = await buildApp({
+      config: buildConfig(auditFile),
+      dbAdapter: buildHealthyAdapter(),
+    });
+    try {
+      const healthResponse = await app.inject({ method: 'GET', url: '/health' });
+      expect(healthResponse.statusCode).toBe(200);
+
+      const inventoryResponse = await app.inject({
+        method: 'GET',
+        url: '/inventory',
+        headers: { 'x-api-key': 'test-key' },
+      });
+      expect(inventoryResponse.statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+
+    try {
+      const entries = (await readFile(auditFile, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as AuditEntry);
+      expect(entries.some((entry) => entry.path === '/health')).toBe(false);
+      expect(entries).toContainEqual(
+        expect.objectContaining({ method: 'GET', path: '/inventory', status: 200 }),
+      );
+    } finally {
+      await rm(auditDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not create an audit file at all when every request is a /health probe', async () => {
+    const auditDir = await mkdtemp(join(tmpdir(), 'kasbly-connector-audit-'));
+    const auditFile = join(auditDir, 'audit.log');
+    const app = await buildApp({
+      config: buildConfig(auditFile),
+      dbAdapter: buildHealthyAdapter(),
+    });
+    try {
+      for (let probe = 0; probe < 5; probe++) {
+        const response = await app.inject({ method: 'GET', url: '/health' });
+        expect(response.statusCode).toBe(200);
+      }
+    } finally {
+      // onClose flushes the audit write queue — closing first confirms /health
+      // never enqueued a write in the first place.
+      await app.close();
+    }
+
+    expect(existsSync(auditFile)).toBe(false);
+    await rm(auditDir, { recursive: true, force: true });
   });
 });
 

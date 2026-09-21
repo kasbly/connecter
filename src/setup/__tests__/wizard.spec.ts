@@ -10,6 +10,7 @@ import {
   derivePublishedRelationName,
   getFieldMappingPrompt,
   getIdColumnPrompt,
+  getUpdatedAtColumnPrompt,
   isPublicHostname,
   loadExistingSetupConfig,
   mergeEnvironmentFile,
@@ -214,6 +215,46 @@ describe('getIdColumnPrompt', () => {
       { name: 'sku', value: 'sku' },
       { name: 'title', value: 'title' },
     ]);
+  });
+});
+
+describe('getUpdatedAtColumnPrompt', () => {
+  it('offers every column, preselects the matching suggestion, and allows skipping', () => {
+    const prompt = getUpdatedAtColumnPrompt(
+      [{ name: 'id' }, { name: 'updated_at' }, { name: 'title' }],
+      'updated_at',
+    );
+
+    expect(prompt.message).toBe('Which column is the last-updated timestamp?');
+    expect(prompt.default).toBe('updated_at');
+    expect(prompt.choices).toEqual([
+      { name: 'Do not map this field', value: '\0unmapped' },
+      { name: 'id', value: 'id' },
+      { name: 'updated_at (suggested)', value: 'updated_at' },
+      { name: 'title', value: 'title' },
+    ]);
+  });
+
+  it('defaults to Do not map when there is no suggested column', () => {
+    const prompt = getUpdatedAtColumnPrompt(
+      [{ name: 'id' }, { name: 'title' }, { name: 'price' }],
+      null,
+    );
+
+    expect(prompt.default).toBe('\0unmapped');
+    expect(prompt.choices.map((choice) => choice.value)).toEqual([
+      '\0unmapped',
+      'id',
+      'title',
+      'price',
+    ]);
+  });
+
+  it('never invents a default when that column is not on the table', () => {
+    const prompt = getUpdatedAtColumnPrompt([{ name: 'id' }, { name: 'title' }], 'updated_at');
+
+    expect(prompt.default).toBe('\0unmapped');
+    expect(prompt.choices.map((choice) => choice.value)).not.toContain('updated_at');
   });
 });
 
@@ -535,6 +576,7 @@ describe('runWizard', () => {
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     for (const answer of [
       'title',
       'price',
@@ -739,6 +781,7 @@ describe('runWizard', () => {
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     for (const answer of [
       'title',
       'price',
@@ -869,6 +912,7 @@ describe('runWizard', () => {
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     for (const answer of [
       'title',
       'price',
@@ -1690,6 +1734,7 @@ describe('runWizard', () => {
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     for (const answer of [
       'title',
       'price',
@@ -1790,6 +1835,7 @@ describe('runWizard', () => {
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     for (const answer of [
       'title',
       'price',
@@ -1903,6 +1949,7 @@ describe('runWizard', () => {
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('available_products'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('sku'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     for (const answer of [
       'title',
       'price',
@@ -2017,6 +2064,7 @@ describe('runWizard', () => {
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('available_products'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('sku'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     for (const answer of [
       'title',
       'price',
@@ -2094,6 +2142,102 @@ describe('runWizard', () => {
       expect(resourceProbeMocks.adapter.disconnect).toHaveBeenCalledOnce();
     } finally {
       consoleWarn.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('does not print or persist an API key when the mapping probe rejects', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+    vi.clearAllMocks();
+    resourceProbeMocks.probeInventoryResource.mockRejectedValueOnce(
+      new Error('Invalid updatedAt date'),
+    );
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('available_products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('sku'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'merchant_data',
+      'connector.merchant.example',
+    ]) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.password.mockResolvedValueOnce('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }) =>
+      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve([]);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title']);
+      }
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'available_products',
+            kind: 'view',
+            rowCount: 40,
+            columns: [
+              { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Cannot save configuration: inventory sample violates the wire contract: Invalid updatedAt date',
+        ),
+      );
+      expect(consoleLog).not.toHaveBeenCalledWith(expect.stringContaining('✓ API key:'));
+      expect(consoleLog).not.toHaveBeenCalledWith(expect.stringContaining('✓ New staged API key:'));
+      expect(existsSync(join(directory, '.env'))).toBe(false);
+      expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
+      expect(resourceProbeMocks.adapter.disconnect).toHaveBeenCalledOnce();
+      expect(db.destroy).toHaveBeenCalledOnce();
+    } finally {
+      consoleLog.mockRestore();
+      consoleError.mockRestore();
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
     }
@@ -2215,6 +2359,7 @@ describe('runWizard', () => {
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('updatedAt'));
     for (const answer of [
       'title',
       'price',
@@ -2372,7 +2517,7 @@ describe('runWizard', () => {
           'No status column mapped: every listing will be reported as ACTIVE',
         ),
       );
-      // GET /inventory sorts by updatedAtColumn (here auto-suggested from the
+      // GET /inventory sorts by updatedAtColumn (here mapped from the
       // `updatedAt` column) then idColumn DESC — only a composite index built with
       // that exact DESC NULLS LAST clause can serve it (#26520).
       expect(inventory['updatedAtColumn']).toBe('"updatedAt"');
@@ -2457,11 +2602,13 @@ describe('runWizard', () => {
     );
 
     // Order: dbType, TLS verification mode (requiresTls is now true), table, id
-    // column, then the 7 field-mapping prompts, then the reverse-proxy topology.
+    // column, last-updated timestamp, then the 7 field-mapping prompts, then the
+    // reverse-proxy topology.
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('system-ca'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     for (const answer of [
       'title',
       'price',
@@ -2766,6 +2913,9 @@ describe('runWizard', () => {
       if (message.startsWith('Which table contains')) return Promise.resolve('products');
       if (message.startsWith('Which column is the unique listing id')) {
         return Promise.resolve('id');
+      }
+      if (message.startsWith('Which column is the last-updated')) {
+        return Promise.resolve('updated_at');
       }
       if (message.startsWith('How should newly observed')) return Promise.resolve('DRAFT');
       if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');

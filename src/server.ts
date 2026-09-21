@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import type { ConnectorConfig } from './config/config.types.js';
 import type { DatabaseAdapter } from './db/adapter.interface.js';
-import { createApiKeyGuard } from './auth/api-key.guard.js';
+import { createApiKeyGuard, isApiKeyExempt } from './auth/api-key.guard.js';
 import { AuditService } from './audit/audit.service.js';
 import { getClientIp } from './middleware/client-ip.js';
 import { buildRateLimitOptions } from './middleware/rate-limiter.js';
@@ -73,6 +73,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   // Audit service
   const auditService = new AuditService(config.audit, app.log);
   app.addHook('onResponse', async (request, reply) => {
+    const path = request.url.split('?')[0] ?? request.url;
+    // `/health` (and any other route the API-key guard deliberately lets through
+    // unauthenticated) is an infra liveness probe, not merchant/Kasbly traffic. The
+    // Docker healthcheck alone hits it every 30s — logging it drowns real API calls
+    // out of the bounded audit-log scan window. Liveness already has its own signal
+    // via GET /diagnostics (`audit: ok | degraded`).
+    if (isApiKeyExempt(path)) return;
+
     const auditRequest = request as FastifyRequest & {
       apiKeyLabel?: string;
       auditItems?: number;
@@ -81,7 +89,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     auditService.log({
       ts: new Date().toISOString(),
       method: request.method,
-      path: request.url.split('?')[0] ?? request.url,
+      path,
       query: request.query as Record<string, unknown>,
       apiKey: auditRequest.apiKeyLabel ?? 'unknown',
       status: reply.statusCode,

@@ -298,6 +298,30 @@ export function getIdColumnPrompt(
   };
 }
 
+/** Build the optional last-updated prompt; epoch/bigint columns can be left unmapped. */
+export function getUpdatedAtColumnPrompt(
+  columns: Array<{ name: string }>,
+  suggestedColumn?: string | null,
+): FieldMappingPrompt {
+  const columnNames = columns.map((column) => column.name);
+  const defaultColumn =
+    suggestedColumn && columnNames.includes(suggestedColumn)
+      ? suggestedColumn
+      : UNMAPPED_FIELD_VALUE;
+
+  return {
+    message: 'Which column is the last-updated timestamp?',
+    choices: [
+      { name: 'Do not map this field', value: UNMAPPED_FIELD_VALUE },
+      ...columnNames.map((columnName) => ({
+        name: columnName === suggestedColumn ? `${columnName} (suggested)` : columnName,
+        value: columnName,
+      })),
+    ],
+    default: defaultColumn,
+  };
+}
+
 export function toConfigLiteral(value: string): string {
   return `'${value}'`;
 }
@@ -534,11 +558,16 @@ export async function runWizard(): Promise<void> {
     await db.destroy();
     return;
   }
-  const updatedAtColumn =
+  const suggestedUpdatedAt =
     getExistingMappingSelection(
       existingInventory?.updatedAtColumn,
       selectedTable.columns.map((column) => column.name),
     ) ?? suggestUpdatedAtColumn(selectedTable.columns);
+  const selectedUpdatedAt = await select(
+    getUpdatedAtColumnPrompt(selectedTable.columns, suggestedUpdatedAt),
+  );
+  const updatedAtColumn =
+    selectedUpdatedAt === UNMAPPED_FIELD_VALUE ? undefined : selectedUpdatedAt;
   const allColumnNames = selectedTable.columns.map((c) => c.name);
 
   const fieldMappings: Partial<Record<FieldMappingTarget, string>> = {};
@@ -978,17 +1007,6 @@ export async function runWizard(): Promise<void> {
 
     currentApiKey = existingApiKey ?? generatedOrEnteredKey;
     if (existingApiKey && generateKey) pendingApiKey = generatedOrEnteredKey;
-
-    if (pendingApiKey) {
-      // Deliberately reveal only the new secret, never the retained current one.
-      console.log(`✓ New staged API key: ${pendingApiKey}`);
-      console.log(
-        '⚠ Add and test this key in Kasbly, switch Kasbly to it, then rerun setup and choose to retire the previous key.\n',
-      );
-    } else {
-      console.log(`✓ API key: ${currentApiKey}`);
-      console.log('⚠ Share this key with Kasbly only. Store it in your .env file.\n');
-    }
   }
 
   // The reverse-proxy topology decides whether the wizard's final "next
@@ -1189,6 +1207,22 @@ export async function runWizard(): Promise<void> {
   console.log(`✅ Configuration saved to ${configPath}`);
   writePrivateFile(envPath, envContent);
   console.log(`✅ Environment saved to ${envPath}`);
+
+  // Reveal secrets only after the probe has accepted the mapping and both
+  // files are on disk. Printing a freshly minted key and then aborting left
+  // merchants sharing a secret that was never written (#27936).
+  if (!(existingApiKey && existingPendingApiKey)) {
+    if (pendingApiKey) {
+      // Deliberately reveal only the new secret, never the retained current one.
+      console.log(`✓ New staged API key: ${pendingApiKey}`);
+      console.log(
+        '⚠ Add and test this key in Kasbly, switch Kasbly to it, then rerun setup and choose to retire the previous key.\n',
+      );
+    } else {
+      console.log(`✓ API key: ${currentApiKey}`);
+      console.log('⚠ Share this key with Kasbly only. Store it in your .env file.\n');
+    }
+  }
 
   // Topology-specific: only `bundled` starts the Compose file's Caddy
   // service, which is the only deployment `docker compose up -d` is correct
