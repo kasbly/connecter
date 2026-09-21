@@ -8,6 +8,8 @@ import {
   suggestRelations,
   suggestSearchableColumns,
   suggestFilterableColumns,
+  classifyRelationType,
+  suggestJoinColumn,
 } from '../suggest.js';
 import type { IntrospectedColumn, IntrospectedTable, ForeignKeyInfo } from '../introspect.js';
 
@@ -375,6 +377,89 @@ describe('suggestRelations', () => {
     expect(suggestions).toContainEqual(
       expect.objectContaining({ table: 'DChild', foreignKeyColumn: 'ownerRef' }),
     );
+  });
+});
+
+describe('classifyRelationType', () => {
+  it('classifies a table with a URL column as images', () => {
+    expect(
+      classifyRelationType({
+        name: 'product_images',
+        kind: 'table',
+        rowCount: 200,
+        columns: [col('id', 'uuid', true), col('product_id', 'uuid'), col('url', 'text')],
+      }),
+    ).toBe('images');
+  });
+
+  it('classifies a small child table as features', () => {
+    expect(
+      classifyRelationType({
+        name: 'CarFeature',
+        kind: 'table',
+        rowCount: 500,
+        columns: [col('id', 'integer', true), col('carId', 'integer'), col('name', 'text')],
+      }),
+    ).toBe('features');
+  });
+});
+
+describe('suggestJoinColumn', () => {
+  it('matches <table>_id on a plural inventory table', () => {
+    expect(
+      suggestJoinColumn('products', 'id', [
+        col('id', 'uuid', true),
+        col('product_id', 'uuid'),
+        col('url', 'text'),
+      ]),
+    ).toBe('product_id');
+  });
+
+  it('matches camelCase <table>Id', () => {
+    expect(
+      suggestJoinColumn('Car', 'id', [
+        col('id', 'integer', true),
+        col('carId', 'integer'),
+        col('url', 'text'),
+      ]),
+    ).toBe('carId');
+  });
+
+  it('matches a shared non-PK id column name such as sku', () => {
+    expect(
+      suggestJoinColumn('products', 'sku', [
+        col('id', 'uuid', true),
+        col('sku', 'text'),
+        col('url', 'text'),
+      ]),
+    ).toBe('sku');
+  });
+
+  it('falls back to the unique *_id column when the inventory object is a view with a different name', () => {
+    expect(
+      suggestJoinColumn('available_products', 'id', [
+        col('id', 'uuid', true),
+        col('product_id', 'uuid'),
+        col('url', 'text'),
+      ]),
+    ).toBe('product_id');
+  });
+
+  it('does not pick the child primary key named id', () => {
+    expect(
+      suggestJoinColumn('products', 'id', [col('id', 'uuid', true), col('url', 'text')]),
+    ).toBeNull();
+  });
+
+  it('does not guess when two *_id columns are equally plausible', () => {
+    expect(
+      suggestJoinColumn('available_products', 'id', [
+        col('id', 'uuid', true),
+        col('product_id', 'uuid'),
+        col('variant_id', 'uuid'),
+        col('url', 'text'),
+      ]),
+    ).toBeNull();
   });
 });
 

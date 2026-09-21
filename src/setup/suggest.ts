@@ -213,6 +213,69 @@ function pickRepresentativePair(group: ForeignKeyInfo[]): ForeignKeyInfo | null 
   return nonTenantPairs[0]!;
 }
 
+function normalizeIdent(name: string): string {
+  return name.replaceAll(/[_-]/g, '').toLowerCase();
+}
+
+function stemWithoutId(name: string): string {
+  return normalizeIdent(name.replace(/_?id$/i, ''));
+}
+
+function looksLikeJoinColumn(name: string): boolean {
+  return /_id$/i.test(name) || /Id$/.test(name) || /ID$/.test(name);
+}
+
+/** Classify a child table the same way FK-discovered relations are typed. */
+export function classifyRelationType(table: IntrospectedTable): RelationSuggestion['relationType'] {
+  const hasImageColumns = table.columns.some((col) =>
+    IMAGE_COLUMN_PATTERNS.some((p) => p.test(col.name)),
+  );
+  if (hasImageColumns) return 'images';
+  if (table.columns.length <= 5) return 'features';
+  return 'generic';
+}
+
+/**
+ * Name-match heuristic for a child table that has no FOREIGN KEY pointing at
+ * the inventory object (views cannot be FK targets; unconstrained catalogues
+ * often store `product_id` / `car_id` without a constraint). Prefers
+ * `<table>_id` / `<table>Id` (and the singular form), then a column that
+ * shares the inventory id name, then a unique `*_id` column. Never picks the
+ * child's own `id` primary key.
+ */
+export function suggestJoinColumn(
+  mainTable: string,
+  mainIdColumn: string,
+  childColumns: IntrospectedColumn[],
+): string | null {
+  const mainNorm = normalizeIdent(mainTable);
+  const mainSingularNorm =
+    mainNorm.endsWith('s') && mainNorm.length > 1 ? mainNorm.slice(0, -1) : mainNorm;
+
+  let tableIdMatch: string | undefined;
+  let sharedIdMatch: string | undefined;
+  const idLike: string[] = [];
+
+  for (const col of childColumns) {
+    if (col.isPrimaryKey && normalizeIdent(col.name) === 'id') continue;
+
+    const stem = stemWithoutId(col.name);
+    if (looksLikeJoinColumn(col.name) && (stem === mainNorm || stem === mainSingularNorm)) {
+      tableIdMatch ??= col.name;
+      continue;
+    }
+    if (col.name === mainIdColumn) {
+      sharedIdMatch ??= col.name;
+      continue;
+    }
+    if (looksLikeJoinColumn(col.name)) idLike.push(col.name);
+  }
+
+  if (tableIdMatch) return tableIdMatch;
+  if (sharedIdMatch) return sharedIdMatch;
+  return idLike.length === 1 ? idLike[0]! : null;
+}
+
 export function suggestRelations(
   mainTable: string,
   tables: IntrospectedTable[],
@@ -249,37 +312,14 @@ export function suggestRelations(
     const relatedTable = tables.find((t) => t.name === fk.fromTable);
     if (!relatedTable) continue;
 
-    // Check if it's an image table
-    const hasImageColumns = relatedTable.columns.some((col) =>
-      IMAGE_COLUMN_PATTERNS.some((p) => p.test(col.name)),
-    );
-
-    if (hasImageColumns) {
-      suggestions.push({
-        table: fk.fromTable,
-        foreignKeyColumn: fk.fromColumn,
-        toColumn: fk.toColumn,
-        relationType: 'images',
-        confidence: 'high',
-      });
-    } else if (relatedTable.columns.length <= 5) {
-      // Small related tables are likely feature/tag tables
-      suggestions.push({
-        table: fk.fromTable,
-        foreignKeyColumn: fk.fromColumn,
-        toColumn: fk.toColumn,
-        relationType: 'features',
-        confidence: 'low',
-      });
-    } else {
-      suggestions.push({
-        table: fk.fromTable,
-        foreignKeyColumn: fk.fromColumn,
-        toColumn: fk.toColumn,
-        relationType: 'generic',
-        confidence: 'low',
-      });
-    }
+    const relationType = classifyRelationType(relatedTable);
+    suggestions.push({
+      table: fk.fromTable,
+      foreignKeyColumn: fk.fromColumn,
+      toColumn: fk.toColumn,
+      relationType,
+      confidence: relationType === 'images' ? 'high' : 'low',
+    });
   }
 
   return suggestions;

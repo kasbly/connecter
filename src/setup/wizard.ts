@@ -10,7 +10,7 @@ import type {
   RelationConfig,
   UnknownStatusPolicy,
 } from '../config/config.types.js';
-import { introspectDatabase } from './introspect.js';
+import { introspectDatabase, type IntrospectedTable } from './introspect.js';
 import {
   INVENTORY_STATUSES,
   type InventoryStatus,
@@ -26,8 +26,11 @@ import {
   suggestSearchableColumns,
   suggestFilterableColumns,
   suggestImageTypeColumn,
+  suggestJoinColumn,
+  classifyRelationType,
   isTextColumn,
   type FilterableColumnSuggestion,
+  type RelationSuggestion,
 } from './suggest.js';
 import { UNMAPPED_STATUS_FALLBACK } from '../mapping/field-mapper.js';
 import { createDatabaseAdapter } from '../db/adapter.factory.js';
@@ -391,6 +394,181 @@ async function collectTrustedProxies(
       value.trim() ? true : 'Enter the direct proxy IPs/CIDRs, or choose "None" instead.',
   });
   return { topology, trustedProxies: proxies.trim() };
+}
+
+const SKIP_MANUAL_RELATION = '\0none';
+
+export const EMPTY_RELATION_FK_HINT =
+  'No foreign keys point at this table/view. Photos stored in a child table have to be added here, or as a row-level images column.';
+
+async function collectConfiguredRelation(options: {
+  suggestion: RelationSuggestion;
+  relTable: IntrospectedTable;
+  selectedSchema: string;
+  selectedTableName: string;
+  idColumn: string;
+  existingRelation: RelationConfig | undefined;
+  existingRelationName: string | undefined;
+  db: Awaited<ReturnType<typeof introspectDatabase>>['db'];
+  usedPublishedNames: Set<string>;
+}): Promise<{ name: string; relation: RelationConfig }> {
+  const {
+    suggestion,
+    relTable,
+    selectedSchema,
+    selectedTableName,
+    idColumn,
+    existingRelation,
+    existingRelationName,
+    db,
+    usedPublishedNames,
+  } = options;
+
+  const relationName =
+    existingRelationName ?? `${suggestion.table}__${suggestion.foreignKeyColumn}`;
+
+  // A type/kind/category-like column (e.g. Image.type) distinguishes
+  // customer-facing gallery/featured photos from thumbnails, icons, and
+  // invoices the same table can also store — detect it up front so it can
+  // both be offered in the "expose" checkbox below and drive the filter
+  // prompt further down.
+  const typeColumn =
+    suggestion.relationType === 'images' ? suggestImageTypeColumn(relTable.columns) : null;
+  const selectableColumns = relTable.columns.filter((col) => {
+    if (col.name === suggestion.foreignKeyColumn || col.isPrimaryKey) return false;
+    // Only the URL field (via `imageUrlField`) and the type column (via
+    // `filter`) ever influence a mapped item for an images relation —
+    // every other column would be queried and then silently discarded,
+    // which reads as "expose" without exposing anything (#27231).
+    if (suggestion.relationType === 'images') {
+      return /url$/i.test(col.name) || /^src$/i.test(col.name) || col.name === typeColumn;
+    }
+    return true;
+  });
+  const defaultColumn =
+    suggestion.relationType === 'images'
+      ? selectableColumns.find((col) => /url$/i.test(col.name) || /^src$/i.test(col.name))
+      : suggestion.relationType === 'features'
+        ? selectableColumns.find(
+            (col) => /name/i.test(col.name) || /value/i.test(col.name) || /label/i.test(col.name),
+          )
+        : undefined;
+  const selectedColumns = await checkbox({
+    message: `Select columns from ${suggestion.table} to expose:`,
+    choices: selectableColumns.map((col) => ({
+      name: col.name,
+      value: col.name,
+      checked:
+        Boolean(existingRelation?.fields[col.name]) ||
+        col.name === defaultColumn?.name ||
+        col.name === typeColumn,
+    })),
+  });
+  const selectedColumnNames = new Set(selectedColumns);
+  const fieldsMap: Record<string, string> = {};
+  for (const col of selectableColumns) {
+    if (!selectedColumnNames.has(col.name)) continue;
+    fieldsMap[col.name] = quoteIfNeeded(col.name);
+  }
+
+  const relation: RelationConfig = {
+    schema: selectedSchema,
+    table: suggestion.table,
+    foreignKey: quoteIfNeeded(suggestion.foreignKeyColumn),
+    referenceKey: quoteIfNeeded(suggestion.toColumn ?? idColumn),
+    fields: fieldsMap,
+  };
+
+  if (suggestion.relationType === 'images') {
+    const urlCol = relTable.columns.find((c) => /url$/i.test(c.name) || /^src$/i.test(c.name));
+    if (urlCol && selectedColumnNames.has(urlCol.name)) {
+      relation['imageUrlField'] = urlCol.name;
+    }
+
+    const orderColumn = relTable.columns.find((col) =>
+      /^(sort_?order|position|order|is_?primary)$/i.test(col.name),
+    );
+    if (orderColumn) {
+      const defaultDirection = /^is_?primary$/i.test(orderColumn.name) ? 'desc' : 'asc';
+      const useOrder = await confirm({
+        message: `Order images by ${orderColumn.name}?`,
+        default: Boolean(existingRelation?.orderBy),
+      });
+      if (useOrder) {
+        relation['orderBy'] = {
+          column: quoteIfNeeded(orderColumn.name),
+          direction: defaultDirection,
+        };
+      }
+    }
+
+    // Offer a filter matching the README's `type = 'gallery' OR type =
+    // 'featured'` shape when a type/kind/category column exists; `filter`
+    // is a raw SQL predicate the relation query applies directly against
+    // the source column (see queryRelation), independent of the `fields`
+    // map above, so this runs whether or not the operator also chose to
+    // carry the column into `fields`. Leave `filter` unset when there's
+    // no such column (nothing to filter on).
+    if (typeColumn) {
+      const pkColumn = relTable.columns.find((col) => col.isPrimaryKey);
+      const distinctTypeValues = await collectDistinctColumnValues(
+        db,
+        selectedSchema,
+        suggestion.table,
+        typeColumn,
+        pkColumn?.name,
+      );
+      if (distinctTypeValues.length > 0) {
+        const presentedValues = distinctTypeValues.slice(0, IMAGE_TYPE_VALUE_PROMPT_LIMIT);
+        if (distinctTypeValues.length > presentedValues.length) {
+          console.log(
+            `\n"${typeColumn}" has more than ${IMAGE_TYPE_VALUE_PROMPT_LIMIT} distinct values. Offering the first ${presentedValues.length}; re-run setup after narrowing the column down if a customer-facing value is missing.`,
+          );
+        }
+        const includedValues = await checkbox({
+          message: `Which "${typeColumn}" values on ${suggestion.table} are customer-facing photos? (unchecked values — e.g. thumbnails, icons, invoices — are left out of images[])`,
+          choices: presentedValues.map((value) => ({
+            name: value,
+            value,
+            checked: existingRelation?.filter
+              ? existingRelation.filter.includes(toConfigLiteral(value))
+              : /gallery|featured|photo|primary|main|hero/i.test(value),
+          })),
+        });
+        if (includedValues.length > 0) {
+          relation['filter'] = includedValues
+            .map((value) => `${quoteIfNeeded(typeColumn)} = ${toConfigLiteral(value)}`)
+            .join(' OR ');
+        }
+      }
+    }
+  } else if (suggestion.relationType === 'features') {
+    const nameCol = relTable.columns.find(
+      (c) => /name/i.test(c.name) || /value/i.test(c.name) || /label/i.test(c.name),
+    );
+    if (nameCol && selectedColumnNames.has(nameCol.name)) {
+      relation['flatten'] = nameCol.name;
+    }
+  }
+
+  // The map key (`relationName`) stays the disambiguated `table__foreignKey`
+  // key so two FKs onto the same child table can't collide (#26144). A
+  // flatten/generic relation's runtime *output* attribute is published
+  // under a separate, stable semantic name instead — the disambiguated
+  // key is an internal collision guard, not a customer-facing name.
+  if (suggestion.relationType === 'features' || suggestion.relationType === 'generic') {
+    const basePublishedName =
+      existingRelation?.publishAs ??
+      derivePublishedRelationName(suggestion.table, selectedTableName);
+    let publishedName = basePublishedName;
+    for (let suffix = 2; usedPublishedNames.has(publishedName); suffix++) {
+      publishedName = `${basePublishedName}_${suffix}`;
+    }
+    usedPublishedNames.add(publishedName);
+    relation['publishAs'] = publishedName;
+  }
+
+  return { name: relationName, relation };
 }
 
 export async function runWizard(): Promise<void> {
@@ -795,6 +973,9 @@ export async function runWizard(): Promise<void> {
   // (e.g. two child tables both nicknamed "features") gets a `_2` suffix
   // instead of silently overwriting the first relation's attribute.
   const usedPublishedNames = new Set<string>();
+  const suggestedRelationTables = new Set(
+    relationSuggestions.map((suggestion) => suggestion.table),
+  );
 
   for (const suggestion of relationSuggestions) {
     const relTable = result.tables.find((t) => t.name === suggestion.table);
@@ -811,162 +992,112 @@ export async function runWizard(): Promise<void> {
         relation.table === suggestion.table &&
         unquoteIdentifier(relation.foreignKey) === suggestion.foreignKeyColumn,
     );
-    const relationName =
-      existingRelationEntry?.[0] ?? `${suggestion.table}__${suggestion.foreignKeyColumn}`;
-    const existingRelation = existingRelationEntry?.[1];
 
     const addRelation = await confirm({
       message: `Add relation: ${suggestion.table} (${suggestion.relationType}, FK: ${suggestion.foreignKeyColumn})?`,
-      default: Boolean(existingRelation) || suggestion.confidence !== 'low',
+      default: Boolean(existingRelationEntry) || suggestion.confidence !== 'low',
     });
 
     if (addRelation) {
-      // A type/kind/category-like column (e.g. Image.type) distinguishes
-      // customer-facing gallery/featured photos from thumbnails, icons, and
-      // invoices the same table can also store — detect it up front so it can
-      // both be offered in the "expose" checkbox below and drive the filter
-      // prompt further down.
-      const typeColumn =
-        suggestion.relationType === 'images' ? suggestImageTypeColumn(relTable.columns) : null;
-      const selectableColumns = relTable.columns.filter((col) => {
-        if (col.name === suggestion.foreignKeyColumn || col.isPrimaryKey) return false;
-        // Only the URL field (via `imageUrlField`) and the type column (via
-        // `filter`) ever influence a mapped item for an images relation —
-        // every other column would be queried and then silently discarded,
-        // which reads as "expose" without exposing anything (#27231).
-        if (suggestion.relationType === 'images') {
-          return /url$/i.test(col.name) || /^src$/i.test(col.name) || col.name === typeColumn;
-        }
-        return true;
+      const configured = await collectConfiguredRelation({
+        suggestion,
+        relTable,
+        selectedSchema,
+        selectedTableName,
+        idColumn,
+        existingRelation: existingRelationEntry?.[1],
+        existingRelationName: existingRelationEntry?.[0],
+        db,
+        usedPublishedNames,
       });
-      const defaultColumn =
-        suggestion.relationType === 'images'
-          ? selectableColumns.find((col) => /url$/i.test(col.name) || /^src$/i.test(col.name))
-          : suggestion.relationType === 'features'
-            ? selectableColumns.find(
-                (col) =>
-                  /name/i.test(col.name) || /value/i.test(col.name) || /label/i.test(col.name),
-              )
-            : undefined;
-      const selectedColumns = await checkbox({
-        message: `Select columns from ${suggestion.table} to expose:`,
-        choices: selectableColumns.map((col) => ({
-          name: col.name,
-          value: col.name,
-          checked:
-            Boolean(existingRelation?.fields[col.name]) ||
-            col.name === defaultColumn?.name ||
-            col.name === typeColumn,
-        })),
-      });
-      const selectedColumnNames = new Set(selectedColumns);
-      const fieldsMap: Record<string, string> = {};
-      for (const col of selectableColumns) {
-        if (!selectedColumnNames.has(col.name)) continue;
-        fieldsMap[col.name] = quoteIfNeeded(col.name);
-      }
-
-      const relation: RelationConfig = {
-        schema: selectedSchema,
-        table: suggestion.table,
-        foreignKey: quoteIfNeeded(suggestion.foreignKeyColumn),
-        referenceKey: quoteIfNeeded(suggestion.toColumn ?? idColumn),
-        fields: fieldsMap,
-      };
-
-      if (suggestion.relationType === 'images') {
-        // Find the URL column
-        const urlCol = relTable.columns.find((c) => /url$/i.test(c.name) || /^src$/i.test(c.name));
-        if (urlCol && selectedColumnNames.has(urlCol.name)) {
-          relation['imageUrlField'] = urlCol.name;
-        }
-
-        const orderColumn = relTable.columns.find((col) =>
-          /^(sort_?order|position|order|is_?primary)$/i.test(col.name),
-        );
-        if (orderColumn) {
-          const defaultDirection = /^is_?primary$/i.test(orderColumn.name) ? 'desc' : 'asc';
-          const useOrder = await confirm({
-            message: `Order images by ${orderColumn.name}?`,
-            default: Boolean(existingRelation?.orderBy),
-          });
-          if (useOrder) {
-            relation['orderBy'] = {
-              column: quoteIfNeeded(orderColumn.name),
-              direction: defaultDirection,
-            };
-          }
-        }
-
-        // Offer a filter matching the README's `type = 'gallery' OR type =
-        // 'featured'` shape when a type/kind/category column exists; `filter`
-        // is a raw SQL predicate the relation query applies directly against
-        // the source column (see queryRelation), independent of the `fields`
-        // map above, so this runs whether or not the operator also chose to
-        // carry the column into `fields`. Leave `filter` unset when there's
-        // no such column (nothing to filter on).
-        if (typeColumn) {
-          const pkColumn = relTable.columns.find((col) => col.isPrimaryKey);
-          const distinctTypeValues = await collectDistinctColumnValues(
-            db,
-            selectedSchema,
-            suggestion.table,
-            typeColumn,
-            pkColumn?.name,
-          );
-          if (distinctTypeValues.length > 0) {
-            const presentedValues = distinctTypeValues.slice(0, IMAGE_TYPE_VALUE_PROMPT_LIMIT);
-            if (distinctTypeValues.length > presentedValues.length) {
-              console.log(
-                `\n"${typeColumn}" has more than ${IMAGE_TYPE_VALUE_PROMPT_LIMIT} distinct values. Offering the first ${presentedValues.length}; re-run setup after narrowing the column down if a customer-facing value is missing.`,
-              );
-            }
-            const includedValues = await checkbox({
-              message: `Which "${typeColumn}" values on ${suggestion.table} are customer-facing photos? (unchecked values — e.g. thumbnails, icons, invoices — are left out of images[])`,
-              choices: presentedValues.map((value) => ({
-                name: value,
-                value,
-                checked: existingRelation?.filter
-                  ? existingRelation.filter.includes(toConfigLiteral(value))
-                  : /gallery|featured|photo|primary|main|hero/i.test(value),
-              })),
-            });
-            if (includedValues.length > 0) {
-              relation['filter'] = includedValues
-                .map((value) => `${quoteIfNeeded(typeColumn)} = ${toConfigLiteral(value)}`)
-                .join(' OR ');
-            }
-          }
-        }
-      } else if (suggestion.relationType === 'features') {
-        // Find the name/value column to flatten
-        const nameCol = relTable.columns.find(
-          (c) => /name/i.test(c.name) || /value/i.test(c.name) || /label/i.test(c.name),
-        );
-        if (nameCol && selectedColumnNames.has(nameCol.name)) {
-          relation['flatten'] = nameCol.name;
-        }
-      }
-
-      // The map key (`relationName`) stays the disambiguated `table__foreignKey`
-      // key so two FKs onto the same child table can't collide (#26144). A
-      // flatten/generic relation's runtime *output* attribute is published
-      // under a separate, stable semantic name instead — the disambiguated
-      // key is an internal collision guard, not a customer-facing name.
-      if (suggestion.relationType === 'features' || suggestion.relationType === 'generic') {
-        const basePublishedName =
-          existingRelation?.publishAs ??
-          derivePublishedRelationName(suggestion.table, selectedTableName);
-        let publishedName = basePublishedName;
-        for (let suffix = 2; usedPublishedNames.has(publishedName); suffix++) {
-          publishedName = `${basePublishedName}_${suffix}`;
-        }
-        usedPublishedNames.add(publishedName);
-        relation['publishAs'] = publishedName;
-      }
-
-      relations[relationName] = relation;
+      relations[configured.name] = configured.relation;
     }
+  }
+
+  // Views cannot be FOREIGN KEY targets, and unconstrained child tables never
+  // appear in suggestRelations — offer a manual table/join picker so photos
+  // stored that way can still be written as the same `relations:` shape.
+  if (relationSuggestions.length === 0) {
+    console.log(EMPTY_RELATION_FK_HINT);
+  }
+
+  let offerManualPicker = relationSuggestions.length === 0;
+  while (true) {
+    const addedTables = new Set(Object.values(relations).map((relation) => relation.table));
+    const remainingTables = result.tables.filter(
+      (table) =>
+        table.name !== selectedTableName &&
+        table.columns.length > 0 &&
+        !addedTables.has(table.name) &&
+        !suggestedRelationTables.has(table.name),
+    );
+    if (remainingTables.length === 0) break;
+
+    if (!offerManualPicker) {
+      const addManual = await confirm({
+        message: 'Add a related table or view that has no foreign key?',
+        default: false,
+      });
+      if (!addManual) break;
+    }
+    offerManualPicker = false;
+
+    const imageLike = remainingTables.find((table) => classifyRelationType(table) === 'images');
+    const tableName = await select({
+      message: 'Which table or view holds related rows (for example photos)?',
+      choices: [
+        { name: 'None — continue without a related table', value: SKIP_MANUAL_RELATION },
+        ...remainingTables
+          .slice()
+          .sort((a, b) => b.rowCount - a.rowCount)
+          .map((table) => ({
+            name: `${table.name} (${table.kind}, ${table.rowCount.toLocaleString()} rows)`,
+            value: table.name,
+          })),
+      ],
+      default: imageLike?.name ?? SKIP_MANUAL_RELATION,
+    });
+    if (tableName === SKIP_MANUAL_RELATION) break;
+
+    const relTable = remainingTables.find((table) => table.name === tableName);
+    if (!relTable) break;
+
+    const suggestedFk = suggestJoinColumn(selectedTableName, idColumn, relTable.columns);
+    const foreignKeyColumn = await select({
+      message: `Which column on ${tableName} joins to ${selectedTableName}?`,
+      choices: relTable.columns.map((column) => ({
+        name: column.name === suggestedFk ? `${column.name} (suggested)` : column.name,
+        value: column.name,
+      })),
+      ...(suggestedFk ? { default: suggestedFk } : {}),
+    });
+
+    const suggestion: RelationSuggestion = {
+      table: tableName,
+      foreignKeyColumn,
+      toColumn: idColumn,
+      relationType: classifyRelationType(relTable),
+      confidence: 'low',
+    };
+    const existingRelationEntry = Object.entries(
+      existingConfig?.resources.inventory.relations ?? {},
+    ).find(
+      ([, relation]) =>
+        relation.table === suggestion.table &&
+        unquoteIdentifier(relation.foreignKey) === suggestion.foreignKeyColumn,
+    );
+    const configured = await collectConfiguredRelation({
+      suggestion,
+      relTable,
+      selectedSchema,
+      selectedTableName,
+      idColumn,
+      existingRelation: existingRelationEntry?.[1],
+      existingRelationName: existingRelationEntry?.[0],
+      db,
+      usedPublishedNames,
+    });
+    relations[configured.name] = configured.relation;
   }
 
   // Step 6: Security
