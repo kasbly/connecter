@@ -329,8 +329,20 @@ export function toConfigLiteral(value: string): string {
   return `'${value}'`;
 }
 
+const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '::1'];
+
+/**
+ * True for a host that only ever means "this machine" — `localhost`,
+ * `127.0.0.1`, `::1`. Inside the bundled Compose deployment that machine is
+ * the connector's own container, not the operator's host, so this is also
+ * what flags the `bundled` + loopback DB_HOST trap (#28245).
+ */
+export function isLoopbackHost(host: string): boolean {
+  return LOOPBACK_HOSTS.includes(host.trim().toLowerCase());
+}
+
 export function shouldDefaultToTls(host: string): boolean {
-  return !['localhost', '127.0.0.1', '::1'].includes(host.trim().toLowerCase());
+  return !isLoopbackHost(host);
 }
 
 /**
@@ -1309,13 +1321,24 @@ export async function runWizard(): Promise<void> {
   if (hasExistingEnv) backupPrivateFile(envPath);
   // js-yaml v5 replaced `quotingType: '"'` with `quoteStyle: 'double'`.
   const yamlContent = yaml.dump(config, { lineWidth: 120, quoteStyle: 'double' });
+  // The bundled Compose deployment runs the connector inside a container on
+  // its own bridge network. A loopback DB_HOST written through as-is means
+  // the container itself once the process is inside Docker, not the host the
+  // operator just tested against — `docker compose up -d` then can't reach
+  // the database `npm run setup` just introspected (#28245). `host.docker.internal`
+  // is the address Docker adds a bridge route for (via the connector
+  // service's extra_hosts in docker-compose.yml) that resolves back to the
+  // host. `custom`/`none` run the connector directly on the host, so their
+  // loopback DB_HOST is already correct and is left alone.
+  const bundledLoopbackDbTrap = proxyTopology === 'bundled' && isLoopbackHost(dbHost);
+  const envDbHost = bundledLoopbackDbTrap ? 'host.docker.internal' : dbHost;
   // Build the .env content BEFORE writing connector.config.yml. mergeEnvironmentFile
   // (via serializeEnvValue) can still throw here for a rerun that reuses an
   // existingConfig password never run through the prompt's own validate — building
   // it first means that throw happens before either file is touched, instead of
   // after connector.config.yml is already saved with no matching .env (#27786).
   const envContent = mergeEnvironmentFile(hasExistingEnv ? readFileSync(envPath, 'utf-8') : '', {
-    DB_HOST: dbHost,
+    DB_HOST: envDbHost,
     DB_NAME: dbName,
     DB_USER: dbUser,
     DB_PASSWORD: dbPassword,
@@ -1364,6 +1387,18 @@ export async function runWizard(): Promise<void> {
     console.log('\n   Start the connector: docker compose up -d');
     console.log(`   Verify the public endpoint: curl -fsS https://${connectorDomain}/health`);
     console.log(`   Give Kasbly this URL: https://${connectorDomain}`);
+    if (bundledLoopbackDbTrap) {
+      console.log(
+        `\n   ⚠ DB_HOST was written as host.docker.internal, not ${dbHost}: the connector runs ` +
+          `inside a container in this deployment, where "${dbHost}" means the container itself, ` +
+          'not this machine (#28245).',
+      );
+      console.log(
+        '   Make sure PostgreSQL accepts connections from the Docker bridge network ' +
+          '(172.30.0.0/24), not only 127.0.0.1 — set listen_addresses in postgresql.conf and add ' +
+          'a matching pg_hba.conf entry, then restart PostgreSQL.',
+      );
+    }
   } else if (proxyTopology === 'custom') {
     console.log(
       '\n   Start the connector: npm run build && npm start (binds :4000; the bundled ' +

@@ -15,6 +15,14 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    # Lets the container resolve host.docker.internal back to this host. Needed
+    # when `npm run setup` rewrites a loopback DB_HOST to host.docker.internal
+    # because "localhost" inside this container is the connector process
+    # itself, not the host Postgres the wizard just introspected (#28245).
+    # Docker Desktop (Mac/Windows) already resolves this name without an
+    # entry; `host-gateway` is what makes it work on Linux too.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     healthcheck:
       test: ['CMD-SHELL', 'wget -q --spider http://localhost:4000/health || exit 1']
       interval: 30s

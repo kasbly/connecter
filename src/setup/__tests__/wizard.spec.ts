@@ -2183,6 +2183,81 @@ describe('runWizard', () => {
     }
   });
 
+  it('rewrites a loopback DB_HOST to host.docker.internal for the bundled Compose topology and warns about the Postgres bridge network (#28245)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
+    for (const answer of ['title', 'price', 'currency', '\0unmapped', '\0unmapped']) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    // Accepts the recommended bundled Docker proxy and default "localhost" Host.
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+    for (const answer of ['localhost', '5432', 'catalog', 'reader', 'merchant_data', 'x.example']) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.password.mockResolvedValueOnce('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }) =>
+      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+    );
+    promptMocks.checkbox.mockImplementation(() => Promise.resolve([]));
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 40,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      // The pre-save probe runs on the host, so it still uses "localhost";
+      // only the value written to .env (read inside the container) changes.
+      expect(createDatabaseAdapter).toHaveBeenCalledWith(
+        expect.objectContaining({ host: 'localhost' }),
+      );
+      expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['DB_HOST']).toBe(
+        'host.docker.internal',
+      );
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining('DB_HOST was written as host.docker.internal, not localhost'),
+      );
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining('accepts connections from the Docker bridge network'),
+      );
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('writes the operator-chosen unique listing id for a view with no id column', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
