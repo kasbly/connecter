@@ -303,7 +303,11 @@ resources:
       minPrice: { column: 'price', type: 'gte' }
       maxPrice: { column: 'price', type: 'lte' }
 
-    # Related tables fetched per item
+    # Related tables fetched per item.
+    # `schema` on a relation is optional — omit it and the relation inherits
+    # the inventory resource's own `schema` (above), not always 'public'.
+    # Set it explicitly only when the related table lives in a different
+    # schema than the resource itself.
     relations:
       images:
         schema: 'public'

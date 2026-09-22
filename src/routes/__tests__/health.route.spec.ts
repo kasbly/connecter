@@ -197,6 +197,31 @@ describe('health route', () => {
     });
   });
 
+  it('probes a relation with no explicit schema in the resource\'s own non-public schema, not "public" (#28100)', async () => {
+    const dbAdapter = createHealthAdapter(true);
+    dbAdapter.queryRelation = vi.fn().mockResolvedValue(new Map());
+    const resource = {
+      ...inventoryResource,
+      schema: 'catalog',
+      relations: {
+        images: {
+          // No `schema:` here — must inherit the resource's `catalog` schema,
+          // not fall back to 'public'.
+          table: 'images',
+          foreignKey: 'inventory_id',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+        },
+      },
+    };
+
+    await probeInventoryResource(dbAdapter, resource);
+
+    expect(dbAdapter.queryRelation).toHaveBeenCalledWith(
+      expect.objectContaining({ schema: 'catalog', table: 'images' }),
+    );
+  });
+
   it('fails the resource when a searchable column cannot be used with ILIKE, via a non-executing probe (#26342)', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(true);

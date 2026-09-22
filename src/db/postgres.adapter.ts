@@ -101,6 +101,25 @@ function escapeLikePattern(value: unknown): string {
 }
 
 /**
+ * `baseFilter` and relation `filter` are raw SQL predicates the merchant
+ * writes by hand (see connector.config.example.yml) and we interpolate
+ * directly into `whereRaw`/`db.raw` calls. Knex's raw formatter treats every
+ * `?` in that SQL string as a positional binding placeholder (see
+ * `replaceRawArrBindings`), regardless of whether it came from us or from
+ * the merchant's own SQL — so a PostgreSQL jsonb key-exists operator
+ * (`?`, `?|`, `?&`) in a filter desyncs the binding count and knex throws
+ * "Expected N bindings, saw M" (or, with no bindings array, silently shifts
+ * every later `?` placeholder — e.g. `LIMIT ?` — by one).
+ *
+ * Knex honours a backslash-escaped `\?` as a literal question mark in raw
+ * SQL, so escape every `?` in the merchant's fragment before it reaches
+ * `whereRaw`/`db.raw`.
+ */
+function escapeRawFragmentPlaceholders(sql: string): string {
+  return sql.replaceAll('?', '\\?');
+}
+
+/**
  * How many matching rows the count for `pagination` may examine.
  *
  * Never below `offset + pageSize + 1`, so the cap can never hide the page being
@@ -184,7 +203,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     baseFilter?: string,
   ): Knex.QueryBuilder {
     if (baseFilter) {
-      queryBuilder = queryBuilder.whereRaw(`(${baseFilter})`);
+      queryBuilder = queryBuilder.whereRaw(`(${escapeRawFragmentPlaceholders(baseFilter)})`);
     }
 
     // Split conditions: ILIKE conditions use OR logic within groups, AND between groups
@@ -327,7 +346,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     queryBuilder = queryBuilder.whereRaw(`${idColumn} = ?`, [id]);
 
     if (baseFilter) {
-      queryBuilder = queryBuilder.andWhereRaw(`(${baseFilter})`);
+      queryBuilder = queryBuilder.andWhereRaw(`(${escapeRawFragmentPlaceholders(baseFilter)})`);
     }
 
     const row = (await queryBuilder.first()) as Record<string, unknown> | undefined;
@@ -342,14 +361,20 @@ export class PostgresAdapter implements DatabaseAdapter {
     const selectParts = Object.entries(query.fields).map(([alias, col]) => `${col} as "${alias}"`);
     selectParts.push(`${query.foreignKey} as "__fk"`);
 
+    // Relation `filter` is raw merchant SQL, same as `baseFilter` — escape any
+    // literal `?` (e.g. a jsonb key-exists operator) so it survives knex's
+    // positional-binding rewrite instead of desyncing it (see
+    // escapeRawFragmentPlaceholders).
+    const escapedFilter = query.filter ? escapeRawFragmentPlaceholders(query.filter) : undefined;
+
     // The startup resource probe deliberately calls this with an empty parent ID
     // list when the inventory table has no rows. Still prepare a read-only query
     // so PostgreSQL validates the relation table, fields, foreign key, filter,
     // and orderBy column.
     if (query.parentIds.length === 0) {
       let sql = `SELECT ${selectParts.join(', ')} FROM ${qualifiedTable(query.schema, query.table)} WHERE FALSE`;
-      if (query.filter) {
-        sql += ` AND (${query.filter})`;
+      if (escapedFilter) {
+        sql += ` AND (${escapedFilter})`;
       }
       if (query.orderBy) {
         sql += ` ORDER BY ${buildOrderByClause(query.orderBy)}`;
@@ -360,8 +385,8 @@ export class PostgresAdapter implements DatabaseAdapter {
 
     const placeholders = query.parentIds.map(() => '?').join(', ');
     let sql = `SELECT ${selectParts.join(', ')} FROM ${qualifiedTable(query.schema, query.table)} WHERE ${query.foreignKey} IN (${placeholders})`;
-    if (query.filter) {
-      sql += ` AND (${query.filter})`;
+    if (escapedFilter) {
+      sql += ` AND (${escapedFilter})`;
     }
     if (query.orderBy) {
       sql += ` ORDER BY ${buildOrderByClause(query.orderBy)}`;
@@ -427,7 +452,7 @@ export class PostgresAdapter implements DatabaseAdapter {
 
     let sql = `SELECT 1 FROM ${qualifiedTable(query.schema, query.table)} WHERE FALSE AND (${searchClause})`;
     if (query.baseFilter) {
-      sql += ` AND (${query.baseFilter})`;
+      sql += ` AND (${escapeRawFragmentPlaceholders(query.baseFilter)})`;
     }
 
     await db.raw(sql, bindings);
@@ -457,7 +482,9 @@ export class PostgresAdapter implements DatabaseAdapter {
    */
   async distinctValues(query: DistinctValuesQuery): Promise<unknown[]> {
     const db = this.getDb();
-    const where = query.baseFilter ? ` WHERE (${query.baseFilter})` : '';
+    const where = query.baseFilter
+      ? ` WHERE (${escapeRawFragmentPlaceholders(query.baseFilter)})`
+      : '';
     const orderBy = query.orderBy ? ` ORDER BY ${buildOrderByClause(query.orderBy)}` : '';
     const sampled =
       `SELECT ${query.column} AS "value" ` +

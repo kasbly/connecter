@@ -137,6 +137,28 @@ describe('PostgresAdapter relation probes', () => {
       'SELECT url as "url", inventory_id as "__fk" FROM "public"."images" WHERE FALSE AND (published = true) ORDER BY position ASC NULLS LAST',
     );
   });
+
+  // #28097: a jsonb key-exists `?` operator in a relation `filter` hits the
+  // same knex positional-binding desync as a baseFilter `?` — escape it here
+  // too, even on the zero-parentIds probe branch (which passes no bindings
+  // array to db.raw, but should still keep parity with the paged branch).
+  it('escapes a jsonb key-exists `?` operator in a relation filter with no parent rows', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.queryRelation({
+      table: 'images',
+      foreignKey: 'inventory_id',
+      parentIds: [],
+      fields: { url: 'url' },
+      filter: "metadata ? 'published'",
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT url as "url", inventory_id as "__fk" FROM "public"."images" WHERE FALSE AND (metadata \\? \'published\')',
+    );
+  });
 });
 
 describe('PostgresAdapter searchable-column probe', () => {
@@ -227,6 +249,29 @@ describe('PostgresAdapter searchable-column probe', () => {
       ['%\\\\0probe%'],
     );
   });
+
+  // #28097: probeSearchableColumns passes the ILIKE placeholders' bindings
+  // array into the same `db.raw(sql, bindings)` call the baseFilter is
+  // appended to. An unescaped jsonb `?` operator here is exactly the failure
+  // the issue reports at `/health`: "Expected N bindings, saw M", which
+  // 503s every `/inventory` request through requireReadyInventoryResource.
+  it('escapes a jsonb key-exists `?` operator in the base filter without shifting the ILIKE bindings', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.probeSearchableColumns({
+      table: 'cars',
+      columns: ['make'],
+      probeTerm: '\\0probe',
+      baseFilter: "metadata ? 'published'",
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT 1 FROM "public"."cars" WHERE FALSE AND (make ILIKE ? ESCAPE \'\\\') AND (metadata \\? \'published\')',
+      ['%\\\\0probe%'],
+    );
+  });
 });
 
 describe('PostgresAdapter distinct status probe', () => {
@@ -306,6 +351,31 @@ describe('PostgresAdapter distinct status probe', () => {
         'FROM "public"."cars" ORDER BY id DESC NULLS LAST LIMIT ?) AS "sampled_rows" LIMIT ?',
       [5000, 50],
     );
+  });
+
+  // #28097: distinctValues' `scanLimit`/`limit` bounds are bound parameters
+  // appended after the interpolated baseFilter — an unescaped jsonb `?`
+  // operator would desync those against the two real `LIMIT ?` placeholders.
+  it('escapes a jsonb key-exists `?` operator in the base filter without shifting the LIMIT bindings', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+    rawMock.mockResolvedValueOnce({ rows: [{ value: 'for_sale' }] });
+
+    const values = await adapter.distinctValues({
+      table: 'cars',
+      column: 'availability',
+      limit: 50,
+      scanLimit: 5000,
+      baseFilter: "metadata ? 'published'",
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT DISTINCT "value" FROM (SELECT availability AS "value" ' +
+        'FROM "public"."cars" WHERE (metadata \\? \'published\') LIMIT ?) AS "sampled_rows" LIMIT ?',
+      [5000, 50],
+    );
+    expect(values).toEqual(['for_sale']);
   });
 });
 
@@ -542,6 +612,29 @@ describe('PostgresAdapter relation ordering', () => {
       }),
     ).rejects.toThrow(/unsafe column expression/);
     expect(rawMock).not.toHaveBeenCalled();
+  });
+
+  // #28097: with parent rows present, the relation filter's `?` operator is
+  // interpolated into the same `db.raw(sql, parentIds)` call as the `IN (?)`
+  // placeholders — if left unescaped, knex counts 2 placeholders (1 IN + 1
+  // jsonb operator) against only 1 binding (parentIds) and throws "Expected
+  // 1 bindings, saw 2" before the query ever reaches Postgres.
+  it('escapes a jsonb key-exists `?` operator in a relation filter without shifting the IN-clause bindings', async () => {
+    const adapter = createAdapterForRelationQuery();
+
+    await adapter.queryRelation({
+      table: 'Image',
+      foreignKey: 'carId',
+      parentIds: ['car-1', 'car-2'],
+      fields: { url: 'url' },
+      filter: "metadata ? 'published'",
+      orderBy: { column: 'position', direction: 'asc' },
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT url as "url", carId as "__fk" FROM "public"."Image" WHERE carId IN (?, ?) AND (metadata \\? \'published\') ORDER BY position ASC NULLS LAST',
+      ['car-1', 'car-2'],
+    );
   });
 
   it('keys relation rows by the string form of mixed-width foreign keys', async () => {
@@ -993,6 +1086,38 @@ describe('PostgresAdapter base filters', () => {
 
     expect(query.sql).toBe(
       'select * from "public"."Car" where id = ? and (status = \'ACTIVE\' OR status = \'RESERVED\') limit ?',
+    );
+    expect(query.bindings).toEqual(['123', 1]);
+  });
+
+  // #28097: knex treats a literal `?` in a raw SQL fragment as a positional
+  // binding placeholder, so a jsonb key-exists operator (`?`, `?|`, `?&`) in a
+  // merchant-authored baseFilter desyncs the binding count against the real
+  // placeholders (e.g. the `LIMIT ?`/`id = ?` that follow it), and knex throws
+  // "Expected N bindings, saw M" once the query is compiled for the pg client.
+  // The fix escapes every `?` in the filter as knex's literal-`?` escape `\?`
+  // before it reaches whereRaw, so it must show up escaped in the compiled SQL.
+  it('escapes a jsonb key-exists `?` operator in the base filter for list and count queries', async () => {
+    const { countQuery, dataQuery } = await runListQuery({
+      count: 1,
+      conditions: [{ column: 'color', operator: '=', value: 'white' }],
+      baseFilter: "metadata ? 'published'",
+    });
+
+    expect(dataQuery.sql).toContain("where (metadata \\? 'published') and");
+    expect(dataQuery.sql).not.toContain("(metadata ? 'published')");
+    expect(dataQuery.bindings).toEqual(['white', 20]);
+    expect(countQuery.sql).toContain("where (metadata \\? 'published') and");
+    expect(countQuery.bindings).toEqual(['white', DEFAULT_COUNT_LIMIT, 1]);
+  });
+
+  it('escapes a jsonb key-exists `?` operator in the base filter for queryById', async () => {
+    const query = await runQueryById({
+      baseFilter: "metadata ?| array['published', 'featured']",
+    });
+
+    expect(query.sql).toBe(
+      'select * from "public"."Car" where id = ? and (metadata \\?| array[\'published\', \'featured\']) limit ?',
     );
     expect(query.bindings).toEqual(['123', 1]);
   });

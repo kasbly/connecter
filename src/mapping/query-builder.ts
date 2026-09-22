@@ -136,6 +136,13 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     ignoredFilters.push('search');
   }
 
+  // An updatedSince filter without a mapped updatedAtColumn used to be silently
+  // dropped, answering with the full catalog as if every row matched. Keep this
+  // capability signal in the same response contract used for unsupported search.
+  if (updatedSince && !config.updatedAtColumn) {
+    ignoredFilters.push('updatedSince');
+  }
+
   if (search && search.length > MAX_SEARCH_LENGTH) {
     throw new QueryValidationError(
       `Query parameter "search" must not exceed ${MAX_SEARCH_LENGTH} characters`,

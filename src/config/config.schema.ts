@@ -75,7 +75,7 @@ const postgresIdentifierSchema = z
   .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'must be a PostgreSQL identifier');
 
 const relationSchema = z.object({
-  schema: postgresIdentifierSchema.default('public'),
+  schema: postgresIdentifierSchema.optional(),
   table: postgresIdentifierSchema,
   foreignKey: z.string().min(1),
   referenceKey: z.string().min(1),

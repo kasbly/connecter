@@ -1063,6 +1063,55 @@ describe('inventory routes', () => {
     await app.close();
   });
 
+  it('queries a relation with no explicit schema in the resource\'s own non-public schema, not "public" (#28100)', async () => {
+    const relationConfig: InventoryResourceConfig = {
+      ...testConfig,
+      schema: 'catalog',
+      relations: {
+        images: {
+          // No `schema:` here — must inherit the resource's `catalog` schema,
+          // not fall back to 'public'.
+          table: 'Image',
+          foreignKey: 'productSlug',
+          referenceKey: '"slug"',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+        },
+      },
+    };
+    const row = {
+      id: '42',
+      slug: 'test-item',
+      name: 'Test Item',
+      price: 99.99,
+      updatedAt: '2026-02-01T00:00:00Z',
+    };
+    const queryRelation = vi
+      .fn()
+      .mockResolvedValue(new Map([['test-item', [{ url: 'https://example.com/image.jpg' }]]]));
+    const query = vi.fn().mockResolvedValue({ rows: [row], total: 1 });
+    const queryById = vi.fn().mockResolvedValue(row);
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: createMockDbAdapter({ query, queryById, queryRelation }),
+      resourceConfig: relationConfig,
+    });
+
+    await app.inject({ method: 'GET', url: '/inventory' });
+    await app.inject({ method: 'GET', url: '/inventory/42' });
+
+    expect(queryRelation).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ schema: 'catalog' }),
+    );
+    expect(queryRelation).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ schema: 'catalog' }),
+    );
+
+    await app.close();
+  });
+
   it('serves listings whose image column holds relative paths, with images dropped', async () => {
     // WordPress/WooCommerce/Magento store site-relative paths or bare
     // filenames. The connector cannot resolve them, so it drops them — but the

@@ -69,7 +69,7 @@ export interface RelationOrderByConfig {
 }
 
 export interface RelationConfig {
-  /** PostgreSQL schema containing this relation. Defaults to the public schema. */
+  /** PostgreSQL schema containing this relation. Defaults to the inventory resource's schema. */
   schema?: string;
   table: string;
   foreignKey: string;

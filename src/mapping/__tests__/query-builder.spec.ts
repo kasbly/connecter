@@ -322,6 +322,16 @@ describe('buildQuery', () => {
     );
   });
 
+  it('reports updatedSince as ignored when no updatedAtColumn is configured', () => {
+    const result = buildQuery(
+      { updatedSince: '2026-01-01T00:00:00Z' },
+      { ...baseConfig, updatedAtColumn: undefined },
+    );
+
+    expect(result.conditions).toEqual([]);
+    expect(result.ignoredFilters).toEqual(['updatedSince']);
+  });
+
   it('uses custom sort', () => {
     const result = buildQuery({ sortBy: 'price', sortDirection: 'asc' }, baseConfig);
     expect(result.sort).toEqual({ column: 'price', direction: 'asc', tiebreaker: 'id' });
