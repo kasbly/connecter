@@ -589,6 +589,7 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     // Step 6 asks which proxy fronts the connector; take the bundled Caddy.
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
     for (const answer of [
@@ -794,6 +795,7 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     // Step 6 asks which proxy fronts the connector; take the bundled Caddy.
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
     for (const answer of [
@@ -925,6 +927,7 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     // Step 6 asks which proxy fronts the connector; take the bundled Caddy.
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
     for (const answer of [
@@ -1994,6 +1997,7 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
     for (const answer of [
       'database.example.com',
@@ -2095,6 +2099,7 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
     for (const answer of [
       'database.example.com',
@@ -2149,7 +2154,11 @@ describe('runWizard', () => {
         expect.objectContaining({
           message: 'Select additional columns to include as attributes:',
           choices: expect.arrayContaining([
-            expect.objectContaining({ name: 'listing_url', value: 'listing_url', checked: true }),
+            expect.objectContaining({
+              name: 'listing_url (text)',
+              value: 'listing_url',
+              checked: true,
+            }),
           ]),
         }),
       );
@@ -2183,6 +2192,141 @@ describe('runWizard', () => {
     }
   });
 
+  // #28247: a bytea/binary column offered no differently than a text column
+  // let operators check it hoping for photos; node-postgres hands it back as
+  // a Buffer, and JSON.stringify mangled it into `{"type":"Buffer","data":[...]}`
+  // in every listing's attributes, inflating payloads without ever rendering
+  // as an image.
+  it('hides a bytea column from the additional-attributes checkbox, shows the SQL type on survivors, and points a skipped images mapping at a URL/array column or relation', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+      '\0unmapped',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'merchant_data',
+      'connector.merchant.example',
+    ]) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.password.mockResolvedValueOnce('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }) =>
+      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve(['notes']);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title']);
+      }
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 40,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'photo_data', type: 'bytea', nullable: true, isPrimaryKey: false },
+              { name: 'notes', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      expect(promptMocks.checkbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Select additional columns to include as attributes:',
+          choices: expect.arrayContaining([
+            expect.objectContaining({ name: 'notes (text)', value: 'notes' }),
+          ]),
+        }),
+      );
+      const call = promptMocks.checkbox.mock.calls.find(([arg]) =>
+        (arg as { message: string }).message.startsWith('Select additional'),
+      );
+      const choices = call?.[0].choices as Array<{ value: string }>;
+      expect(choices.map((c) => c.value)).not.toContain('photo_data');
+
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      const inventory = config.resources.inventory;
+      expect(inventory.attributes).not.toHaveProperty('photo_data');
+
+      // Even if the source row carries a Buffer for the excluded column, it
+      // never reaches attributes — the bug this closes shipped it as
+      // `{"type":"Buffer","data":[...]}` on every listing.
+      expect(
+        mapRowToInventoryItem(
+          {
+            id: 'p1',
+            title: 'Item',
+            price: 10,
+            currency: 'SAR',
+            notes: 'Great condition',
+            photo_data: Buffer.from([1, 2, 3]),
+          },
+          inventory,
+          new Map(),
+        ).attributes,
+      ).toEqual({ notes: 'Great condition' });
+
+      // Images was left unmapped and there is no images relation (no FKs at
+      // all here), so the wizard has to say so out loud rather than silently
+      // shipping a photo-less catalog.
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining('no images source configured'),
+      );
+      expect(consoleLog).toHaveBeenCalledWith(expect.stringContaining('cannot become images[]'));
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('rewrites a loopback DB_HOST to host.docker.internal for the bundled Compose topology and warns about the Postgres bridge network (#28245)', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
@@ -2202,6 +2346,7 @@ describe('runWizard', () => {
     for (const answer of ['title', 'price', 'currency', '\0unmapped', '\0unmapped']) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     // Accepts the recommended bundled Docker proxy and default "localhost" Host.
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
     for (const answer of ['localhost', '5432', 'catalog', 'reader', 'merchant_data', 'x.example']) {
@@ -2258,6 +2403,269 @@ describe('runWizard', () => {
     }
   });
 
+  it('offers a dedicated listing-URL prompt next to the field mappings, wiring a Woo/WordPress-shaped `permalink` column onto attributes.url (#28246)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('products');
+      if (message.startsWith('Which column is the unique listing id')) {
+        return Promise.resolve('id');
+      }
+      if (message.startsWith('Which column is the per-row customer-facing listing page')) {
+        return Promise.resolve('permalink');
+      }
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+      if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
+        return Promise.resolve(fieldMatch[1]);
+      }
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+      if (message.startsWith('Public DNS name')) {
+        return Promise.resolve('connector.merchant.example');
+      }
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockResolvedValue([]);
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 40,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'permalink', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      expect(promptMocks.select).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining(
+            'Which column is the per-row customer-facing listing page',
+          ),
+          choices: expect.arrayContaining([
+            expect.objectContaining({ name: 'permalink (suggested)', value: 'permalink' }),
+          ]),
+        }),
+      );
+      // The dedicated prompt claims the column, so it must not also appear as
+      // an option in the generic "additional attributes" checkbox below it.
+      expect(promptMocks.checkbox).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Select additional columns to include as attributes:',
+          choices: expect.arrayContaining([expect.objectContaining({ value: 'permalink' })]),
+        }),
+      );
+
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(config.resources.inventory.attributes?.url).toBe('"permalink"');
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('warns when no listing-URL column is mapped, mentioning the dedicated prompt instead of only "add a url/listing_url column" (#28246)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('products');
+      if (message.startsWith('Which column is the unique listing id')) {
+        return Promise.resolve('id');
+      }
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+      if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
+        return Promise.resolve(fieldMatch[1]);
+      }
+      // Skips the dedicated listing-URL prompt too.
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+      if (message.startsWith('Public DNS name')) {
+        return Promise.resolve('connector.merchant.example');
+      }
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockResolvedValue([]);
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 40,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining('No listing-URL column was mapped'),
+      );
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining('Which column is the per-row customer-facing listing page'),
+      );
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('does not warn about a missing listing-URL column when one was published under the `link` alias (#28246)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('products');
+      if (message.startsWith('Which column is the unique listing id')) {
+        return Promise.resolve('id');
+      }
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+      if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
+        return Promise.resolve(fieldMatch[1]);
+      }
+      // Skips the dedicated listing-URL prompt: this merchant's column is
+      // named `handle`, which does not match any of suggest.ts's url-shaped
+      // patterns, so it only reaches `attributes.handle` through the manual
+      // "additional attributes" checkbox below — still a customer-URL alias
+      // `providerCustomerListingUrl` (packages/shared) reads.
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+      if (message.startsWith('Public DNS name')) {
+        return Promise.resolve('connector.merchant.example');
+      }
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve(['handle']);
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 40,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'handle', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(config.resources.inventory.attributes?.handle).toBe('"handle"');
+      expect(consoleLog).not.toHaveBeenCalledWith(
+        expect.stringContaining('No listing-URL column was mapped'),
+      );
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('writes the operator-chosen unique listing id for a view with no id column', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
@@ -2284,6 +2692,7 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
     for (const answer of [
       'database.example.com',
@@ -2399,6 +2808,7 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
     for (const answer of [
       'database.example.com',
@@ -2500,6 +2910,7 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
     for (const answer of [
       'database.example.com',
@@ -2694,6 +3105,7 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     // This rerun replaces Caddy, so it keeps the proxy allowlist it already has.
     // Choosing "custom" also means the wizard never asks for a public DNS
     // name (#27229): only the bundled Caddy proxy's start recipe uses one.
@@ -2822,8 +3234,8 @@ describe('runWizard', () => {
         expect.objectContaining({
           message: expect.stringContaining('Select additional columns'),
           choices: expect.arrayContaining([
-            expect.objectContaining({ name: 'makeEn', value: 'makeEn', checked: true }),
-            expect.objectContaining({ name: 'year', value: 'year', checked: true }),
+            expect.objectContaining({ name: 'makeEn (text)', value: 'makeEn', checked: true }),
+            expect.objectContaining({ name: 'year (integer)', value: 'year', checked: true }),
           ]),
         }),
       );
@@ -2943,6 +3355,7 @@ describe('runWizard', () => {
     ]) {
       promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
     }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('custom'));
     for (const answer of [
       'database.example.com',
@@ -3411,7 +3824,7 @@ describe('runWizard', () => {
           message: expect.stringContaining('Select additional columns'),
           choices: expect.arrayContaining([
             expect.objectContaining({
-              name: 'mileage',
+              name: 'mileage (integer)',
               value: 'mileage',
               checked: true,
             }),

@@ -57,9 +57,40 @@ const ATTRIBUTE_PATTERNS: { target: string; patterns: RegExp[] }[] = [
   // A per-row customer-facing listing page. Written to `attributes.url`
   // (see wizard.ts's `suggestedAttributes` lookup), which
   // `resolvePublicListingUrl` already reads — without this, every default AI
-  // card renders a dead 🔗 after a successful connector Test connection (#25311).
-  { target: 'url', patterns: [/^url$/i, /^listing_?url$/i, /^link$/i, /^product_?url$/i] },
+  // card renders a dead 🔗 after a successful connector Test connection
+  // (#25311). `permalink`/`href`/`canonical_url`/`product_link`/`page_url`
+  // are the same idea under the column names a Woo/WordPress-shaped catalog
+  // actually uses (#28246).
+  {
+    target: 'url',
+    patterns: [
+      /^url$/i,
+      /^listing_?url$/i,
+      /^link$/i,
+      /^product_?url$/i,
+      /^permalink$/i,
+      /^href$/i,
+      /^canonical_?url$/i,
+      /^product_?link$/i,
+      /^page_?url$/i,
+    ],
+  },
 ];
+
+/**
+ * Whether a column name matches the listing-URL naming conventions above,
+ * independent of `suggestFieldMappings`' one-match-per-target pass. A second
+ * column that also looks like a listing URL (e.g. both `url` and `permalink`
+ * exist on the same table) never gets a `suggestedAttributes` entry — the
+ * first match already claimed the `url` target — so a manual "additional
+ * attribute" selection of that second column needs its own check to still
+ * publish under the canonical `attributes.url` key instead of the raw column
+ * name (#28246).
+ */
+export function isListingUrlColumn(columnName: string): boolean {
+  const urlPatterns = ATTRIBUTE_PATTERNS.find((entry) => entry.target === 'url')!.patterns;
+  return urlPatterns.some((pattern) => pattern.test(columnName));
+}
 
 // Columns to suggest as published filter
 const PUBLISHED_PATTERNS = [
@@ -395,6 +426,34 @@ const NUMERIC_TYPES = new Set([
   'int4',
   'int8',
 ]);
+
+// USER-DEFINED types that report exactly like an enum in information_schema
+// (namespace outside pg_catalog) but are actually opaque extension types —
+// they cannot be safely rendered as a string attribute either. Extend as
+// more of these show up.
+const NON_ENUM_EXTENSION_UDT_NAMES = new Set(['geometry', 'geography']);
+
+/**
+ * Whether a column is safe to expose as a free-form inventory attribute — the
+ * same text/numeric/enum allowlist `suggestFilterableColumns` already applies
+ * to filters. Excludes binary and other opaque types (bytea, tsvector,
+ * geometry/geography, arrays of any of those, etc.): node-postgres returns
+ * those as Buffers or other non-JSON-safe values, and `JSON.stringify`
+ * mangles a Buffer into `{"type":"Buffer","data":[...]}` on the wire —
+ * inflating every response without ever rendering as a photo.
+ */
+export function isAttributeEligibleColumn(
+  column: Pick<IntrospectedColumn, 'type' | 'udtName'>,
+): boolean {
+  const normalizedType = column.type.trim().toLowerCase();
+  if (isTextColumn(column)) return true;
+  if (NUMERIC_TYPES.has(normalizedType)) return true;
+  if (normalizedType === 'user-defined') {
+    const udtName = column.udtName?.trim().toLowerCase() ?? '';
+    return !NON_ENUM_EXTENSION_UDT_NAMES.has(udtName);
+  }
+  return false;
+}
 
 /**
  * Suggest columns good for full-text ILIKE search.

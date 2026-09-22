@@ -8,8 +8,10 @@ import {
   suggestRelations,
   suggestSearchableColumns,
   suggestFilterableColumns,
+  isAttributeEligibleColumn,
   classifyRelationType,
   suggestJoinColumn,
+  isListingUrlColumn,
 } from '../suggest.js';
 import type { IntrospectedColumn, IntrospectedTable, ForeignKeyInfo } from '../introspect.js';
 
@@ -118,6 +120,29 @@ describe('suggestFieldMappings', () => {
     }
   });
 
+  it('suggests a Woo/WordPress-shaped listing-URL column (permalink/href/canonical_url/product_link/page_url) as the `url` attribute too (#28246)', () => {
+    for (const columnName of [
+      'permalink',
+      'href',
+      'canonical_url',
+      'canonicalUrl',
+      'product_link',
+      'productLink',
+      'page_url',
+      'pageUrl',
+    ]) {
+      const suggestions = suggestFieldMappings([col('id', 'integer', true), col(columnName)]);
+
+      expect(suggestions).toContainEqual(
+        expect.objectContaining({
+          columnName,
+          suggestedMapping: 'url',
+          mappingType: 'attribute',
+        }),
+      );
+    }
+  });
+
   it('skips foreign key and timestamp columns for attributes', () => {
     const columns = [
       col('id', 'integer', true),
@@ -131,6 +156,31 @@ describe('suggestFieldMappings', () => {
     expect(attrNames).not.toContain('tenantId');
     expect(attrNames).not.toContain('createdAt');
     expect(attrNames).not.toContain('updatedAt');
+  });
+});
+
+describe('isListingUrlColumn', () => {
+  it('matches every listing-URL naming convention, including the Woo/WordPress-shaped ones (#28246)', () => {
+    for (const columnName of [
+      'url',
+      'listing_url',
+      'listingUrl',
+      'link',
+      'product_url',
+      'permalink',
+      'href',
+      'canonical_url',
+      'product_link',
+      'page_url',
+    ]) {
+      expect(isListingUrlColumn(columnName)).toBe(true);
+    }
+  });
+
+  it('does not match unrelated column names', () => {
+    for (const columnName of ['title', 'price', 'image_urls', 'handle', 'sku']) {
+      expect(isListingUrlColumn(columnName)).toBe(false);
+    }
   });
 });
 
@@ -506,6 +556,52 @@ describe('suggestSearchableColumns', () => {
     expect(suggestSearchableColumns(columns).map((suggestion) => suggestion.columnName)).toEqual([
       'title',
     ]);
+  });
+});
+
+describe('isAttributeEligibleColumn', () => {
+  it('allows text, numeric, and enum columns', () => {
+    expect(isAttributeEligibleColumn(col('title', 'text'))).toBe(true);
+    expect(isAttributeEligibleColumn(col('sku', 'character varying'))).toBe(true);
+    expect(isAttributeEligibleColumn(col('year', 'integer'))).toBe(true);
+    expect(isAttributeEligibleColumn(col('price', 'numeric'))).toBe(true);
+    expect(
+      isAttributeEligibleColumn({ ...col('color', 'USER-DEFINED'), udtName: 'color_enum' }),
+    ).toBe(true);
+  });
+
+  it('allows citext columns reported as user-defined', () => {
+    expect(isAttributeEligibleColumn({ ...col('title', 'USER-DEFINED'), udtName: 'citext' })).toBe(
+      true,
+    );
+  });
+
+  // #28247: node-postgres returns bytea as a Buffer, and JSON.stringify mangles
+  // it into `{"type":"Buffer","data":[...]}` on the wire instead of a photo.
+  it('rejects bytea columns', () => {
+    expect(isAttributeEligibleColumn(col('photo', 'bytea'))).toBe(false);
+  });
+
+  it('rejects tsvector columns', () => {
+    expect(isAttributeEligibleColumn(col('search_vector', 'tsvector'))).toBe(false);
+  });
+
+  it('rejects array columns', () => {
+    expect(isAttributeEligibleColumn(col('tags', 'ARRAY'))).toBe(false);
+  });
+
+  it('rejects PostGIS geometry/geography columns even though they also report as user-defined', () => {
+    expect(
+      isAttributeEligibleColumn({ ...col('location', 'USER-DEFINED'), udtName: 'geometry' }),
+    ).toBe(false);
+    expect(
+      isAttributeEligibleColumn({ ...col('location', 'USER-DEFINED'), udtName: 'geography' }),
+    ).toBe(false);
+  });
+
+  it('rejects json/jsonb columns, matching the filterable-columns allowlist', () => {
+    expect(isAttributeEligibleColumn(col('metadata', 'json'))).toBe(false);
+    expect(isAttributeEligibleColumn(col('metadata', 'jsonb'))).toBe(false);
   });
 });
 

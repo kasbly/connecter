@@ -29,6 +29,8 @@ import {
   suggestJoinColumn,
   classifyRelationType,
   isTextColumn,
+  isAttributeEligibleColumn,
+  isListingUrlColumn,
   type FilterableColumnSuggestion,
   type RelationSuggestion,
 } from './suggest.js';
@@ -846,30 +848,94 @@ export async function runWizard(): Promise<void> {
     return;
   }
 
-  // Let user select which remaining columns to include as attributes.
-  const unmappedColumns = allColumnNames.filter(
-    (name) =>
-      !mappedColumnNames.has(name) &&
-      name !== idColumn &&
-      name !== updatedAtColumn &&
-      !/Id$/.test(name) &&
-      !/_id$/.test(name) &&
-      !/At$/.test(name) &&
-      !/_at$/.test(name),
+  // Step 3a: Listing URL
+  // A per-row customer-facing listing page, published as `attributes.url` —
+  // the key `resolvePublicListingUrl` reads first (packages/shared's
+  // listing-url.ts). This gets its own prompt, next to the images mapping
+  // above, instead of only being reachable through the generic "additional
+  // attributes" checkbox below: a `permalink`/`href`-shaped column is
+  // otherwise just another easy-to-miss unchecked extra column, and every
+  // default AI card ends with a dead 🔗 after a green Test connection
+  // (#25311, #28246).
+  console.log('\nStep 3a: Listing URL');
+  const suggestedListingUrlColumn = suggestions.find(
+    (suggestion) => suggestion.mappingType === 'attribute' && suggestion.suggestedMapping === 'url',
+  )?.columnName;
+  const existingListingUrlColumn = getExistingMappingSelection(
+    existingConfig?.resources.inventory.attributes?.['url'],
+    allColumnNames,
+  );
+  const listingUrlCandidates = allColumnNames.filter(
+    (name) => !mappedColumnNames.has(name) && name !== idColumn && name !== updatedAtColumn,
+  );
+  let listingUrlColumn: string | undefined;
+  // Always ask, even with zero remaining candidates (every column already
+  // claimed by a field/id/updatedAt mapping) — mirrors getUpdatedAtColumnPrompt's
+  // always-shown "Do not map" choice below rather than silently disappearing,
+  // so the operator always gets the explicit "or set a template in Kasbly"
+  // reminder instead of only the generic column list further down.
+  {
+    const defaultListingUrlColumn = existingListingUrlColumn ?? suggestedListingUrlColumn;
+    const selectedListingUrl = await select({
+      message:
+        'Which column is the per-row customer-facing listing page (permalink / href / canonical ' +
+        'URL)? Skip this only if you will set a listing URL template on this source in Kasbly instead.',
+      choices: [
+        {
+          name: 'Skip — rely on a Kasbly-side listing URL template',
+          value: UNMAPPED_FIELD_VALUE,
+        },
+        ...listingUrlCandidates.map((name) => ({
+          name: name === defaultListingUrlColumn ? `${name} (suggested)` : name,
+          value: name,
+        })),
+      ],
+      default:
+        defaultListingUrlColumn && listingUrlCandidates.includes(defaultListingUrlColumn)
+          ? defaultListingUrlColumn
+          : UNMAPPED_FIELD_VALUE,
+    });
+    if (selectedListingUrl !== UNMAPPED_FIELD_VALUE) {
+      listingUrlColumn = selectedListingUrl;
+      mappedColumnNames.add(selectedListingUrl);
+    }
+  }
+
+  // Let user select which remaining columns to include as attributes. Columns
+  // whose SQL type cannot round-trip as a plain attribute value (bytea,
+  // tsvector, geometry, arrays of those, etc.) are excluded up front —
+  // node-postgres hands those back as Buffers or other opaque values that
+  // JSON.stringify mangles into `{"type":"Buffer","data":[...]}` on the wire
+  // (#28247) — the same text/numeric/enum allowlist filterable columns use.
+  const unmappedColumns = selectedTable.columns.filter(
+    (column) =>
+      !mappedColumnNames.has(column.name) &&
+      column.name !== idColumn &&
+      column.name !== updatedAtColumn &&
+      !/Id$/.test(column.name) &&
+      !/_id$/.test(column.name) &&
+      !/At$/.test(column.name) &&
+      !/_at$/.test(column.name) &&
+      isAttributeEligibleColumn(column),
   );
 
   let additionalAttributes: string[] = [];
   if (unmappedColumns.length > 0) {
     additionalAttributes = await checkbox({
       message: 'Select additional columns to include as attributes:',
-      choices: unmappedColumns.map((name) => ({
-        name,
-        value: name,
+      // The type is shown in the label so a borderline column (e.g. an enum)
+      // is self-documenting, and so an operator never mistakes a truncated
+      // choice for a URL — see getFieldMappingPrompt's images choices.
+      choices: unmappedColumns.map((column) => ({
+        name: `${column.name} (${column.type})`,
+        value: column.name,
         checked:
-          suggestedAttributes.has(name) ||
-          Boolean(existingConfig?.resources.inventory.attributes?.[name]) ||
+          suggestedAttributes.has(column.name) ||
+          Boolean(existingConfig?.resources.inventory.attributes?.[column.name]) ||
           Boolean(
-            existingConfig?.resources.inventory.attributes?.[suggestedAttributes.get(name) ?? ''],
+            existingConfig?.resources.inventory.attributes?.[
+              suggestedAttributes.get(column.name) ?? ''
+            ],
           ),
       })),
     });
@@ -1112,6 +1178,21 @@ export async function runWizard(): Promise<void> {
     relations[configured.name] = configured.relation;
   }
 
+  // A blob/bytea column can never become images[] (#28247) — if the operator
+  // left the images field unmapped and never configured an images relation
+  // either, point them at what would actually work instead of shipping a
+  // catalog with no photos.
+  const hasImagesRelation = Object.values(relations).some((relation) =>
+    Boolean(relation.imageUrlField),
+  );
+  if (!fieldMappings.images && !hasImagesRelation) {
+    console.log(
+      '\nNote: no images source configured. A blob/binary column cannot become images[] — ' +
+        'map a URL, PostgreSQL text array, or JSON array column to "images" in Step 3, or add a ' +
+        'child table of photo rows as an images relation here.',
+    );
+  }
+
   // Step 6: Security
   console.log('\nStep 6: Security');
   let currentApiKey: string;
@@ -1186,8 +1267,19 @@ export async function runWizard(): Promise<void> {
 
   fields['externalId'] = quoteIfNeeded(idColumn);
   Object.assign(fields, fieldMappings);
+  if (listingUrlColumn) {
+    attributes['url'] = quoteIfNeeded(listingUrlColumn);
+  }
   for (const attrName of additionalAttributes) {
-    attributes[suggestedAttributes.get(attrName) ?? attrName] = quoteIfNeeded(attrName);
+    // suggestedAttributes only has one entry per target: suggestFieldMappings
+    // stops at the first matching column, so a second URL-shaped column
+    // manually checked here (e.g. `permalink` alongside an already-suggested
+    // `url`) has no entry there and would otherwise publish under its own raw
+    // column name instead of the canonical `attributes.url` key that
+    // `resolvePublicListingUrl` reads (#28246).
+    const target =
+      suggestedAttributes.get(attrName) ?? (isListingUrlColumn(attrName) ? 'url' : attrName);
+    attributes[target] = quoteIfNeeded(attrName);
   }
 
   const config = {
@@ -1416,13 +1508,23 @@ export async function runWizard(): Promise<void> {
     console.log('   Give Kasbly this URL: http://<this-host>:4000 (no public DNS name needed)');
   }
   // Without one of these, every AI inventory card ends with a dead 🔗 after a
-  // successful Test connection — Kasbly only builds a customer link from
-  // `attributes.url`/`listingUrl` or a Kasbly-side listingUrlTemplate (#25311).
-  if (!attributes['url'] && !attributes['listingUrl']) {
+  // successful Test connection — Kasbly only builds a customer link from one
+  // of these `attributes` keys (packages/shared's `providerCustomerListingUrl`)
+  // or a Kasbly-side listingUrlTemplate (#25311). The connector has no access
+  // to that Kasbly-side setting, so this can't tell whether a template is
+  // already covering it — same limitation the original warning had — but it
+  // now checks every alias Kasbly reads, not just `url`/`listingUrl`, so a
+  // column already published under `listing_url`/`link`/`handle` no longer
+  // trips a false warning (#28246).
+  const hasListingUrlAttribute = ['url', 'listingUrl', 'listing_url', 'link', 'handle'].some(
+    (key) => Boolean(attributes[key]),
+  );
+  if (!hasListingUrlAttribute) {
     console.log(
       '   No listing-URL column was mapped: every AI product card will be missing its link ' +
-        'until you either map one here (rerun setup and add a `url`/`listing_url` column as an ' +
-        'attribute) or set a listing URL template on the source in Kasbly.',
+        'until you either rerun setup and answer "Which column is the per-row customer-facing ' +
+        'listing page?" (any permalink/href/canonical_url/product_link/listing_url-style column ' +
+        'works — see Step 3a above) or set a listing URL template on this source in Kasbly.',
     );
   }
   // GET /inventory (and the /health sample it shares) always sorts `<sortColumn> DESC
