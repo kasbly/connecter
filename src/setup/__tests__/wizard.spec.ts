@@ -1463,6 +1463,124 @@ describe('runWizard', () => {
     }
   });
 
+  // #28393 leftover of #28247: the row-attribute picker already hid bytea,
+  // but the sibling relation-column picker still offered it. A generic
+  // relation then ships the whole row into attributes as Buffer JSON.
+  it('hides a bytea child column from the relation-column picker for a features/generic relation', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+
+    vi.clearAllMocks();
+
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+      raw: vi.fn(() => Promise.resolve({ rows: [] })),
+    });
+
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('products');
+      if (message.startsWith('Which column is the unique listing id')) {
+        return Promise.resolve('id');
+      }
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+      if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
+        return Promise.resolve(fieldMatch[1]);
+      }
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('merchant_data');
+      if (message.startsWith('Public DNS name')) {
+        return Promise.resolve('connector.merchant.example');
+      }
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title']);
+      }
+      if (message.startsWith('Select columns from ProductDocuments')) {
+        return Promise.resolve(['label']);
+      }
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 40,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ],
+          },
+          {
+            name: 'ProductDocuments',
+            kind: 'table',
+            rowCount: 80,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'product_id', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'label', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'file', type: 'bytea', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [
+          {
+            constraintName: 'ProductDocuments_product_id_fkey',
+            fromTable: 'ProductDocuments',
+            fromColumn: 'product_id',
+            toTable: 'products',
+            toColumn: 'id',
+          },
+        ],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      const call = promptMocks.checkbox.mock.calls.find(([arg]) =>
+        (arg as { message: string }).message.startsWith('Select columns from ProductDocuments'),
+      );
+      expect(call).toBeDefined();
+      const choices = (call?.[0] as { choices: Array<{ name: string; value: string }> }).choices;
+      expect(choices.map((c) => c.value)).toContain('label');
+      expect(choices.map((c) => c.value)).not.toContain('file');
+
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(
+        config.resources.inventory.relations?.['ProductDocuments__product_id']?.fields,
+      ).toEqual({ label: '"label"' });
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('lets the operator map an unconstrained child table when no foreign key points at the inventory view (#27935)', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();

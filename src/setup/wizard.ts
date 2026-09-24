@@ -462,7 +462,9 @@ async function collectConfiguredRelation(options: {
     if (suggestion.relationType === 'images') {
       return /url$/i.test(col.name) || /^src$/i.test(col.name) || col.name === typeColumn;
     }
-    return true;
+    // Same text/numeric/enum allowlist as row attributes — bytea/geometry
+    // would ship as Buffer JSON inside a generic relation's attributes.
+    return isAttributeEligibleColumn(col);
   });
   const defaultColumn =
     suggestion.relationType === 'images'
