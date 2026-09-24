@@ -220,9 +220,12 @@ export class PostgresAdapter implements DatabaseAdapter {
         // back as ACTIVE but never matches `WHERE status IN ('ACTIVE', ...)`,
         // so filter.status=ACTIVE returns zero rows for it (residual of
         // #25604 — the IN branch was left exact). `::text` keeps this a
-        // no-op for enum/integer status columns.
+        // no-op for enum/integer status columns. `btrim` matches the
+        // read-side `.trim()` too: without it, a stored 'active ' (a stray
+        // trailing space from CSV/Excel/legacy-ERP imports) reads back as
+        // ACTIVE everywhere else but is silently excluded here (#28392).
         queryBuilder = queryBuilder.whereRaw(
-          `lower(${condition.column}::text) IN (${sourceValues.map(() => '?').join(', ')})`,
+          `lower(btrim(${condition.column}::text)) IN (${sourceValues.map(() => '?').join(', ')})`,
           sourceValues.map((value) => value.trim().toLowerCase()),
         );
         continue;

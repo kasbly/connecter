@@ -786,6 +786,86 @@ describe('health route', () => {
     await app.close();
   });
 
+  // #28391: a failed probe used to share the same 30s TTL as a success, so a
+  // single one-off timeout kept every request 503ing — via
+  // requireReadyInventoryResource — for the next 30s. The failure slot must
+  // expire much sooner so the next request re-probes instead of inheriting it.
+  it('does not cache a failed resource probe for the full success TTL (#28391)', async () => {
+    const app = Fastify();
+    const timeoutError = Object.assign(new Error('canceling statement due to statement timeout'), {
+      code: '57014',
+    });
+    const dbAdapter: DatabaseAdapter = {
+      healthCheck: vi.fn().mockResolvedValue(true),
+      query: vi.fn().mockRejectedValue(timeoutError),
+    } as unknown as DatabaseAdapter;
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
+
+    const nowSpy = vi.spyOn(Date, 'now');
+    const start = 1_700_000_000_000;
+    try {
+      nowSpy.mockReturnValue(start);
+      await app.inject({ method: 'GET', url: '/health' });
+
+      // Well past a short negative-cache window, well short of the 30s
+      // success TTL a `resources: 'ok'` result is entitled to.
+      nowSpy.mockReturnValue(start + 5_000);
+      await app.inject({ method: 'GET', url: '/health' });
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(dbAdapter.query).toHaveBeenCalledTimes(2);
+    await app.close();
+  });
+
+  // #28391: `probeInventoryResource` throwing a statement-timeout or a
+  // dropped-connection error says nothing about whether the mapping is
+  // correct. `diagnoseConnectorHealth` (apps/api) reads `resources:
+  // 'misconfigured'` as "will never heal on its own" — a one-off driver
+  // hiccup must never be reported that way.
+  it('reports a statement-timeout probe failure as "transient", not "misconfigured" (#28391)', async () => {
+    const app = Fastify();
+    const timeoutError = Object.assign(new Error('canceling statement due to statement timeout'), {
+      code: '57014',
+    });
+    const dbAdapter: DatabaseAdapter = {
+      healthCheck: vi.fn().mockResolvedValue(true),
+      query: vi.fn().mockRejectedValue(timeoutError),
+    } as unknown as DatabaseAdapter;
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      status: 'degraded',
+      database: 'connected',
+      resources: 'transient',
+      resourceError: expect.stringContaining('statement timeout'),
+    });
+    await app.close();
+  });
+
+  it('reports a dropped-connection probe failure as "transient" too (#28391)', async () => {
+    const app = Fastify();
+    const resetError = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    const dbAdapter: DatabaseAdapter = {
+      healthCheck: vi.fn().mockResolvedValue(true),
+      query: vi.fn().mockRejectedValue(resetError),
+    } as unknown as DatabaseAdapter;
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      resources: 'transient',
+      resourceError: expect.stringContaining('ECONNRESET'),
+    });
+    await app.close();
+  });
+
   // #26697: `/health` has no API key, so it must stay a bare liveness verdict
   // no matter what fails; `/diagnostics` carries the same verdict plus the
   // detail. This is the contract every test above already exercises

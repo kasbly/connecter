@@ -132,7 +132,7 @@ describe('getFieldMappingPrompt', () => {
     expect(prompt.choices.map((choice) => choice.value)).not.toContain('metadata');
   });
 
-  it.each(['title', 'currency', 'category', 'status'] as const)(
+  it.each(['title', 'description', 'currency', 'category', 'status'] as const)(
     'does not offer JSON columns for %s mappings',
     (field) => {
       const prompt = getFieldMappingPrompt(field, [

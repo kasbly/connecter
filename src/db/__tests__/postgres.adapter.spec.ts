@@ -927,8 +927,8 @@ describe('PostgresAdapter list count (#17420)', () => {
 
     const { countQuery, dataQuery } = await runListQuery({ count: 3, conditions });
 
-    expect(countQuery.sql).toContain('lower(availability::text) IN (?, ?)');
-    expect(dataQuery.sql).toContain('lower(availability::text) IN (?, ?)');
+    expect(countQuery.sql).toContain('lower(btrim(availability::text)) IN (?, ?)');
+    expect(dataQuery.sql).toContain('lower(btrim(availability::text)) IN (?, ?)');
     expect(countQuery.bindings.slice(0, 2)).toEqual(['sold', 'closed']);
     expect(dataQuery.bindings.slice(0, 2)).toEqual(['sold', 'closed']);
   });
@@ -948,11 +948,33 @@ describe('PostgresAdapter list count (#17420)', () => {
       dataRows: [{ id: '1', price: 10, status: 'Active' }],
     });
 
-    expect(dataQuery.sql).toContain('lower(status::text) IN (?, ?)');
-    expect(countQuery.sql).toContain('lower(status::text) IN (?, ?)');
+    expect(dataQuery.sql).toContain('lower(btrim(status::text)) IN (?, ?)');
+    expect(countQuery.sql).toContain('lower(btrim(status::text)) IN (?, ?)');
     expect(dataQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
     expect(countQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
     expect(result.rows).toEqual([{ id: '1', price: 10, status: 'Active' }]);
+  });
+
+  it('matches filter.status=ACTIVE against a stored value with stray whitespace via btrim (#28392)', async () => {
+    // resolveInventoryStatus reads a stored ' active ' back as ACTIVE by
+    // trimming both sides, but the IN filter only trimmed the configured
+    // source values, so this row read as live everywhere else yet was
+    // invisible to every filtered search. See #28392.
+    const conditions: QueryCondition[] = [
+      { column: 'status', operator: 'IN', value: ['ACTIVE', 'active'] },
+    ];
+
+    const { countQuery, dataQuery, result } = await runListQuery({
+      count: 1,
+      conditions,
+      dataRows: [{ id: '1', price: 10, status: ' active ' }],
+    });
+
+    expect(dataQuery.sql).toContain('lower(btrim(status::text)) IN (?, ?)');
+    expect(countQuery.sql).toContain('lower(btrim(status::text)) IN (?, ?)');
+    expect(dataQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
+    expect(countQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
+    expect(result.rows).toEqual([{ id: '1', price: 10, status: ' active ' }]);
   });
 
   it('escapes LIKE metacharacters in search values for data and count queries', async () => {

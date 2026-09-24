@@ -100,7 +100,12 @@ function isCompatibleFieldColumn(field: FieldMappingTarget, column: MappingColum
     );
   }
 
-  if (field === 'title' || field === 'currency' || field === 'category') {
+  if (
+    field === 'title' ||
+    field === 'currency' ||
+    field === 'category' ||
+    field === 'description'
+  ) {
     return isTextColumn(column) || /(xml|enum)/.test(normalizedType);
   }
 

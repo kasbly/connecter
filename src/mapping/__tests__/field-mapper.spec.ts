@@ -181,6 +181,31 @@ describe('mapRowToInventoryItem', () => {
     expect(() => validateInventoryItemWireContract(result)).toThrow(/title.*currency/);
   });
 
+  it('maps an object-valued (jsonb) description column to null instead of "[object Object]" (#28394)', () => {
+    // A multi-locale jsonb description, e.g. {"en": "...", "ar": "..."} — the
+    // same shape #23937 already guards title/currency/category against. Unlike
+    // those fields, description is nullable on the wire contract, so this
+    // mapping choice (null, not a stringified object) is what keeps a
+    // hand-written config from ever shipping "[object Object]" to a listing.
+    const config = {
+      ...baseConfig,
+      fields: { ...baseConfig.fields, description: 'description' },
+    };
+    const result = mapRowToInventoryItem(
+      {
+        id: '1',
+        title: 'Test',
+        price: 100,
+        description: { en: 'Low-mileage sedan', ar: 'سيارة سيدان منخفضة الأميال' },
+      },
+      config,
+      new Map(),
+    );
+
+    expect(result.description).toBeNull();
+    expect(() => validateInventoryItemWireContract(result)).not.toThrow();
+  });
+
   it('maps configured source statuses to Kasbly status tokens', () => {
     const config: InventoryResourceConfig = {
       ...baseConfig,

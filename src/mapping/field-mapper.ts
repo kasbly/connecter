@@ -324,7 +324,7 @@ export function mapRowToInventoryItem(
   return {
     externalId,
     title: toMappedString(fields['title']),
-    description: typeof fields['description'] === 'string' ? fields['description'] : null,
+    description: toMappedString(fields['description']) || null,
     price: toFinitePrice(fields['price']),
     currency: toMappedString(fields['currency']),
     category: toMappedString(fields['category']),

@@ -35,6 +35,48 @@ function getVersion(): string {
 
 const startTime = Date.now();
 const RESOURCE_PROBE_TTL_MS = 30_000;
+/**
+ * TTL for a *failed* probe result, deliberately far shorter than
+ * `RESOURCE_PROBE_TTL_MS`. A one-off driver hiccup (a statement timeout, a
+ * dropped connection) used to be cached on the same 30s slot as a success, so
+ * `GET /inventory/:id` — an indexed single-row lookup with nothing to do with
+ * the failing probe query — inherited a 30s outage from it. Keeping this
+ * short still debounces a burst of concurrent requests into one re-probe
+ * instead of a stampede, without pinning a transient error in place (#28391).
+ */
+const RESOURCE_PROBE_FAILURE_TTL_MS = 1_000;
+
+/**
+ * PostgreSQL SQLSTATEs and Node/driver-level codes that describe a one-off
+ * database hiccup — a statement timeout, an exhausted connection pool, a
+ * dropped or refused connection — rather than a broken table/column mapping.
+ * `probeInventoryResource` throwing one of these says nothing about whether
+ * the configured mapping is correct, so it must never be classified the same
+ * way as a genuine mapping error (#28391).
+ */
+const TRANSIENT_PROBE_ERROR_CODES = new Set([
+  '57014', // query_canceled (statement_timeout)
+  '53300', // too_many_connections
+  '53400', // configuration_limit_exceeded
+  '08000', // connection_exception
+  '08001', // sqlclient_unable_to_establish_sqlconnection
+  '08003', // connection_does_not_exist
+  '08004', // sqlserver_rejected_establishment_of_sqlconnection
+  '08006', // connection_failure
+  '57P01', // admin_shutdown
+  '57P02', // crash_shutdown
+  '57P03', // cannot_connect_now
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'EPIPE',
+]);
+
+function isTransientProbeError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const code = Reflect.get(error, 'code');
+  return typeof code === 'string' && TRANSIENT_PROBE_ERROR_CODES.has(code);
+}
 
 /** Most distinct source status values one probe reports (#23293). */
 export const UNKNOWN_STATUS_VALUE_LIMIT = 50;
@@ -58,6 +100,13 @@ export const SEARCHABLE_COLUMN_PROBE_TERM = '\\0probe';
 export interface ResourceHealth {
   ok: boolean;
   error?: string;
+  /**
+   * Set when `error` is a one-off database hiccup (see
+   * `TRANSIENT_PROBE_ERROR_CODES`) rather than an actual mapping problem.
+   * `buildLivenessBody` renders this as `resources: 'transient'` instead of
+   * `'misconfigured'` so callers know a retry can help (#28391).
+   */
+  transient?: boolean;
   /** Source statuses seen by the probe that need an explicit mapping. */
   unknownStatusValues?: string[];
   /**
@@ -179,10 +228,20 @@ export async function probeInventoryResource(
       });
     }
   } catch (error) {
-    throw new Error(
+    const wrapped = new Error(
       `Inventory resource probe failed for table "${resourceConfig.table}" ` +
         `(columns: ${selectColumns.join(', ')}): ${errorMessage(error)}`,
     );
+    // Preserve the driver's SQLSTATE/error code on the wrapped error so
+    // `createResourceHealthCheck` can still tell a one-off statement timeout
+    // or dropped connection apart from a genuine mapping error, even though
+    // the message itself is rebuilt here to add table/column context (#28391).
+    const code =
+      typeof error === 'object' && error !== null ? Reflect.get(error, 'code') : undefined;
+    if (typeof code === 'string') {
+      Object.assign(wrapped, { code });
+    }
+    throw wrapped;
   }
 
   // Loads relation rows keyed by relationName -> parent reference value for a
@@ -420,8 +479,13 @@ export function createResourceHealthCheck(
   let resourceProbeInFlight: Promise<ResourceHealth> | undefined;
 
   return async (): Promise<ResourceHealth> => {
-    if (cachedResourceHealth && Date.now() - cachedResourceHealthAt < RESOURCE_PROBE_TTL_MS) {
-      return cachedResourceHealth;
+    if (cachedResourceHealth) {
+      const cacheTtl = cachedResourceHealth.ok
+        ? RESOURCE_PROBE_TTL_MS
+        : RESOURCE_PROBE_FAILURE_TTL_MS;
+      if (Date.now() - cachedResourceHealthAt < cacheTtl) {
+        return cachedResourceHealth;
+      }
     }
 
     if (!resourceProbeInFlight) {
@@ -432,7 +496,11 @@ export function createResourceHealthCheck(
           ...(wireContractViolationIds.length > 0 ? { wireContractViolationIds } : {}),
           ...(unservableImageIds.length > 0 ? { unservableImageIds } : {}),
         }))
-        .catch((error: unknown) => ({ ok: false, error: errorMessage(error) }))
+        .catch((error: unknown) => ({
+          ok: false,
+          error: errorMessage(error),
+          ...(isTransientProbeError(error) ? { transient: true } : {}),
+        }))
         .then((health) => {
           cachedResourceHealth = health;
           cachedResourceHealthAt = Date.now();
@@ -474,7 +542,13 @@ function buildLivenessBody(snapshot: HealthSnapshot): Record<string, unknown> {
     status: dbHealthy && resourceHealth?.ok && auditHealth.ok ? 'ok' : 'degraded',
     version: getVersion(),
     database: dbHealthy ? 'connected' : 'disconnected',
-    resources: resourceHealth ? (resourceHealth.ok ? 'ok' : 'misconfigured') : 'unavailable',
+    resources: resourceHealth
+      ? resourceHealth.ok
+        ? 'ok'
+        : resourceHealth.transient
+          ? 'transient'
+          : 'misconfigured'
+      : 'unavailable',
     audit: auditHealth.enabled ? (auditHealth.ok ? 'ok' : 'degraded') : 'disabled',
     uptime: Math.floor((Date.now() - startTime) / 1000),
   };
