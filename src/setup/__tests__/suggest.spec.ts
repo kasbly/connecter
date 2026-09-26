@@ -9,6 +9,7 @@ import {
   suggestSearchableColumns,
   suggestFilterableColumns,
   isAttributeEligibleColumn,
+  isTextColumn,
   classifyRelationType,
   suggestJoinColumn,
   isListingUrlColumn,
@@ -559,6 +560,31 @@ describe('suggestSearchableColumns', () => {
   });
 });
 
+describe('isTextColumn', () => {
+  it('recognizes the bare type names information_schema.columns reports for tables and views', () => {
+    expect(isTextColumn(col('title', 'text'))).toBe(true);
+    expect(isTextColumn(col('sku', 'character varying'))).toBe(true);
+    expect(isTextColumn(col('code', 'char'))).toBe(true);
+    expect(isTextColumn(col('code2', 'character'))).toBe(true);
+  });
+
+  // #28745: a materialized view over a `title varchar(255)` column reported
+  // `character varying(255)` via `pg_catalog.format_type(a.atttypid,
+  // a.atttypmod)`, which TEXT_TYPES never matches because it's an exact set
+  // lookup against the bare `information_schema` vocabulary. The fix in
+  // introspect.ts passes a NULL typmod so the matview branch reports the same
+  // bare `character varying` that tables/views already do — this guards
+  // against that modifier ever reaching isTextColumn again.
+  it('does not match a type string carrying a length/precision modifier', () => {
+    expect(isTextColumn(col('title', 'character varying(255)'))).toBe(false);
+    expect(isTextColumn(col('currency', 'character(3)'))).toBe(false);
+  });
+
+  it('recognizes citext reported as USER-DEFINED with the citext udtName', () => {
+    expect(isTextColumn({ ...col('title', 'USER-DEFINED'), udtName: 'citext' })).toBe(true);
+  });
+});
+
 describe('isAttributeEligibleColumn', () => {
   it('allows text, numeric, and enum columns', () => {
     expect(isAttributeEligibleColumn(col('title', 'text'))).toBe(true);
@@ -829,5 +855,36 @@ describe('suggestFilterableColumns', () => {
 
     const suggestions = suggestFilterableColumns(columns, [], []);
     expect(suggestions).toEqual([]);
+  });
+
+  // #28745: post-fix, introspectTables reports a materialized view's text and
+  // numeric columns with the same bare type names information_schema uses for
+  // tables/views (no `(255)` / `(10,2)` modifier), so a matview column flows
+  // through isTextColumn / NUMERIC_TYPES.has() the same way a table column does.
+  it('suggests filters for a materialized-view fuelType/price pair reported with bare (unmodified) types', () => {
+    const columns = [
+      col('id', 'uuid', true),
+      col('fuelType', 'character varying'),
+      col('price', 'numeric'),
+    ];
+    const fieldMappings = [
+      {
+        columnName: 'fuelType',
+        suggestedMapping: 'fuelType',
+        confidence: 'medium' as const,
+        mappingType: 'attribute' as const,
+      },
+      {
+        columnName: 'price',
+        suggestedMapping: 'price',
+        confidence: 'high' as const,
+        mappingType: 'field' as const,
+      },
+    ];
+
+    const suggestions = suggestFilterableColumns(columns, fieldMappings, []);
+    const filterNames = suggestions.map((s) => s.filterName);
+
+    expect(filterNames).toEqual(expect.arrayContaining(['fuelType', 'minPrice', 'maxPrice']));
   });
 });

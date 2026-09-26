@@ -16,6 +16,18 @@ import type { AuditConfig } from '../config/config.types.js';
 const AUDIT_READ_CHUNK_SIZE = 64 * 1024;
 export const AUDIT_QUERY_COUNT_LIMIT = 1_000;
 
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+/**
+ * How soon a *failed* prune is retried, deliberately far shorter than
+ * `PRUNE_INTERVAL_MS`. `pruneExpiredLogs` used to consume the full hour up
+ * front regardless of outcome, so a transient failure (ENOSPC, a briefly
+ * read-only mount, a root-owned rotated file) pinned `getHealth().ok` at
+ * false — and therefore `/health`/`/diagnostics` at 503 — for up to an hour
+ * after the cause was gone, mirroring the resource-probe stickiness fixed by
+ * `RESOURCE_PROBE_FAILURE_TTL_MS` in routes/health.route.ts (#28391, #28746).
+ */
+const PRUNE_RETRY_INTERVAL_MS = 60 * 1000;
+
 function resolveAuditQueryCountLimit(options: AuditQueryOptions): number {
   const offset = (options.page - 1) * options.pageSize;
   // Do not let the count cap hide the requested page, and retain one more entry
@@ -280,13 +292,18 @@ export class AuditService {
 
     // Retention is time-based, so it must not depend on a size-triggered rotation.
     const now = Date.now();
-    if (now - this.lastPruneMs > 60 * 60 * 1000) {
-      this.lastPruneMs = now;
-      await this.pruneExpiredLogs();
+    if (now - this.lastPruneMs > PRUNE_INTERVAL_MS) {
+      const pruneSucceeded = await this.pruneExpiredLogs();
+      // A successful prune waits the full interval before running again. A
+      // failed prune backs off only briefly, so `lastPruneMs` is walked
+      // forward just enough to schedule a retry `PRUNE_RETRY_INTERVAL_MS`
+      // from now, instead of pinning `pruneError` (and therefore /health)
+      // for the rest of the hour.
+      this.lastPruneMs = pruneSucceeded ? now : now - (PRUNE_INTERVAL_MS - PRUNE_RETRY_INTERVAL_MS);
     }
   }
 
-  private async pruneExpiredLogs(): Promise<void> {
+  private async pruneExpiredLogs(): Promise<boolean> {
     const dir = dirname(this.config.filePath);
     const base = basename(this.config.filePath);
     const maxAgeMs = this.config.retentionDays * 24 * 60 * 60 * 1000;
@@ -296,7 +313,14 @@ export class AuditService {
       await this.pruneActiveFile(now, maxAgeMs);
       const files = await readdir(dir);
       for (const file of files) {
-        if (file.startsWith(base + '.') && file !== base) {
+        // Match both rotated generations (`<base>.<n>`) and orphaned
+        // retention temp files (`.<base>.retention-<pid>-<ts>`) left behind
+        // by a prune that failed between writing and renaming — otherwise
+        // the leading dot means they never match `<base>.` and accumulate
+        // forever inside the mounted logs volume (#28746).
+        const isRotatedFile = file.startsWith(`${base}.`) && file !== base;
+        const isOrphanedRetentionTemp = file.startsWith(`.${base}.retention-`);
+        if (isRotatedFile || isOrphanedRetentionTemp) {
           const filePath = join(dir, file);
           const stats = await stat(filePath);
           if (now - stats.mtimeMs > maxAgeMs) {
@@ -305,12 +329,14 @@ export class AuditService {
         }
       }
       this.pruneError = undefined;
+      return true;
     } catch (error) {
       this.pruneError = errorMessage(error);
       this.logger?.warn(
         { err: error, filePath: this.config.filePath },
         'Failed to prune audit logs',
       );
+      return false;
     }
   }
 
@@ -331,8 +357,19 @@ export class AuditService {
       dirname(this.config.filePath),
       `.${basename(this.config.filePath)}.retention-${process.pid}-${Date.now()}`,
     );
-    await writeFile(temporaryPath, retainedLines.join('\n'), { encoding: 'utf8', flag: 'w' });
-    await rename(temporaryPath, this.config.filePath);
+    try {
+      await writeFile(temporaryPath, retainedLines.join('\n'), { encoding: 'utf8', flag: 'w' });
+      await rename(temporaryPath, this.config.filePath);
+    } catch (error) {
+      // A failure between the write and the rename must not leave the
+      // partial temp file behind: it starts with a dot, so it would
+      // otherwise never match the sweep's `<base>.` filter and orphan
+      // forever inside the logs volume.
+      await unlink(temporaryPath).catch(() => {
+        // Best-effort cleanup: the write may never have created the file.
+      });
+      throw error;
+    }
   }
 
   private isExpiredAuditEntry(line: string, now: number, maxAgeMs: number): boolean {

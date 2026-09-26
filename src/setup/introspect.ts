@@ -189,7 +189,7 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
           }>(
             `SELECT a.attname AS column_name,
                     CASE WHEN t.typtype = 'e' THEN 'USER-DEFINED'
-                         ELSE pg_catalog.format_type(a.atttypid, a.atttypmod)
+                         ELSE pg_catalog.format_type(a.atttypid, NULL)
                     END AS data_type,
                     t.typname AS udt_name,
                     CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable
@@ -232,7 +232,7 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
                JOIN pg_namespace n ON n.oid = c.relnamespace
                WHERE c.relkind = 'm' AND c.relname = ? AND n.nspname = ?
              ), unique_index AS (
-               SELECT i.indexrelid, i.indrelid, i.indnkeyatts
+               SELECT i.indexrelid, i.indrelid, i.indnkeyatts, i.indkey
                FROM pg_index i
                JOIN materialized_view m ON m.oid = i.indrelid
                WHERE i.indisunique

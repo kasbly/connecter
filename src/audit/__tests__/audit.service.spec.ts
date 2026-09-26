@@ -1,7 +1,27 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, utimesSync } from 'node:fs';
+import {
+  rmSync,
+  existsSync,
+  readFileSync,
+  mkdirSync,
+  writeFileSync,
+  utimesSync,
+  readdirSync,
+} from 'node:fs';
+import { rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { AUDIT_QUERY_COUNT_LIMIT, AuditService, type AuditEntry } from '../audit.service.js';
+
+// Only `rename` is wrapped so a single test can force a one-off failure of
+// the write+rename pair in `pruneActiveFile` deterministically, without
+// depending on OS file permissions (CI runners execute as root, where a
+// chmod'd read-only directory is not actually enforced). Every other
+// `node:fs/promises` export, and every other call to `rename` itself,
+// keeps its real implementation.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, rename: vi.fn(actual.rename) };
+});
 
 const TEST_DIR = join(process.cwd(), '.test-audit-logs');
 const TEST_FILE = join(TEST_DIR, 'test-audit.log');
@@ -232,6 +252,75 @@ describe('AuditService', () => {
       '/inventory/retained',
       '/inventory/appended',
     ]);
+  });
+
+  it('recovers audit health after one failed prune without waiting out the hour, and leaves no orphaned retention temp file (#28746)', async () => {
+    vi.useFakeTimers();
+    const renameMock = vi.mocked(rename);
+    try {
+      const logger = { warn: vi.fn() };
+      const svc = new AuditService(
+        {
+          enabled: true,
+          filePath: TEST_FILE,
+          maxFileSizeMB: 50,
+          maxFiles: 10,
+          retentionDays: 1,
+        },
+        logger,
+      );
+
+      const expiredEntry = makeEntry({
+        path: '/inventory/expired',
+        ts: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+      });
+      writeFileSync(TEST_FILE, `${JSON.stringify(expiredEntry)}\n`, 'utf8');
+
+      // Fail only the rename half of pruneActiveFile's write+rename pair,
+      // once. The temp file is genuinely written to disk first (simulating a
+      // crash between the write and the rename — the same failure window as
+      // ENOSPC/EACCES/a briefly read-only mount), so this proves the catch
+      // path actually unlinks a real leftover file rather than a file that
+      // was never created.
+      renameMock.mockImplementationOnce(() => {
+        throw new Error('EACCES: permission denied, rename temp path');
+      });
+
+      svc.log(makeEntry({ path: '/inventory/first' }));
+      await svc.flush();
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error), filePath: TEST_FILE }),
+        'Failed to prune audit logs',
+      );
+      expect(svc.getHealth()).toMatchObject({
+        enabled: true,
+        ok: false,
+        error: expect.any(String),
+      });
+      expect(svc.getHealth().lastSuccessfulAppendAt).toEqual(expect.any(String));
+
+      // The failed write+rename pair must not leave its partial temp file
+      // behind — it starts with a dot, so the sweep's old filter could never
+      // remove it and it would orphan forever.
+      const filesAfterFailure = readdirSync(TEST_DIR);
+      expect(filesAfterFailure.some((file) => file.includes('.retention-'))).toBe(false);
+
+      // Advance time by just over the short retry backoff (well under the
+      // full hour) before the next append cycle's prune attempt, which now
+      // runs with `rename` back to its real implementation.
+      vi.setSystemTime(Date.now() + 61_000);
+
+      svc.log(makeEntry({ path: '/inventory/second' }));
+      await svc.flush();
+
+      expect(svc.getHealth()).toMatchObject({ enabled: true, ok: true });
+
+      const filesAfterRecovery = readdirSync(TEST_DIR);
+      expect(filesAfterRecovery.some((file) => file.includes('.retention-'))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('queries entries with pagination', async () => {

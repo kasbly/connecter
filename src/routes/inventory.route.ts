@@ -292,18 +292,18 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       // Record exactly how many raw rows (from `startOffset`) this page
       // consumed, so a request for the next page resumes right after them
       // instead of re-deriving an offset that overlaps rows already served
-      // above (#26344). Cache whenever the page served rows and the result
-      // set is not exhausted: a short page whose backfill budget ran out
-      // still has a next page, and skipping the cursor re-serves the rows
-      // already handed out (#27419). A truly exhausted page has no next
-      // page to resume, so there is nothing worth caching. Nor is a page
-      // that never backfilled: if the raw offset it consumed matches the
-      // naive `page * pageSize` boundary exactly, the entry would be a
-      // no-op indistinguishable from having no cursor at all, and it would
-      // still occupy one of the `MAX_BACKFILL_CURSOR_ENTRIES` slots —
-      // letting ordinary search traffic evict the one cursor that actually
-      // carries information (#26696).
-      if (items.length > 0 && !exhausted) {
+      // above (#26344). Cache whenever the page consumed raw rows, whether
+      // or not the result set is exhausted: an exhausted page still needs
+      // its boundary recorded, otherwise a caller that requests one more
+      // page falls back to the naive offset and re-serves rows already
+      // handed out (#28743). Nor is a page that never backfilled: if the
+      // raw offset it consumed matches the naive `page * pageSize` boundary
+      // exactly, the entry would be a no-op indistinguishable from having
+      // no cursor at all, and it would still occupy one of the
+      // `MAX_BACKFILL_CURSOR_ENTRIES` slots — letting ordinary search
+      // traffic evict the one cursor that actually carries information
+      // (#26696).
+      if (items.length > 0) {
         const consumedRaw = rawRowsConsumedForTarget(batches, items.length);
         const rawOffset = startOffset + consumedRaw;
         if (rawOffset !== pagination.page * pagination.pageSize) {
@@ -311,6 +311,22 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
             afterPage: pagination.page,
             rawOffset,
             omittedSoFar: cursorOmittedSoFar + (consumedRaw - items.length),
+          });
+        }
+      } else {
+        // Every raw row examined failed validation, or there was nothing
+        // left to examine at all — either way the page comes back empty.
+        // Cache the boundary past the entire scanned run (rowsExamined is 0
+        // once the scan is truly exhausted) so the next page resumes after
+        // it instead of re-deriving the naive offset, re-scanning a bad
+        // batch, or — once truly exhausted — falling back into raw rows an
+        // earlier page already served (#28743).
+        const rawOffset = startOffset + rowsExamined;
+        if (rawOffset !== pagination.page * pagination.pageSize) {
+          cacheBackfillCursor(boundaryKey(pagination.page), {
+            afterPage: pagination.page,
+            rawOffset,
+            omittedSoFar: cursorOmittedSoFar + rowsExamined,
           });
         }
       }

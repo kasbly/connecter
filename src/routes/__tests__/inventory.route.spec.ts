@@ -676,6 +676,162 @@ describe('inventory routes', () => {
     await app.close();
   });
 
+  it('GET /inventory does not serve an empty page mid-result-set when a withheld run exceeds the backfill budget (#28743)', async () => {
+    // 50 listings, newest-first. Raw offsets 5-29 (25 rows, ids 45-21) fail
+    // the wire contract — a run bigger than the (MAX_BACKFILL_FETCHES + 1) *
+    // pageSize == 25 row budget at pageSize 5, so one page's backfill cannot
+    // reach a single valid row. Before the fix, that page cached no cursor,
+    // so it came back empty even though 20 more sellable listings (ids 20-1)
+    // sit past it, and the next page re-scanned the same withheld run from
+    // the naive offset.
+    const totalRawRows = 50;
+    const pageSize = 5;
+    const rawRows = Array.from({ length: totalRawRows }, (_, i) => {
+      const id = totalRawRows - i;
+      return i >= 5 && i <= 29
+        ? { id: String(id), name: 'Bad Row', price: 'TBD', updatedAt: '2026-01-01T00:00:00Z' }
+        : {
+            id: String(id),
+            name: `Good Row ${id}`,
+            price: 9.99,
+            updatedAt: '2026-01-01T00:00:00Z',
+          };
+    });
+    const query = vi.fn().mockImplementation((_table, _conditions, pagination) => {
+      const offset = pagination.rawOffset ?? (pagination.page - 1) * pagination.pageSize;
+      return Promise.resolve({
+        rows: rawRows.slice(offset, offset + pagination.pageSize),
+        total: totalRawRows,
+      });
+    });
+    const mockAdapter = createMockDbAdapter({ query });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const itemIds = (payload: string) =>
+      (JSON.parse(payload) as { items: { externalId: string }[] }).items.map(
+        (item) => item.externalId,
+      );
+
+    // Walk a fixed range of pages (rather than stopping once `page` exceeds
+    // the advertised `totalPages`): the empty page 2 below legitimately
+    // consumes a page slot without any items in it, so `totalPages` cannot
+    // fully "catch up" mid-scan — that's a documented, accepted side effect
+    // of `total`/`totalPages` being a lower-bound estimate, same as an
+    // adapter's capped count. What must not happen is losing the cursor:
+    // every sellable id must still be reachable, without duplicates, by
+    // continuing to walk pages, and one page past the genuinely exhausted
+    // scan must come back empty and stay that way.
+    const responses = [];
+    for (let page = 1; page <= 7; page++) {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/inventory?page=${page}&pageSize=${pageSize}`,
+      });
+      expect(response.statusCode).toBe(200);
+      responses.push(response);
+    }
+
+    expect(responses.map((r) => itemIds(r.payload))).toEqual([
+      ['50', '49', '48', '47', '46'],
+      [],
+      ['20', '19', '18', '17', '16'],
+      ['15', '14', '13', '12', '11'],
+      ['10', '9', '8', '7', '6'],
+      ['5', '4', '3', '2', '1'],
+      [],
+    ]);
+
+    const servedIds = responses.flatMap((r) => itemIds(r.payload));
+    expect(servedIds).toHaveLength(25);
+    expect(new Set(servedIds).size).toBe(25);
+
+    // The last (exhausted) page must not advertise more pages than exist.
+    const lastBody = responses[6]!.json() as { total: number; totalPages: number };
+    expect(lastBody.total).toBe(25);
+    expect(lastBody.totalPages).toBe(5);
+
+    await app.close();
+  });
+
+  it('GET /inventory does not re-serve rows or advertise extra pages once the scan is exhausted (#28743)', async () => {
+    // 50 listings, newest-first, with 10 scattered rows withheld (ids 49, 44,
+    // 39, 34, 29, 24, 19, 14, 9, 4 — every fifth row from the top) — 40
+    // sellable. Before the fix, the exhausted page that closed out the scan
+    // cached no cursor, so a caller requesting one page past it fell back to
+    // the naive offset, re-served already-delivered rows, and made `total`
+    // climb back up.
+    const totalRawRows = 50;
+    const pageSize = 5;
+    const withheldIds = new Set(['49', '44', '39', '34', '29', '24', '19', '14', '9', '4']);
+    const rawRows = Array.from({ length: totalRawRows }, (_, i) => {
+      const id = String(totalRawRows - i);
+      return withheldIds.has(id)
+        ? { id, name: 'Bad Row', price: 'TBD', updatedAt: '2026-01-01T00:00:00Z' }
+        : { id, name: `Good Row ${id}`, price: 9.99, updatedAt: '2026-01-01T00:00:00Z' };
+    });
+    const query = vi.fn().mockImplementation((_table, _conditions, pagination) => {
+      const offset = pagination.rawOffset ?? (pagination.page - 1) * pagination.pageSize;
+      return Promise.resolve({
+        rows: rawRows.slice(offset, offset + pagination.pageSize),
+        total: totalRawRows,
+      });
+    });
+    const mockAdapter = createMockDbAdapter({ query });
+
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const itemIds = (payload: string) =>
+      (JSON.parse(payload) as { items: { externalId: string }[] }).items.map(
+        (item) => item.externalId,
+      );
+
+    const responses = [];
+    for (let page = 1; page <= 8; page++) {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/inventory?page=${page}&pageSize=${pageSize}`,
+      });
+      expect(response.statusCode).toBe(200);
+      responses.push(response);
+    }
+
+    const servedIds = responses.flatMap((r) => itemIds(r.payload));
+    expect(servedIds).toHaveLength(40);
+    expect(new Set(servedIds).size).toBe(40);
+
+    const lastBody = responses[7]!.json() as { total: number; totalPages: number };
+    expect(lastBody.total).toBe(40);
+    expect(lastBody.totalPages).toBe(8);
+
+    // One page past the last real page must come back empty, not with
+    // duplicates, and must not let `total`/`totalPages` climb back up now
+    // that the scan is confirmed exhausted.
+    const pastEndResponse = await app.inject({
+      method: 'GET',
+      url: `/inventory?page=${lastBody.totalPages + 1}&pageSize=${pageSize}`,
+    });
+    expect(pastEndResponse.statusCode).toBe(200);
+    const pastEndBody = pastEndResponse.json() as {
+      items: { externalId: string }[];
+      total: number;
+      totalPages: number;
+    };
+    expect(pastEndBody.items).toEqual([]);
+    expect(pastEndBody.total).toBe(40);
+    expect(pastEndBody.totalPages).toBe(8);
+
+    await app.close();
+  });
+
   it('GET /inventory does not loop past a genuinely exhausted result set', async () => {
     // The raw page comes back shorter than requested — the catalogue itself
     // ran out, which must return a short page rather than triggering a

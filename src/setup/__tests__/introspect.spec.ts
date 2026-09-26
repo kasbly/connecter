@@ -269,10 +269,52 @@ describe('introspectDatabase', () => {
       'inventory',
       'catalog',
     ]);
+    // The matview branch must read types with a NULL typmod, matching the
+    // bare vocabulary `information_schema.columns.data_type` uses for tables
+    // and ordinary views (e.g. `character varying`, not `character varying(255)`).
+    // Passing the real `a.atttypmod` here is the regression from #28745: every
+    // downstream exact-match type predicate (isTextColumn, NUMERIC_TYPES,
+    // isAttributeEligibleColumn, isCompatibleFieldColumn) misses a modified type.
+    expect(db.raw).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('pg_catalog.format_type(a.atttypid, NULL)'),
+      ['inventory', 'catalog'],
+    );
+    expect(db.raw).not.toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('pg_catalog.format_type(a.atttypid, a.atttypmod)'),
+      ['inventory', 'catalog'],
+    );
     expect(db.raw).toHaveBeenNthCalledWith(4, expect.stringContaining('FROM pg_index i'), [
       'inventory',
       'catalog',
     ]);
+
+    // Regression guard for #28744: the outer SELECT/JOIN reads `i.indkey` (and
+    // the other `i.*` columns) from the `unique_index` CTE, so every one of
+    // those columns must actually be projected by the CTE's own SELECT list.
+    // PostgreSQL rejects the statement at parse time otherwise ("column
+    // i.indkey does not exist") — a mocked `db.raw` can never catch that, so
+    // this test inspects the real SQL string instead of just its return shape.
+    const pkSql = db.raw.mock.calls[3]![0] as string;
+    const cteSelectMatch = pkSql.match(/unique_index AS \(\s*SELECT ([\s\S]*?)\s*FROM pg_index i/);
+    expect(cteSelectMatch).not.toBeNull();
+    const projectedColumns = cteSelectMatch![1]!
+      .split(',')
+      .map((column) => column.trim())
+      .filter(Boolean);
+
+    const outerQuery = pkSql.slice(pkSql.indexOf('SELECT a.attname'));
+    const referencedColumns = [
+      ...new Set([...outerQuery.matchAll(/\bi\.(\w+)/g)].map((m) => `i.${m[1]}`)),
+    ];
+    expect(referencedColumns).toEqual(
+      expect.arrayContaining(['i.indkey', 'i.indrelid', 'i.indnkeyatts']),
+    );
+    for (const column of referencedColumns) {
+      expect(projectedColumns).toContain(column);
+    }
+
     expect(result.result).toEqual({
       tables: [
         {
@@ -307,5 +349,11 @@ describe('introspectDatabase', () => {
       ],
       foreignKeys: [],
     });
+    // Bare type names, as `information_schema` reports them and as
+    // `pg_catalog.format_type(a.atttypid, NULL)` now produces — no `(255)`,
+    // `(10,2)`, or other type-modifier suffix leaking through.
+    for (const column of result.result.tables[0]!.columns) {
+      expect(column.type).not.toMatch(/\(/);
+    }
   });
 });
