@@ -390,6 +390,26 @@ describe('mapRowToInventoryItem', () => {
     ]);
   });
 
+  it('serves valid URLs when the mapped images column mixes URLs with numeric ids (#28747)', () => {
+    const config = {
+      ...baseConfig,
+      fields: { ...baseConfig.fields, images: 'image_urls' },
+    };
+    const mixedRow = { id: '1', title: 'Test', price: 100, image_urls: ['https://a/1.jpg', 102] };
+    const idsRow = { id: '2', title: 'Test', price: 100, image_urls: [101, 102] };
+    const mixed = mapRowToInventoryItem(mixedRow, config, new Map());
+    const idsOnly = mapRowToInventoryItem(idsRow, config, new Map());
+
+    expect(mixed.images).toEqual(['https://a/1.jpg']);
+    expect(idsOnly.images).toEqual([]);
+    expect(() =>
+      validateInventoryItemWireContract(mixed, getMappedImageValues(mixedRow, config, new Map())),
+    ).not.toThrow();
+    expect(() =>
+      validateInventoryItemWireContract(idsOnly, getMappedImageValues(idsRow, config, new Map())),
+    ).not.toThrow();
+  });
+
   it('places inventory-row images before related-table images', () => {
     const config: InventoryResourceConfig = {
       ...baseConfig,
@@ -605,9 +625,9 @@ describe('validateInventoryItemWireContract', () => {
           attributes: {},
           updatedAt: null,
         },
-        ['["https://example.com/coffee.jpg", 42]'],
+        ['[not json'],
       ),
-    ).toThrow(/images\[1\]/);
+    ).toThrow(/images/);
   });
 
   it('serves a listing whose only image value is a relative path or a bare filename', () => {
@@ -653,6 +673,27 @@ describe('validateInventoryItemWireContract', () => {
       ]),
     ).not.toThrow();
   });
+
+  it('serves a listing whose images mix a valid URL with leftover numeric ids (#28747)', () => {
+    const item = {
+      externalId: 'sku-1',
+      title: 'Coffee',
+      description: null,
+      price: 1,
+      currency: 'SAR',
+      category: '',
+      status: 'ACTIVE',
+      images: ['https://example.com/coffee.jpg'],
+      attributes: {},
+      updatedAt: null,
+    };
+
+    expect(() =>
+      validateInventoryItemWireContract(item, ['["https://example.com/coffee.jpg", 42]']),
+    ).not.toThrow();
+    expect(() => validateInventoryItemWireContract(item, [[101, 102, 103]])).not.toThrow();
+    expect(() => validateInventoryItemWireContract(item, ['[true, false]'])).not.toThrow();
+  });
 });
 
 describe('getImageValueProblems', () => {
@@ -668,12 +709,6 @@ describe('getImageValueProblems', () => {
   });
 
   it('keeps structurally unusable image values malformed', () => {
-    expect(getImageValueProblems([42]).malformed).toEqual([
-      'images: expected a string or array of strings',
-    ]);
-    expect(getImageValueProblems(['["https://example.com/a.jpg", 1]']).malformed).toEqual([
-      'images[1]: expected a string or array of strings',
-    ]);
     expect(getImageValueProblems(['[not json']).malformed).toEqual([
       'images: invalid JSON image array',
     ]);
@@ -688,13 +723,67 @@ describe('getImageValueProblems', () => {
     // the tier that withholds the whole listing.
     expect(getImageValueProblems([[{ src: 'https://example.com/a.jpg', alt: 'Car' }]])).toEqual({
       malformed: [],
-      unservable: ['images[0]: image values must be URL strings (got an object)'],
+      unservable: ['images[0]: image values must be URL strings (got object)'],
     });
 
     expect(getImageValueProblems([{ url: 'https://example.com/a.jpg' }])).toEqual({
       malformed: [],
-      unservable: ['images: image values must be URL strings (got an object)'],
+      unservable: ['images: image values must be URL strings (got object)'],
     });
+  });
+
+  it('reports numeric image ids as unservable, not malformed (#28747)', () => {
+    // jsonb array of attachment ids, and a native pg int[] column. The
+    // connector cannot resolve ids to URLs, but title/price/currency are still
+    // valid, so the listing must be served without those photos.
+    expect(getImageValueProblems(['[101,102,103]'])).toEqual({
+      malformed: [],
+      unservable: [
+        'images[0]: image values must be URL strings (got number)',
+        'images[1]: image values must be URL strings (got number)',
+        'images[2]: image values must be URL strings (got number)',
+      ],
+    });
+    expect(getImageValueProblems([[101, 102]])).toEqual({
+      malformed: [],
+      unservable: [
+        'images[0]: image values must be URL strings (got number)',
+        'images[1]: image values must be URL strings (got number)',
+      ],
+    });
+    expect(normalizeImageUrls([101, 102])).toEqual([]);
+    expect(normalizeImageUrls('[101,102,103]')).toEqual([]);
+  });
+
+  it('keeps valid URLs and reports leftover numeric ids as unservable (#28747)', () => {
+    expect(getImageValueProblems(['["https://a/1.jpg",102]'])).toEqual({
+      malformed: [],
+      unservable: ['images[1]: image values must be URL strings (got number)'],
+    });
+    expect(getImageValueProblems([['https://a/1.jpg', 102]])).toEqual({
+      malformed: [],
+      unservable: ['images[1]: image values must be URL strings (got number)'],
+    });
+    expect(normalizeImageUrls('["https://a/1.jpg",102]')).toEqual(['https://a/1.jpg']);
+    expect(normalizeImageUrls(['https://a/1.jpg', 102])).toEqual(['https://a/1.jpg']);
+  });
+
+  it('reports boolean image entries as unservable, not malformed (#28747)', () => {
+    expect(getImageValueProblems(['[true,false]'])).toEqual({
+      malformed: [],
+      unservable: [
+        'images[0]: image values must be URL strings (got boolean)',
+        'images[1]: image values must be URL strings (got boolean)',
+      ],
+    });
+    expect(getImageValueProblems([[true, false]])).toEqual({
+      malformed: [],
+      unservable: [
+        'images[0]: image values must be URL strings (got boolean)',
+        'images[1]: image values must be URL strings (got boolean)',
+      ],
+    });
+    expect(normalizeImageUrls([true, false])).toEqual([]);
   });
 
   it('reports nothing for absolute URLs, empty values, and nested arrays', () => {

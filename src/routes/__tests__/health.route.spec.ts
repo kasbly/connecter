@@ -586,14 +586,14 @@ describe('health route', () => {
       .fn()
       .mockResolvedValueOnce(
         new Map([
-          ['1', [{ image_url: 42 }]],
-          ['2', [{ image_url: 43 }]],
+          ['1', [{ image_url: '[not json' }]],
+          ['2', [{ image_url: '[not json' }]],
         ]),
       )
       .mockResolvedValueOnce(
         new Map([
-          ['3', [{ image_url: 44 }]],
-          ['4', [{ image_url: 45 }]],
+          ['3', [{ image_url: '[not json' }]],
+          ['4', [{ image_url: '[not json' }]],
         ]),
       );
     registerHealthRoute(
@@ -615,13 +615,14 @@ describe('health route', () => {
 
     const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
-    // Every row on both pages has a relation image value that is a number
-    // rather than a string, which the wire contract rejects as malformed
-    // (an object shape would instead be advisory-unservable, see #27421).
-    // Evaluating page 2 against page 1's relation data (keyed by ids "1"/"2")
-    // would resolve every page-2 lookup to no relation rows, hide the
-    // malformed value, and let the probe fail open exactly where this
-    // second-page check exists to catch it (residual of #25983).
+    // Every row on both pages has a relation image value whose shape the
+    // mapper cannot interpret (a broken JSON array string), which the wire
+    // contract rejects as malformed (a numeric id or object shape would
+    // instead be advisory-unservable, see #28747 / #27421). Evaluating page 2
+    // against page 1's relation data (keyed by ids "1"/"2") would resolve
+    // every page-2 lookup to no relation rows, hide the malformed value, and
+    // let the probe fail open exactly where this second-page check exists to
+    // catch it (residual of #25983).
     expect(response.statusCode).toBe(503);
     expect(response.json()).toMatchObject({
       resources: 'misconfigured',
@@ -639,9 +640,7 @@ describe('health route', () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(true);
     vi.mocked(dbAdapter.query).mockResolvedValueOnce({
-      rows: [
-        { id: '1', title: 'Test', price: 100, image_urls: '["https://example.com/a.jpg", 1]' },
-      ],
+      rows: [{ id: '1', title: 'Test', price: 100, image_urls: '[not json' }],
       total: 1,
     });
     registerHealthRoute(
@@ -656,7 +655,73 @@ describe('health route', () => {
     const response = await app.inject({ method: 'GET', url: '/diagnostics' });
 
     expect(response.statusCode).toBe(503);
-    expect(response.json()).toMatchObject({ resourceError: expect.stringContaining('images[1]') });
+    expect(response.json()).toMatchObject({ resourceError: expect.stringContaining('images') });
+    await app.close();
+  });
+
+  it('keeps the resource healthy when every sampled row stores numeric image ids (#28747)', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [
+        { id: '1', title: 'Test', price: 100, image_urls: [101, 102] },
+        { id: '2', title: 'Also test', price: 200, image_urls: '[103,104]' },
+      ],
+      total: 2,
+    });
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        fields: { ...inventoryResource.fields, images: 'image_urls' },
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    // A gallery of attachment ids (jsonb int array or pg int[]) cannot be
+    // served as photos, but title/price/currency are still valid. Classifying
+    // those scalars as malformed 503'd the whole resource (#28747).
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'ok',
+      resources: 'ok',
+      unservableImageIds: ['1', '2'],
+    });
+    expect(response.json()).not.toHaveProperty('resourceError');
+    expect(response.json()).not.toHaveProperty('wireContractViolationIds');
+    await app.close();
+  });
+
+  it('keeps the resource healthy when a sample row mixes a URL with a leftover numeric id (#28747)', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [
+        { id: '1', title: 'Test', price: 100, image_urls: '["https://example.com/a.jpg", 102]' },
+      ],
+      total: 1,
+    });
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        fields: { ...inventoryResource.fields, images: 'image_urls' },
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'ok',
+      resources: 'ok',
+      unservableImageIds: ['1'],
+    });
+    expect(response.json()).not.toHaveProperty('resourceError');
+    expect(response.json()).not.toHaveProperty('wireContractViolationIds');
     await app.close();
   });
 

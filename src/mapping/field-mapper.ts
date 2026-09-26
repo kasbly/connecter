@@ -77,18 +77,18 @@ export function validateInventoryItemWireContract(
 /** What is wrong with one listing's configured image values, split by severity. */
 export interface ImageValueProblems {
   /**
-   * Values whose shape the mapper cannot interpret at all - a number, a
-   * boolean, a broken or non-array JSON string. The listing is withheld from
-   * customers.
+   * Values whose shape the mapper cannot interpret at all - a broken or
+   * non-array JSON string. The listing is withheld from customers.
    */
   malformed: string[];
   /**
    * Values `normalizeImageUrls` already drops while leaving the rest of the
    * listing intact: a well-formed string that is not an absolute http(s) URL
-   * (a site-relative path, a bare filename, a storage key, #25790), or an
-   * object shape such as a jsonb images column storing `[{"src": "...",
-   * "alt": "..."}]` instead of plain strings (#27421). The listing itself is
-   * still sellable, just without that photo.
+   * (a site-relative path, a bare filename, a storage key, #25790), an object
+   * shape such as a jsonb images column storing `[{"src": "...", "alt": "..."}]`
+   * instead of plain strings (#27421), or a non-string scalar such as a
+   * leftover numeric id or boolean (#28747). The listing itself is still
+   * sellable, just without that photo.
    */
   unservable: string[];
 }
@@ -129,16 +129,12 @@ function collectImageValueProblems(
     return;
   }
   if (typeof value !== 'string') {
-    if (typeof value === 'object') {
-      // e.g. a jsonb images column shaped as `[{"src": "...", "alt": "..."}]`
-      // instead of plain strings. `normalizeImageUrls` already returns `[]`
-      // for a non-string entry, so the rest of the listing is still valid -
-      // classifying this as malformed failed identically on every sampled
-      // row and 503'd the whole resource (#27421).
-      problems.unservable.push(`${path}: image values must be URL strings (got an object)`);
-      return;
-    }
-    problems.malformed.push(`${path}: expected a string or array of strings`);
+    // Non-string entries (numeric attachment ids, booleans, jsonb objects)
+    // cannot be served as photos, but `normalizeImageUrls` already returns
+    // `[]` for them. Classifying scalars as malformed withheld otherwise-valid
+    // listings and 503'd catalogues whose images column is a list of ids
+    // (#28747, same advisory split as #27421 / #25790).
+    problems.unservable.push(`${path}: image values must be URL strings (got ${typeof value})`);
     return;
   }
 
