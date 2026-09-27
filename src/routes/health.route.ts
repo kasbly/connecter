@@ -19,10 +19,37 @@ import { DEFAULT_PAGE_SIZE, getDefaultSort } from '../mapping/query-builder.js';
 
 let cachedVersion: string | null = null;
 
+/**
+ * The connector's reported version, read fresh on first call and cached for
+ * the life of the process (it cannot change without a restart).
+ *
+ * `package.json`'s `version` field is not a useful signal on its own: the
+ * public mirror (`kasbly/connecter`, synced by `.github/workflows/
+ * sync-connector.yml`) never bumps it, so every self-hosted checkout has
+ * reported "1.0.0" through every behavior fix that shipped. The sync
+ * workflow now stamps a `version.json` alongside `package.json` containing
+ * the short SHA of the monorepo commit it synced, which does change on every
+ * fix — read that when present. A checkout predating this change (or a local
+ * `services/connector` dev tree, which the sync step never touches) has no
+ * `version.json`, so this falls back to `package.json`'s version exactly as
+ * before.
+ */
 function getVersion(): string {
   if (cachedVersion) return cachedVersion;
+  const __dirname = dirname(fileURLToPath(import.meta.url));
   try {
-    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const versionFile = JSON.parse(
+      readFileSync(join(__dirname, '..', '..', 'version.json'), 'utf-8'),
+    ) as { version: string };
+    if (typeof versionFile.version === 'string' && versionFile.version) {
+      cachedVersion = versionFile.version;
+      return cachedVersion;
+    }
+  } catch {
+    // No version.json (predates this change, or a local dev checkout) — fall
+    // through to package.json below.
+  }
+  try {
     const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf-8')) as {
       version: string;
     };

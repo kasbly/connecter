@@ -63,8 +63,8 @@ export const FIELD_MAPPING_TARGETS = [
 
 type FieldMappingTarget = (typeof FIELD_MAPPING_TARGETS)[number];
 
-const UNMAPPED_FIELD_VALUE = '\0unmapped';
-const FIXED_VALUE_FIELD_VALUE = '\0fixed-value';
+export const UNMAPPED_FIELD_VALUE = '\0unmapped';
+export const FIXED_VALUE_FIELD_VALUE = '\0fixed-value';
 const FIXED_VALUE_FIELDS = new Set<FieldMappingTarget>(['currency', 'category', 'status']);
 
 interface FieldMappingPrompt {
@@ -121,6 +121,23 @@ function isCompatibleFieldColumn(field: FieldMappingTarget, column: MappingColum
 export const STATUS_VALUE_PROMPT_LIMIT = 25;
 export const STATUS_VALUE_SCAN_LIMIT = 5_000;
 
+/**
+ * Default answer for a status-value prompt: the Kasbly status the value is already
+ * mapped to, else the status whose name matches the value case-insensitively, else
+ * "leave unmapped". Never falls through to the first choice (ACTIVE), which would
+ * silently make sold/reserved rows sellable on Enter.
+ */
+export function getStatusValueDefault(
+  value: string,
+  existingStatusValues?: StatusValuesConfig,
+): InventoryStatus | typeof UNMAPPED_FIELD_VALUE {
+  for (const status of INVENTORY_STATUSES) {
+    if (existingStatusValues?.[status]?.includes(value)) return status;
+  }
+  const byName = INVENTORY_STATUSES.find((status) => status.toLowerCase() === value.toLowerCase());
+  return byName ?? UNMAPPED_FIELD_VALUE;
+}
+
 async function collectStatusValues(
   db: Awaited<ReturnType<typeof introspectDatabase>>['db'],
   schema: string,
@@ -128,6 +145,7 @@ async function collectStatusValues(
   column: string,
   idColumn: string,
   updatedAtColumn: string | null | undefined,
+  existingStatusValues?: StatusValuesConfig,
 ): Promise<StatusValuesConfig> {
   // Without an explicit ORDER BY, Postgres serves the bounded scan below in
   // physical heap order, which skews toward old/never-updated rows and can miss
@@ -167,6 +185,7 @@ async function collectStatusValues(
   for (const value of presentedValues) {
     const status = await select<InventoryStatus | typeof UNMAPPED_FIELD_VALUE>({
       message: `Which Kasbly status matches "${value}"?`,
+      default: getStatusValueDefault(value, existingStatusValues),
       choices: [
         ...INVENTORY_STATUSES.map((inventoryStatus) => ({
           name: inventoryStatus,
@@ -258,6 +277,7 @@ export function getFieldMappingPrompt(
   field: FieldMappingTarget,
   columns: Array<string | MappingColumn>,
   suggestedColumn?: string,
+  keepFixedValue = false,
 ): FieldMappingPrompt {
   const columnNames = columns
     .filter(
@@ -285,7 +305,9 @@ export function getFieldMappingPrompt(
     default:
       suggestedColumn && columnNames.includes(suggestedColumn)
         ? suggestedColumn
-        : UNMAPPED_FIELD_VALUE,
+        : keepFixedValue && FIXED_VALUE_FIELDS.has(field)
+          ? FIXED_VALUE_FIELD_VALUE
+          : UNMAPPED_FIELD_VALUE,
   };
 }
 
@@ -783,6 +805,7 @@ export async function runWizard(): Promise<void> {
       field,
       selectedTable.columns,
       existingSelection ?? suggestedColumn,
+      !existingSelection && existingMapping?.startsWith("'") === true,
     );
     const selectedValue = await select(prompt);
 
@@ -829,6 +852,7 @@ export async function runWizard(): Promise<void> {
         selectedValue,
         idColumn,
         updatedAtColumn,
+        existingInventory?.statusValues,
       );
       // Every value left unmapped means there is nothing to write; omitting the key
       // keeps the generated config free of an empty block that reads as a mapping.

@@ -6,11 +6,14 @@ import { join } from 'node:path';
 import * as yaml from 'js-yaml';
 import {
   FIELD_MAPPING_TARGETS,
+  FIXED_VALUE_FIELD_VALUE,
+  UNMAPPED_FIELD_VALUE,
   backupPrivateFile,
   derivePublishedRelationName,
   EMPTY_RELATION_FK_HINT,
   getFieldMappingPrompt,
   getIdColumnPrompt,
+  getStatusValueDefault,
   getUpdatedAtColumnPrompt,
   isPublicHostname,
   loadExistingSetupConfig,
@@ -70,7 +73,24 @@ vi.mock('../../routes/health.route.js', async (importOriginal) => {
   };
 });
 
+describe('getStatusValueDefault', () => {
+  it('keeps an existing mapping, then matches by name, and never defaults to ACTIVE', () => {
+    expect(getStatusValueDefault('sold', { SOLD: ['sold'] })).toBe('SOLD');
+    expect(getStatusValueDefault('gone', { EXPIRED: ['gone'] })).toBe('EXPIRED');
+    expect(getStatusValueDefault('Reserved')).toBe('RESERVED');
+    expect(getStatusValueDefault('draft', { ACTIVE: ['other'] })).toBe('DRAFT');
+    expect(getStatusValueDefault('mystery')).toBe(UNMAPPED_FIELD_VALUE);
+  });
+});
+
 describe('getFieldMappingPrompt', () => {
+  it('keeps an existing fixed value on Enter instead of defaulting to unmapped', () => {
+    expect(getFieldMappingPrompt('currency', ['id'], undefined, true).default).toBe(
+      FIXED_VALUE_FIELD_VALUE,
+    );
+    expect(getFieldMappingPrompt('currency', ['id']).default).toBe(UNMAPPED_FIELD_VALUE);
+  });
+
   it('offers every column and preselects the matching suggestion', () => {
     const prompt = getFieldMappingPrompt(
       'title',

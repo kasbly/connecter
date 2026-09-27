@@ -86,10 +86,15 @@ would otherwise embed the generated SQL, your schema/table name, and the full ma
 column list), unmapped source status values, or catalogue-derived listing ids to an
 anonymous caller (#26697). Fetch `GET /diagnostics` with your API key for that detail.
 
+`version` is read from `version.json` when present — written by `sync-connector.yml` at sync
+time as the short SHA of the synced commit, so it changes whenever a real connector fix ships —
+falling back to `package.json`'s version (`1.0.0`) for a checkout that predates `version.json`. See
+"Updating the connector" below.
+
 ```json
 {
   "status": "ok",
-  "version": "1.0.0",
+  "version": "a1b2c3d",
   "database": "connected",
   "resources": "ok",
   "audit": "ok",
@@ -109,7 +114,7 @@ fails; use it yourself when troubleshooting a merchant's mapping.
 ```json
 {
   "status": "degraded",
-  "version": "1.0.0",
+  "version": "a1b2c3d",
   "database": "connected",
   "resources": "misconfigured",
   "audit": "ok",
@@ -419,6 +424,45 @@ The response must report a healthy connector before using the URL in Kasbly. Cad
 certificate state in named Docker volumes, so renewal survives container replacement. The
 `docker-compose.yml` mounts `connector.config.yml` as read-only and persists audit logs in a
 volume; its internal health check hits `GET /health` every 30 seconds.
+
+## Updating the connector
+
+Kasbly ships behavior fixes to this connector regularly. `GET /health` and `GET /diagnostics`
+report the version you are running (see `version.json`, written for you at the mirror's next sync
+after you last cloned/pulled — see "API Endpoints" above); Kasbly's Test connection and
+Connectivity Health checks compare it against the latest known build and show an "Update
+available" hint when yours is behind. Applying the update is a normal `git pull` — `.env` and
+`connector.config.yml` are both git-ignored (see `.gitignore`), so your credentials and mapping
+survive it untouched.
+
+**Docker (recommended):**
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+`docker-compose.yml` builds the connector image from this checkout (`build: .`), so `--build` is
+required — a plain `up -d` reuses the previously built image and silently keeps running the old
+code.
+
+**Plain Node (the manual/`npm run dev`/`npm run build && npm start` path):**
+
+```bash
+git pull
+npm ci
+npm run build
+```
+
+Restart however you run the process (`npm start`, your process manager, etc.) after the build
+completes.
+
+**After either path**, re-run `npm run validate` to confirm your configuration and inventory
+mapping still hold against the updated code before pointing traffic at it:
+
+```bash
+npm run validate
+```
 
 ## Security
 

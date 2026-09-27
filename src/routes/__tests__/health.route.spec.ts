@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DatabaseAdapter } from '../../db/adapter.interface.js';
 import { buildQuery } from '../../mapping/query-builder.js';
 import {
@@ -929,6 +929,95 @@ describe('health route', () => {
       resourceError: expect.stringContaining('ECONNRESET'),
     });
     await app.close();
+  });
+
+  // #28989: the public mirror (`kasbly/connecter`) never bumped
+  // `package.json`'s version through 56 syncs, so `/health.version` reported
+  // "1.0.0" no matter how many real fixes shipped. `sync-connector.yml` now
+  // stamps a `version.json` with the short SHA of the synced commit;
+  // `getVersion()` must prefer that file when present and fall back to
+  // `package.json` for a checkout (or local dev tree) that predates it.
+  // Each case reloads the module fresh (`vi.resetModules` + a mocked
+  // `node:fs`) because `getVersion()` deliberately caches its result for the
+  // life of the process.
+  describe('connector version', () => {
+    afterEach(() => {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    });
+
+    it("reports version.json's stamped SHA when the sync workflow wrote one", async () => {
+      vi.resetModules();
+      vi.doMock('node:fs', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:fs')>();
+        return {
+          ...actual,
+          readFileSync: vi.fn(
+            (path: Parameters<typeof actual.readFileSync>[0], encoding?: never) => {
+              if (String(path).endsWith('version.json')) {
+                return JSON.stringify({ version: 'a1b2c3d' });
+              }
+              return actual.readFileSync(path, encoding);
+            },
+          ),
+        };
+      });
+
+      const {
+        registerHealthRoute: freshRegisterHealthRoute,
+        createResourceHealthCheck: freshCreateResourceHealthCheck,
+      } = await import('../health.route.js');
+      const app = Fastify();
+      const dbAdapter = createHealthAdapter(true);
+      freshRegisterHealthRoute(
+        app,
+        dbAdapter,
+        freshCreateResourceHealthCheck(dbAdapter, inventoryResource),
+      );
+
+      const response = await app.inject({ method: 'GET', url: '/health' });
+
+      expect(response.json()).toMatchObject({ version: 'a1b2c3d' });
+      await app.close();
+    });
+
+    it("falls back to package.json's version when no version.json exists (a checkout predating this change, or a local dev tree)", async () => {
+      vi.resetModules();
+      vi.doMock('node:fs', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:fs')>();
+        return {
+          ...actual,
+          readFileSync: vi.fn(
+            (path: Parameters<typeof actual.readFileSync>[0], encoding?: never) => {
+              if (String(path).endsWith('version.json')) {
+                throw Object.assign(new Error('ENOENT: no such file or directory'), {
+                  code: 'ENOENT',
+                });
+              }
+              return actual.readFileSync(path, encoding);
+            },
+          ),
+        };
+      });
+
+      const {
+        registerHealthRoute: freshRegisterHealthRoute,
+        createResourceHealthCheck: freshCreateResourceHealthCheck,
+      } = await import('../health.route.js');
+      const app = Fastify();
+      const dbAdapter = createHealthAdapter(true);
+      freshRegisterHealthRoute(
+        app,
+        dbAdapter,
+        freshCreateResourceHealthCheck(dbAdapter, inventoryResource),
+      );
+
+      const response = await app.inject({ method: 'GET', url: '/health' });
+
+      // The real services/connector/package.json in this checkout.
+      expect(response.json()).toMatchObject({ version: '1.0.0' });
+      await app.close();
+    });
   });
 
   // #26697: `/health` has no API key, so it must stay a bare liveness verdict
