@@ -1059,9 +1059,12 @@ describe('health route', () => {
 
     expect(diagnosticsResponse.statusCode).toBe(503);
     const diagnosticsBody = diagnosticsResponse.json();
-    // Same liveness verdict, plus the detail /health withheld.
+    // Same liveness verdict, plus the detail /health withheld. `uptime` is
+    // whole seconds since module load, so it can tick between the two
+    // requests; it is not a diagnostic field and not what this compares.
     expect(diagnosticsBody).toMatchObject({
       ...healthBody,
+      uptime: expect.any(Number),
       resourceError: expect.stringContaining('column "price" does not exist'),
       auditError: 'EACCES: permission denied',
     });
