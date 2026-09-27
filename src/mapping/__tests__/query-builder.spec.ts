@@ -251,27 +251,35 @@ describe('buildQuery', () => {
     });
   });
 
-  it('generates gte/lte conditions', () => {
+  it('generates gte/lte conditions, cast to ::numeric so a text/varchar column still compares correctly (#28985)', () => {
     const result = buildQuery(
       { 'filter.minPrice': '10000', 'filter.maxPrice': '50000' },
       baseConfig,
     );
     expect(result.conditions).toContainEqual({
-      column: 'price',
+      column: 'price::numeric',
       operator: '>=',
       value: 10000,
     });
     expect(result.conditions).toContainEqual({
-      column: 'price',
+      column: 'price::numeric',
       operator: '<=',
       value: 50000,
     });
   });
 
-  it('generates year range conditions', () => {
+  it('generates year range conditions, cast to ::numeric (#28985)', () => {
     const result = buildQuery({ 'filter.minYear': '2020', 'filter.maxYear': '2022' }, baseConfig);
-    expect(result.conditions).toContainEqual({ column: 'year', operator: '>=', value: 2020 });
-    expect(result.conditions).toContainEqual({ column: 'year', operator: '<=', value: 2022 });
+    expect(result.conditions).toContainEqual({
+      column: 'year::numeric',
+      operator: '>=',
+      value: 2020,
+    });
+    expect(result.conditions).toContainEqual({
+      column: 'year::numeric',
+      operator: '<=',
+      value: 2022,
+    });
   });
 
   it('reports filter parameters that are not declared in the config without rejecting the query', () => {

@@ -258,15 +258,23 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
         });
         break;
       case 'gte':
+        // `::numeric` mirrors the `::text ILIKE` cast the string branch above
+        // uses: a `gte`/`lte` filter (minYear/maxYear, minPrice/maxPrice, …)
+        // is bound to a JS number regardless of whether the configured
+        // column is itself numeric or text/varchar (a common shape for an
+        // imported catalogue's year column). Postgres has no `>=`/`<=`
+        // operator between a text column and a numeric literal (42883)
+        // without an explicit cast; casting an already-numeric column is a
+        // harmless no-op (#28985).
         conditions.push({
-          column: filterConfig.column,
+          column: `${filterConfig.column}::numeric`,
           operator: '>=',
           value: parseNumericFilter(paramValue, paramKey),
         });
         break;
       case 'lte':
         conditions.push({
-          column: filterConfig.column,
+          column: `${filterConfig.column}::numeric`,
           operator: '<=',
           value: parseNumericFilter(paramValue, paramKey),
         });

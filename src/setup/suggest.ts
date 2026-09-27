@@ -43,10 +43,20 @@ const FIELD_PATTERNS: { target: string; patterns: RegExp[]; type: 'field' | 'att
 ];
 
 // Attribute patterns — more relaxed matching
+// `year` is checked before `model`: it's anchored (`^model_?year$`, not
+// `/model/i`), so it only ever claims an actual year-shaped column, but the
+// one-match-per-target walk in suggestFieldMappings gives a column to
+// whichever target reaches it first. With `model` first, a `model_year`
+// column was claimed by `model`'s unanchored `/model/i` before `year` ever
+// got a turn, so no minYear/maxYear filter was ever produced and the AI's
+// `filter.minYear`/`filter.maxYear` were reported as ignored (#28985).
+// Ordering `year` first costs `model` nothing: `year`'s patterns never match
+// a plain `model` column, so that column is still free for `model` to claim
+// right after.
 const ATTRIBUTE_PATTERNS: { target: string; patterns: RegExp[] }[] = [
   { target: 'make', patterns: [/make/i, /brand/i, /manufacturer/i] },
-  { target: 'model', patterns: [/model/i] },
   { target: 'year', patterns: [/^year$/i, /^model_?year$/i, /^production_?year$/i] },
+  { target: 'model', patterns: [/model/i] },
   { target: 'color', patterns: [/^color$/i, /^colour$/i] },
   // search_inventory reads attributes.kilometers (mileage is a fallback alias).
   { target: 'kilometers', patterns: [/^mileage$/i, /^kilometers$/i, /^km$/i, /^odometer$/i] },
@@ -530,7 +540,15 @@ export function suggestFilterableColumns(
       continue;
     }
 
-    if (isNumeric) {
+    // A `year` attribute always becomes minYear/maxYear (gte/lte), even when
+    // the underlying column is text/varchar (a common shape for imported
+    // catalogues). The canonical AI filter set has no plain `year` key — only
+    // `minYear`/`maxYear` — so a text year column falling through to the
+    // string branch below used to publish a `year` string filter the AI
+    // never sends, leaving every year-bounded search silently ignored
+    // (#28985). The query-builder casts the column to `::numeric` for gte/lte
+    // so a text column still compares correctly.
+    if (isNumeric || (mappedName === 'year' && (isText || isEnum))) {
       const filterNameSuffix = mappedName.charAt(0).toUpperCase() + mappedName.slice(1);
       const minFilterName = `min${filterNameSuffix}`;
       const maxFilterName = `max${filterNameSuffix}`;

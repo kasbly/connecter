@@ -917,6 +917,24 @@ describe('PostgresAdapter list count (#17420)', () => {
     expect(countQuery.bindings[0]).toBe('petrol');
   });
 
+  it("compares a `::numeric`-cast column (query-builder's gte/lte cast for minYear/maxYear-style filters) against a bound number, so a text/varchar year column still resolves an operator instead of raising 42883 (#28985)", async () => {
+    const conditions: QueryCondition[] = [
+      { column: 'model_year::numeric', operator: '>=', value: 2020 },
+      { column: 'model_year::numeric', operator: '<=', value: 2020 },
+    ];
+
+    const { countQuery, dataQuery } = await runListQuery({
+      count: 1,
+      conditions,
+      dataRows: [{ id: '1', price: 10, model_year: '2020' }],
+    });
+
+    expect(dataQuery.sql).toContain('model_year::numeric >= ?');
+    expect(dataQuery.sql).toContain('model_year::numeric <= ?');
+    expect(countQuery.sql).toContain('model_year::numeric >= ?');
+    expect(dataQuery.bindings).toContain(2020);
+  });
+
   it('applies IN filters with their bindings to both data and bounded count queries', async () => {
     const conditions: QueryCondition[] = [
       { column: 'availability', operator: 'IN', value: ['sold', 'closed'] },

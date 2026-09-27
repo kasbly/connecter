@@ -1313,6 +1313,76 @@ export async function runWizard(): Promise<void> {
     attributes[target] = quoteIfNeeded(attrName);
   }
 
+  // Carry forward an existing attributes key only when no column in this
+  // run's schema even offers it as a checkbox candidate. `additionalAttributes`
+  // already lets the merchant deselect any suggested attribute (including a
+  // pattern-matched make/year/model column, or an unsuggested column checked
+  // under its own name, e.g. `legacy_attribute`) and have that removal
+  // honoured — that's a deliberate, tested rerun behaviour, not a bug. The
+  // actual gap (#28985) is narrower: a hand-edited `attributes.year` pointed
+  // at a column whose name doesn't itself look year-shaped is never a
+  // suggestion for *any* column this run (that column would instead publish
+  // under its own name if checked), so `year` never appears in the checkbox
+  // as an achievable outcome and had no way to be reselected — that's the
+  // only case worth preserving. `url` is excluded: Step 3a always asks
+  // explicitly, so an unpicked url this run is deliberate too.
+  const reachableAttributeTargets = new Set(
+    unmappedColumns.map(
+      (column) =>
+        suggestedAttributes.get(column.name) ??
+        (isListingUrlColumn(column.name) ? 'url' : column.name),
+    ),
+  );
+  for (const [key, column] of Object.entries(
+    existingConfig?.resources.inventory.attributes ?? {},
+  )) {
+    if (key === 'url' || key in attributes || reachableAttributeTargets.has(key)) continue;
+    attributes[key] = column;
+  }
+
+  // A rerun rebuilds filterableColumns purely from this run's suggestions —
+  // right for anything the merchant was actually asked about this run (an
+  // explicit uncheck/skip should indeed remove it, per the "Build config
+  // object" comment below — including a filter whose underlying attribute was
+  // itself deselected in Step 3a). But a hand-added filterableColumns entry
+  // using a key the suggestion heuristics could never derive from *any*
+  // column this run, checked or not, had no checkbox to reconfirm it, so a
+  // rerun used to silently delete it even though nothing this run ever gave
+  // the merchant a chance to remove it (#28985). `maxFilterSuggestions`
+  // reruns the same heuristic as if every candidate column were checked,
+  // purely to answer "could this key ever appear this run" — it never drives
+  // what's actually written below.
+  const maxFilterSuggestions = suggestFilterableColumns(
+    selectedTable.columns,
+    [
+      ...suggestions.filter((suggestion) => suggestion.mappingType === 'attribute'),
+      ...Object.entries(fieldMappings)
+        .filter(([, columnExpr]) => !columnExpr.startsWith("'"))
+        .map(([suggestedMapping, columnExpr]) => ({
+          columnName: columnExpr.slice(1, -1).replaceAll('""', '"'),
+          suggestedMapping,
+          confidence: 'high' as const,
+          mappingType: 'field' as const,
+        })),
+    ],
+    unmappedColumns.map((column) => column.name),
+  );
+  const filterableColumnsFromSelection = Object.fromEntries(
+    selectedFilters.map((f) => [
+      f.filterName,
+      { column: quoteIfNeeded(f.columnName), type: f.filterType },
+    ]),
+  );
+  const carriedForwardFilterableColumns = Object.fromEntries(
+    Object.entries(existingConfig?.resources.inventory.filterableColumns ?? {}).filter(
+      ([key]) => !maxFilterSuggestions.some((f) => f.filterName === key),
+    ),
+  );
+  const filterableColumns = {
+    ...carriedForwardFilterableColumns,
+    ...filterableColumnsFromSelection,
+  };
+
   const config = {
     ...existingConfig,
     version: existingConfig?.version ?? 1,
@@ -1367,18 +1437,7 @@ export async function runWizard(): Promise<void> {
         ...(searchableColumns.length > 0
           ? { searchableColumns: searchableColumns.map(quoteIfNeeded) }
           : {}),
-        ...(selectedFilters.length > 0
-          ? {
-              filterableColumns: {
-                ...Object.fromEntries(
-                  selectedFilters.map((f) => [
-                    f.filterName,
-                    { column: quoteIfNeeded(f.columnName), type: f.filterType },
-                  ]),
-                ),
-              },
-            }
-          : {}),
+        ...(Object.keys(filterableColumns).length > 0 ? { filterableColumns } : {}),
         ...(Object.keys(relations).length > 0 ? { relations } : {}),
       },
     },

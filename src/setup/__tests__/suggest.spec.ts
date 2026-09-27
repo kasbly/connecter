@@ -107,6 +107,32 @@ describe('suggestFieldMappings', () => {
     ]);
   });
 
+  it('maps a `model_year` column to the `year` attribute and a plain `model` column to `model`, instead of `model` claiming both (#28985)', () => {
+    // Regression test: `model` used to be checked before `year` in
+    // ATTRIBUTE_PATTERNS, and its pattern (`/model/i`) is unanchored, so it
+    // claimed `model_year` before `year`'s own `^model_?year$` pattern ever
+    // got a turn — leaving the real `model` text column unmapped and no
+    // minYear/maxYear filter ever produced.
+    const columns = [
+      col('id', 'integer', true),
+      col('title', 'text'),
+      col('price', 'numeric'),
+      col('make', 'text'),
+      col('model_year', 'integer'),
+      col('model', 'text'),
+    ];
+
+    const suggestions = suggestFieldMappings(columns);
+    const attributeMappings = new Map(
+      suggestions
+        .filter((s) => s.mappingType === 'attribute')
+        .map((s) => [s.columnName, s.suggestedMapping]),
+    );
+
+    expect(attributeMappings.get('model_year')).toBe('year');
+    expect(attributeMappings.get('model')).toBe('model');
+  });
+
   it('suggests a listing-URL column as the `url` attribute, so resolvePublicListingUrl can build a customer link (#25311)', () => {
     for (const columnName of ['url', 'listing_url', 'listingUrl', 'link', 'product_url']) {
       const suggestions = suggestFieldMappings([col('id', 'integer', true), col(columnName)]);
@@ -670,6 +696,55 @@ describe('suggestFilterableColumns', () => {
     expect(suggestions).toContainEqual(
       expect.objectContaining({ filterName: 'maxYear', filterType: 'lte' }),
     );
+  });
+
+  it('produces minYear/maxYear and a model filter end-to-end for [id, title, price, make, model_year:int, model:text] (#28985)', () => {
+    const columns = [
+      col('id', 'integer', true),
+      col('title', 'text'),
+      col('price', 'numeric'),
+      col('make', 'text'),
+      col('model_year', 'integer'),
+      col('model', 'text'),
+    ];
+
+    const fieldMappings = suggestFieldMappings(columns);
+    const suggestions = suggestFilterableColumns(columns, fieldMappings, []);
+    const filterNames = suggestions.map((s) => s.filterName);
+
+    expect(filterNames).toContain('minYear');
+    expect(filterNames).toContain('maxYear');
+    expect(filterNames).toContain('model');
+    expect(suggestions.find((s) => s.filterName === 'minYear')).toEqual(
+      expect.objectContaining({ columnName: 'model_year', filterType: 'gte' }),
+    );
+    expect(suggestions.find((s) => s.filterName === 'maxYear')).toEqual(
+      expect.objectContaining({ columnName: 'model_year', filterType: 'lte' }),
+    );
+    expect(suggestions.find((s) => s.filterName === 'model')).toEqual(
+      expect.objectContaining({ columnName: 'model', filterType: 'string' }),
+    );
+  });
+
+  it('suggests minYear/maxYear (gte/lte) for a text/varchar year column too, not a plain `year` string filter the AI never sends (#28985)', () => {
+    const columns = [col('id', 'integer', true), col('year', 'character varying')];
+    const fieldMappings = [
+      {
+        columnName: 'year',
+        suggestedMapping: 'year',
+        confidence: 'medium' as const,
+        mappingType: 'attribute' as const,
+      },
+    ];
+
+    const suggestions = suggestFilterableColumns(columns, fieldMappings, []);
+    const filterNames = suggestions.map((s) => s.filterName);
+
+    expect(filterNames).toContain('minYear');
+    expect(filterNames).toContain('maxYear');
+    expect(filterNames).not.toContain('year');
+    expect(suggestions.find((s) => s.filterName === 'minYear')!.filterType).toBe('gte');
+    expect(suggestions.find((s) => s.filterName === 'maxYear')!.filterType).toBe('lte');
   });
 
   it('suggests text attribute columns as string filters', () => {
