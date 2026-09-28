@@ -656,7 +656,7 @@ export async function runWizard(): Promise<void> {
   });
   const dbHost = await input({
     message: 'Host:',
-    default: existingConfig?.database.host ?? 'localhost',
+    default: getSetupHostDefault(existingConfig?.database.host),
   });
   const dbPort = await input({
     message: 'Port:',
@@ -980,6 +980,9 @@ export async function runWizard(): Promise<void> {
     .filter((c) => !c.isPrimaryKey)
     .map((c) => c.name);
   const suggestedSearchNames = new Set(searchSuggestions.map((s) => s.columnName));
+  const mappedTitleColumn = selectedTable.columns.find(
+    (column) => isTextColumn(column) && quoteIfNeeded(column.name) === fieldMappings.title,
+  )?.name;
 
   let searchableColumns: string[] = [];
   if (allTextColumns.length > 0) {
@@ -990,7 +993,7 @@ export async function runWizard(): Promise<void> {
         value: name,
         checked:
           existingConfig?.resources.inventory.searchableColumns?.includes(quoteIfNeeded(name)) ??
-          suggestedSearchNames.has(name),
+          (suggestedSearchNames.has(name) || name === mappedTitleColumn),
       })),
     });
   }
@@ -1503,24 +1506,17 @@ export async function runWizard(): Promise<void> {
   if (hasExistingEnv) backupPrivateFile(envPath);
   // js-yaml v5 replaced `quotingType: '"'` with `quoteStyle: 'double'`.
   const yamlContent = yaml.dump(config, { lineWidth: 120, quoteStyle: 'double' });
-  // The bundled Compose deployment runs the connector inside a container on
-  // its own bridge network. A loopback DB_HOST written through as-is means
-  // the container itself once the process is inside Docker, not the host the
-  // operator just tested against — `docker compose up -d` then can't reach
-  // the database `npm run setup` just introspected (#28245). `host.docker.internal`
-  // is the address Docker adds a bridge route for (via the connector
-  // service's extra_hosts in docker-compose.yml) that resolves back to the
-  // host. `custom`/`none` run the connector directly on the host, so their
-  // loopback DB_HOST is already correct and is left alone.
+  // The wizard and `npm run validate` run on the host, while Compose runs the
+  // connector in a container. Keep the host address in .env and let Compose
+  // use its container-only override for loopback databases (#28984).
   const bundledLoopbackDbTrap = proxyTopology === 'bundled' && isLoopbackHost(dbHost);
-  const envDbHost = bundledLoopbackDbTrap ? 'host.docker.internal' : dbHost;
   // Build the .env content BEFORE writing connector.config.yml. mergeEnvironmentFile
   // (via serializeEnvValue) can still throw here for a rerun that reuses an
   // existingConfig password never run through the prompt's own validate — building
   // it first means that throw happens before either file is touched, instead of
   // after connector.config.yml is already saved with no matching .env (#27786).
   const envContent = mergeEnvironmentFile(hasExistingEnv ? readFileSync(envPath, 'utf-8') : '', {
-    DB_HOST: envDbHost,
+    DB_HOST: dbHost,
     DB_NAME: dbName,
     DB_USER: dbUser,
     DB_PASSWORD: dbPassword,
@@ -1538,6 +1534,9 @@ export async function runWizard(): Promise<void> {
     // (Caddy, or the operator's own), so they drop back to the loopback
     // default rather than writing a value (#27785).
     CONNECTOR_BIND: proxyTopology === 'none' ? '0.0.0.0' : null,
+    // docker-compose.yml applies this only inside the connector container;
+    // retain DB_HOST for host-side setup and validation commands.
+    CONNECTOR_CONTAINER_DB_HOST: bundledLoopbackDbTrap ? 'host.docker.internal' : null,
   });
   writePrivateFile(configPath, yamlContent);
   console.log(`✅ Configuration saved to ${configPath}`);
@@ -1566,14 +1565,17 @@ export async function runWizard(): Promise<void> {
   // operator's own proxy) rather than from Caddy at 172.30.0.2, so starting
   // Caddy anyway would put an untrusted hop in front of the connector.
   if (proxyTopology === 'bundled') {
-    console.log('\n   Start the connector: docker compose up -d');
+    console.log(
+      hasExistingConfig || hasExistingEnv
+        ? '\n   Restart the connector: docker compose restart connector'
+        : '\n   Start the connector: docker compose up -d',
+    );
     console.log(`   Verify the public endpoint: curl -fsS https://${connectorDomain}/health`);
     console.log(`   Give Kasbly this URL: https://${connectorDomain}`);
     if (bundledLoopbackDbTrap) {
       console.log(
-        `\n   ⚠ DB_HOST was written as host.docker.internal, not ${dbHost}: the connector runs ` +
-          `inside a container in this deployment, where "${dbHost}" means the container itself, ` +
-          'not this machine (#28245).',
+        `\n   ℹ DB_HOST remains ${dbHost} for host-side setup and validation; Docker uses ` +
+          'CONNECTOR_CONTAINER_DB_HOST=host.docker.internal inside the connector container (#28984).',
       );
       console.log(
         '   Make sure PostgreSQL accepts connections from the Docker bridge network ' +
@@ -1583,7 +1585,9 @@ export async function runWizard(): Promise<void> {
     }
   } else if (proxyTopology === 'custom') {
     console.log(
-      '\n   Start the connector: npm run build && npm start (binds :4000; the bundled ' +
+      (hasExistingConfig || hasExistingEnv
+        ? '\n   Restart your npm start process (binds :4000; the bundled '
+        : '\n   Start the connector: npm run build && npm start (binds :4000; the bundled ') +
         'Caddy service is not started)',
     );
     console.log('   Put your own reverse proxy in front of this host on port 4000.');
@@ -1591,7 +1595,9 @@ export async function runWizard(): Promise<void> {
     console.log('   Give Kasbly the public HTTPS URL your reverse proxy exposes.');
   } else {
     console.log(
-      '\n   Start the connector: npm run build && npm start (or `docker compose up -d` ' +
+      (hasExistingConfig || hasExistingEnv
+        ? '\n   Restart your npm start process (or `docker compose restart connector` '
+        : '\n   Start the connector: npm run build && npm start (or `docker compose up -d` ') +
         'after removing the caddy service from docker-compose.yml)',
     );
     console.log('   Verify locally: curl -fsS http://localhost:4000/health');
@@ -1696,6 +1702,11 @@ export function loadExistingSetupConfig(configPath: string, envPath: string): Co
   } finally {
     for (const name of addedNames) delete process.env[name];
   }
+}
+
+/** Convert the legacy container-only host value back to the host-side default on reruns. */
+export function getSetupHostDefault(host: string | undefined): string {
+  return host === 'host.docker.internal' ? 'localhost' : (host ?? 'localhost');
 }
 
 /** Format a concise YAML-style preview of changes to wizard-owned inventory mappings. */

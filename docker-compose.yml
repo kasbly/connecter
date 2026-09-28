@@ -14,11 +14,14 @@ services:
       - ./logs:/app/logs
     env_file:
       - .env
+    environment:
+      # The wizard runs on the host, where a loopback DB_HOST is correct. Keep
+      # that host-side address in .env and only replace it inside this
+      # container, where localhost would point back at the connector itself.
+      DB_HOST: ${CONNECTOR_CONTAINER_DB_HOST:-${DB_HOST}}
     restart: unless-stopped
-    # Lets the container resolve host.docker.internal back to this host. Needed
-    # when `npm run setup` rewrites a loopback DB_HOST to host.docker.internal
-    # because "localhost" inside this container is the connector process
-    # itself, not the host Postgres the wizard just introspected (#28245).
+    # Lets the container resolve host.docker.internal back to this host when
+    # CONNECTOR_CONTAINER_DB_HOST selects it for a loopback host database.
     # Docker Desktop (Mac/Windows) already resolves this name without an
     # entry; `host-gateway` is what makes it work on Linux too.
     extra_hosts:

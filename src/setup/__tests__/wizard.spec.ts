@@ -13,6 +13,7 @@ import {
   EMPTY_RELATION_FK_HINT,
   getFieldMappingPrompt,
   getIdColumnPrompt,
+  getSetupHostDefault,
   getStatusValueDefault,
   getUpdatedAtColumnPrompt,
   isPublicHostname,
@@ -80,6 +81,13 @@ describe('getStatusValueDefault', () => {
     expect(getStatusValueDefault('Reserved')).toBe('RESERVED');
     expect(getStatusValueDefault('draft', { ACTIVE: ['other'] })).toBe('DRAFT');
     expect(getStatusValueDefault('mystery')).toBe(UNMAPPED_FIELD_VALUE);
+  });
+});
+
+describe('getSetupHostDefault', () => {
+  it('uses localhost when a legacy bundled setup stored its container-only host', () => {
+    expect(getSetupHostDefault('host.docker.internal')).toBe('localhost');
+    expect(getSetupHostDefault('database.example.com')).toBe('database.example.com');
   });
 });
 
@@ -599,7 +607,7 @@ describe('runWizard', () => {
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
     for (const answer of [
-      'title',
+      'headline',
       'price',
       'currency',
       '\0unmapped',
@@ -629,7 +637,7 @@ describe('runWizard', () => {
     promptMocks.checkbox.mockImplementation(({ message }) => {
       if (message.startsWith('Select additional')) return Promise.resolve([]);
       if (message.startsWith('Which columns should be searchable')) {
-        return Promise.resolve(['title', 'description']);
+        return Promise.resolve(['headline', 'description']);
       }
       if (message.startsWith('Which filters should be available')) {
         return Promise.resolve(['minPrice', 'maxPrice', 'currency']);
@@ -647,7 +655,7 @@ describe('runWizard', () => {
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
               { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
-              { name: 'title', type: 'character', nullable: false, isPrimaryKey: false },
+              { name: 'headline', type: 'character', nullable: false, isPrimaryKey: false },
               { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
               { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
               { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
@@ -729,7 +737,7 @@ describe('runWizard', () => {
       });
       expect(
         mapRowToInventoryItem(
-          { id: 'product-1', sku: 'sonata-2024', title: 'Product', price: 100, currency: 'SAR' },
+          { id: 'product-1', sku: 'sonata-2024', headline: 'Product', price: 100, currency: 'SAR' },
           config.resources.inventory,
           new Map([
             [
@@ -758,7 +766,7 @@ describe('runWizard', () => {
         expect.objectContaining({
           message: 'Which columns should be searchable? (full-text search)',
           choices: expect.arrayContaining([
-            expect.objectContaining({ name: 'title', value: 'title' }),
+            expect.objectContaining({ name: 'headline', value: 'headline', checked: true }),
           ]),
         }),
       );
@@ -2465,7 +2473,7 @@ describe('runWizard', () => {
     }
   });
 
-  it('rewrites a loopback DB_HOST to host.docker.internal for the bundled Compose topology and warns about the Postgres bridge network (#28245)', async () => {
+  it('keeps a loopback DB_HOST for host-side commands and sets a Compose-only override for bundled Docker (#28984)', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
     const db = Object.assign(vi.fn(), {
@@ -2520,16 +2528,17 @@ describe('runWizard', () => {
       process.chdir(directory);
       await runWizard();
 
-      // The pre-save probe runs on the host, so it still uses "localhost";
-      // only the value written to .env (read inside the container) changes.
+      // The pre-save probe and host-side validation both use the loopback
+      // address. Compose consumes the separate container-only override.
       expect(createDatabaseAdapter).toHaveBeenCalledWith(
         expect.objectContaining({ host: 'localhost' }),
       );
-      expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['DB_HOST']).toBe(
-        'host.docker.internal',
-      );
+      expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['DB_HOST']).toBe('localhost');
+      expect(
+        parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_CONTAINER_DB_HOST'],
+      ).toBe('host.docker.internal');
       expect(consoleLog).toHaveBeenCalledWith(
-        expect.stringContaining('DB_HOST was written as host.docker.internal, not localhost'),
+        expect.stringContaining('DB_HOST remains localhost for host-side setup and validation'),
       );
       expect(consoleLog).toHaveBeenCalledWith(
         expect.stringContaining('accepts connections from the Docker bridge network'),
@@ -3349,6 +3358,9 @@ describe('runWizard', () => {
       // previous "bundled" run is dropped rather than carried over unused.
       expect(promptMocks.input).not.toHaveBeenCalledWith(
         expect.objectContaining({ message: expect.stringContaining('Public DNS name') }),
+      );
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining('Restart your npm start process'),
       );
       expect(
         parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_DOMAIN'],
