@@ -2,6 +2,7 @@ import type { InventoryResourceConfig } from '../config/config.types.js';
 import type { QueryCondition, PaginationOptions, SortOptions } from '../db/adapter.interface.js';
 import { isSafeOrderByColumn } from '../db/postgres.adapter.js';
 import { getRequiredColumns, getSourceStatusValues } from './field-mapper.js';
+import { safeNumericRangeExpression } from './numeric-range.js';
 
 const MAX_PAGE_SIZE = 100;
 const MAX_PAGE_OFFSET = 100_000;
@@ -43,6 +44,13 @@ function getSingleQueryValue(params: RawQueryParams, key: string): string | unde
     throw new QueryValidationError(`Query parameter "${key}" must be provided only once`);
   }
   return value;
+}
+
+/** PostgreSQL rejects 0x00 in UTF8 bindings (SQLSTATE 22021); fail closed instead of stripping. */
+function assertNoNulByte(value: string, key: string): void {
+  if (value.includes('\0')) {
+    throw new QueryValidationError(`Query parameter "${key}" must not contain a NUL byte`);
+  }
 }
 
 function parseNumericFilter(value: string, key: string): number {
@@ -143,6 +151,9 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     ignoredFilters.push('updatedSince');
   }
 
+  if (search) {
+    assertNoNulByte(search, 'search');
+  }
   if (search && search.length > MAX_SEARCH_LENGTH) {
     throw new QueryValidationError(
       `Query parameter "search" must not exceed ${MAX_SEARCH_LENGTH} characters`,
@@ -229,6 +240,7 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
 
     switch (filterConfig.type) {
       case 'string':
+        assertNoNulByte(paramValue, paramKey);
         if (filterKey === 'status') {
           const sourceValues = getSourceStatusValues(paramValue, config.statusValues);
           // Kasbly's status vocabulary only reaches the merchant's column
@@ -258,23 +270,19 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
         });
         break;
       case 'gte':
-        // `::numeric` mirrors the `::text ILIKE` cast the string branch above
-        // uses: a `gte`/`lte` filter (minYear/maxYear, minPrice/maxPrice, …)
-        // is bound to a JS number regardless of whether the configured
-        // column is itself numeric or text/varchar (a common shape for an
-        // imported catalogue's year column). Postgres has no `>=`/`<=`
-        // operator between a text column and a numeric literal (42883)
-        // without an explicit cast; casting an already-numeric column is a
-        // harmless no-op (#28985).
+        // Range filters are bound to JS numbers even for imported text/varchar
+        // columns. The CASE expression both makes that comparison possible and
+        // prevents one dirty source value (for example `N/A`) from aborting the
+        // whole query during an unconditional `::numeric` cast (#29552).
         conditions.push({
-          column: `${filterConfig.column}::numeric`,
+          column: safeNumericRangeExpression(filterConfig.column),
           operator: '>=',
           value: parseNumericFilter(paramValue, paramKey),
         });
         break;
       case 'lte':
         conditions.push({
-          column: `${filterConfig.column}::numeric`,
+          column: safeNumericRangeExpression(filterConfig.column),
           operator: '<=',
           value: parseNumericFilter(paramValue, paramKey),
         });

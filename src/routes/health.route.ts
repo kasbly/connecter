@@ -205,6 +205,13 @@ export async function probeInventoryResource(
         .map(({ column }) => column),
     ),
   ).filter((column) => !searchableColumns.includes(column));
+  const rangeFilterColumns = Array.from(
+    new Set(
+      Object.values(resourceConfig.filterableColumns ?? {})
+        .filter((filterConfig) => filterConfig.type === 'gte' || filterConfig.type === 'lte')
+        .map(({ column }) => column),
+    ),
+  );
   const selectColumns = Array.from(
     new Set([
       ...getRequiredColumns(resourceConfig),
@@ -241,15 +248,21 @@ export async function probeInventoryResource(
     ({ rows } = await runProbeQuery([], DEFAULT_PAGE_SIZE));
     // Selecting a searchable or filter column only proves it exists. Real
     // search emits uncast `ILIKE` (non-text columns still `42883`); string
-    // filters emit `::text ILIKE`. This forces that operator resolution as a
-    // zero-row `WHERE FALSE` check — never a real query over the merchant's
-    // table (#26342) — rather than emptying the mapping sample.
-    if (searchableColumns.length > 0 || stringFilterColumns.length > 0) {
+    // filters emit `::text ILIKE`, and range filters use a guarded numeric
+    // CASE expression. This forces those expressions through a zero-row
+    // `WHERE FALSE` check — never a real query over the merchant's table
+    // (#26342) — rather than emptying the mapping sample.
+    if (
+      searchableColumns.length > 0 ||
+      stringFilterColumns.length > 0 ||
+      rangeFilterColumns.length > 0
+    ) {
       await dbAdapter.probeSearchableColumns({
         ...(resourceConfig.schema ? { schema: resourceConfig.schema } : {}),
         table: resourceConfig.table,
         columns: searchableColumns,
         ...(stringFilterColumns.length > 0 ? { filterColumns: stringFilterColumns } : {}),
+        ...(rangeFilterColumns.length > 0 ? { rangeColumns: rangeFilterColumns } : {}),
         probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
         ...(resourceConfig.baseFilter ? { baseFilter: resourceConfig.baseFilter } : {}),
       });

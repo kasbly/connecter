@@ -42,12 +42,15 @@ function interpolateConfigValue(value: unknown): unknown {
   return value;
 }
 
-export function loadConfig(configPath: string): ConnectorConfig {
-  const raw = readFileSync(configPath, 'utf-8');
+export function parseConnectorConfig(raw: string): ConnectorConfig {
   // js-yaml v5 throws on empty/whitespace-only input instead of returning
   // undefined; normalise that back to undefined so schema validation produces
   // the meaningful "config is invalid" error rather than a raw parser throw.
   const parsed: unknown = raw.trim() === '' ? undefined : yaml.load(raw);
   const validated = connectorConfigSchema.parse(interpolateConfigValue(parsed));
   return validated as ConnectorConfig;
+}
+
+export function loadConfig(configPath: string): ConnectorConfig {
+  return parseConnectorConfig(readFileSync(configPath, 'utf-8'));
 }

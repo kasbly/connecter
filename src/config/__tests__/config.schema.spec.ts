@@ -183,6 +183,17 @@ describe('connectorConfigSchema database statement timeout', () => {
   });
 });
 
+describe('connectorConfigSchema database pool', () => {
+  it.each([{ max: 1 }, { min: 10, max: 1 }])(
+    'rejects a pool whose maximum is below its minimum: %o',
+    (pool) => {
+      expect(() => connectorConfigSchema.parse(createConfigInput({ pool }))).toThrow(
+        'must be greater than or equal to pool.min',
+      );
+    },
+  );
+});
+
 describe('connectorConfigSchema audit file size', () => {
   it('defaults the number of retained rotated audit files to ten', () => {
     expect(connectorConfigSchema.parse(createConfigInput()).audit.maxFiles).toBe(10);

@@ -149,6 +149,7 @@ describe('health route', () => {
       filterableColumns: {
         condition: { column: 'condition', type: 'string' as const },
         year: { column: 'year', type: 'number' as const },
+        minYear: { column: 'model_year', type: 'gte' as const },
       },
       relations: {
         images: {
@@ -184,6 +185,7 @@ describe('health route', () => {
       table: 'inventory',
       columns: ['sku'],
       filterColumns: ['condition'],
+      rangeColumns: ['model_year'],
       probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
       baseFilter: 'published = true',
     });

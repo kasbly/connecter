@@ -30,10 +30,15 @@ const authSchema = z.object({
   apiKeys: z.array(authKeySchema).min(1),
 });
 
-const databasePoolSchema = z.object({
-  min: z.number().int().min(0).default(2),
-  max: z.number().int().min(1).default(10),
-});
+const databasePoolSchema = z
+  .object({
+    min: z.number().int().min(0).default(2),
+    max: z.number().int().min(1).default(10),
+  })
+  .refine((pool) => pool.min <= pool.max, {
+    message: 'must be greater than or equal to pool.min',
+    path: ['max'],
+  });
 
 const databaseSchema = z.object({
   type: z.literal('postgres'),

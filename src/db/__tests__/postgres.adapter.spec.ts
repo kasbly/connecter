@@ -250,6 +250,24 @@ describe('PostgresAdapter searchable-column probe', () => {
     );
   });
 
+  it('probes guarded numeric range expressions without casting dirty text rows (#29552)', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.probeSearchableColumns({
+      table: 'cars',
+      columns: [],
+      rangeColumns: ['model_year'],
+      probeTerm: '\\0probe',
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT 1 FROM "public"."cars" WHERE FALSE AND (CASE WHEN btrim(model_year::text) ~ \'^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$\' THEN btrim(model_year::text)::numeric END IS NOT NULL)',
+      [],
+    );
+  });
+
   // #28097: probeSearchableColumns passes the ILIKE placeholders' bindings
   // array into the same `db.raw(sql, bindings)` call the baseFilter is
   // appended to. An unescaped jsonb `?` operator here is exactly the failure
@@ -917,21 +935,31 @@ describe('PostgresAdapter list count (#17420)', () => {
     expect(countQuery.bindings[0]).toBe('petrol');
   });
 
-  it("compares a `::numeric`-cast column (query-builder's gte/lte cast for minYear/maxYear-style filters) against a bound number, so a text/varchar year column still resolves an operator instead of raising 42883 (#28985)", async () => {
-    const conditions: QueryCondition[] = [
-      { column: 'model_year::numeric', operator: '>=', value: 2020 },
-      { column: 'model_year::numeric', operator: '<=', value: 2020 },
-    ];
+  it('uses a guarded numeric cast for range filters so text years can coexist with N/A values (#29552)', async () => {
+    const conditions = buildQuery({ 'filter.minYear': '2020', 'filter.maxYear': '2024' }, {
+      table: 'cars',
+      idColumn: 'id',
+      fields: { title: 'title', price: 'price' },
+      filterableColumns: {
+        minYear: { column: 'model_year', type: 'gte' },
+        maxYear: { column: 'model_year', type: 'lte' },
+      },
+    } satisfies InventoryResourceConfig).conditions;
 
     const { countQuery, dataQuery } = await runListQuery({
       count: 1,
       conditions,
-      dataRows: [{ id: '1', price: 10, model_year: '2020' }],
+      dataRows: [
+        { id: '1', price: 10, model_year: '2024' },
+        { id: '2', price: 10, model_year: 'N/A' },
+      ],
     });
 
-    expect(dataQuery.sql).toContain('model_year::numeric >= ?');
-    expect(dataQuery.sql).toContain('model_year::numeric <= ?');
-    expect(countQuery.sql).toContain('model_year::numeric >= ?');
+    const guardedYear =
+      "CASE WHEN btrim(model_year::text) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(model_year::text)::numeric END";
+    expect(dataQuery.sql).toContain(`${guardedYear} >= ?`);
+    expect(dataQuery.sql).toContain(`${guardedYear} <= ?`);
+    expect(countQuery.sql).toContain(`${guardedYear} >= ?`);
     expect(dataQuery.bindings).toContain(2020);
   });
 

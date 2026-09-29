@@ -30,6 +30,7 @@ import {
   writePrivateFile,
 } from '../wizard.js';
 import { runWizard } from '../wizard.js';
+import { loadConfig } from '../../config/config.loader.js';
 import { buildQuery } from '../../mapping/query-builder.js';
 import { mapRowToInventoryItem } from '../../mapping/field-mapper.js';
 import { introspectDatabase } from '../introspect.js';
@@ -3995,6 +3996,90 @@ describe('runWizard', () => {
       expect(generated.resources.inventory.filterableColumns).not.toHaveProperty('maxMileage');
     } finally {
       consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a blank manual API key and writes a config loadConfig can start', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('products');
+      if (message.startsWith('Which column is the unique listing id')) return Promise.resolve('id');
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('none');
+      const field = /^Which column contains the (\w+)\?$/.exec(message)?.[1];
+      return Promise.resolve(
+        field && ['title', 'price', 'currency'].includes(field) ? field : '\0unmapped',
+      );
+    });
+    promptMocks.input.mockImplementation(
+      ({ message, validate }: { message: string; validate?: (value: string) => true | string }) => {
+        if (message === 'Enter your API key:') {
+          expect(validate?.('')).not.toBe(true);
+          expect(validate?.('   ')).not.toBe(true);
+          expect(validate?.('kc_manual')).toBe(true);
+          return Promise.resolve('  kc_manual  ');
+        }
+        if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+        if (message.startsWith('Port')) return Promise.resolve('5432');
+        if (message.startsWith('Database name')) return Promise.resolve('catalog');
+        if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+        return Promise.resolve('reader');
+      },
+    );
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(
+        !message.startsWith('Does this database require TLS') &&
+          !message.startsWith('Generate API key'),
+      ),
+    );
+    promptMocks.checkbox.mockResolvedValue([]);
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: Object.assign(vi.fn(), { destroy: vi.fn().mockResolvedValue(undefined) }) as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 10,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      const envPath = join(directory, '.env');
+      const configPath = join(directory, 'connector.config.yml');
+      const envValues = parse(readFileSync(envPath, 'utf-8'));
+      expect(envValues['CONNECTOR_API_KEY']).toBe('kc_manual');
+      const added: string[] = [];
+      for (const [name, value] of Object.entries(envValues)) {
+        if (process.env[name] === undefined) {
+          process.env[name] = value;
+          added.push(name);
+        }
+      }
+      try {
+        expect(loadConfig(configPath).auth.apiKeys[0]?.key).toBe('kc_manual');
+      } finally {
+        for (const name of added) delete process.env[name];
+      }
+    } finally {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
     }

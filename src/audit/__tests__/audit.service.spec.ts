@@ -8,19 +8,19 @@ import {
   utimesSync,
   readdirSync,
 } from 'node:fs';
-import { rename } from 'node:fs/promises';
+import { open, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { AUDIT_QUERY_COUNT_LIMIT, AuditService, type AuditEntry } from '../audit.service.js';
 
-// Only `rename` is wrapped so a single test can force a one-off failure of
-// the write+rename pair in `pruneActiveFile` deterministically, without
-// depending on OS file permissions (CI runners execute as root, where a
-// chmod'd read-only directory is not actually enforced). Every other
-// `node:fs/promises` export, and every other call to `rename` itself,
-// keeps its real implementation.
+// Only `open` and `rename` are wrapped. The latter lets one test force a
+// one-off failure of the write+rename pair in `pruneActiveFile`
+// deterministically, without depending on OS file permissions (CI runners
+// execute as root, where a chmod'd read-only directory is not actually
+// enforced). The former coordinates a rotation in the middle of a scan.
+// Every other `node:fs/promises` export keeps its real implementation.
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, rename: vi.fn(actual.rename) };
+  return { ...actual, open: vi.fn(actual.open), rename: vi.fn(actual.rename) };
 });
 
 const TEST_DIR = join(process.cwd(), '.test-audit-logs');
@@ -395,6 +395,58 @@ describe('AuditService', () => {
 
     expect(result).toMatchObject({ total: 3, totalIsCapped: false });
     expect(result.entries.map((entry) => entry.items)).toEqual([1]);
+  });
+
+  it('keeps a query snapshot stable while a queued append rotates the log', async () => {
+    const svc = new AuditService({
+      enabled: true,
+      filePath: TEST_FILE,
+      maxFileSizeMB: 0.000_001,
+      maxFiles: 10,
+      retentionDays: 90,
+    });
+    const activeEntry = makeEntry({ path: '/inventory/active' });
+    const previousEntry = makeEntry({ path: '/inventory/previous' });
+    writeFileSync(TEST_FILE, `${JSON.stringify(activeEntry)}\n`, 'utf8');
+    writeFileSync(`${TEST_FILE}.1`, `${JSON.stringify(previousEntry)}\n`, 'utf8');
+
+    const openMock = vi.mocked(open);
+    const renameMock = vi.mocked(rename);
+    const originalOpen = openMock.getMockImplementation();
+    const originalRename = renameMock.getMockImplementation();
+    let resolveRotation: (() => void) | undefined;
+    const rotationStarted = new Promise<void>((resolve) => {
+      resolveRotation = resolve;
+    });
+
+    try {
+      renameMock.mockImplementation(async (from, to) => {
+        await originalRename!(from, to);
+        if (from === TEST_FILE && to === `${TEST_FILE}.1`) resolveRotation?.();
+      });
+      openMock.mockImplementation(async (path, flags) => {
+        const file = await originalOpen!(path, flags);
+        if (path === TEST_FILE) {
+          // This append would rotate immediately if the read had only flushed
+          // the old queue. Waiting for the observed rotation makes that old
+          // interleaving deterministic, while the fixed queue times out and
+          // releases this file handle before the append can run.
+          svc.log(makeEntry({ path: '/inventory/queued-during-read' }));
+          await Promise.race([rotationStarted, new Promise((resolve) => setTimeout(resolve, 100))]);
+        }
+        return file;
+      });
+
+      const result = await svc.query({ page: 1, pageSize: 10 });
+      expect(result.entries.map((entry) => entry.path).sort()).toEqual([
+        '/inventory/active',
+        '/inventory/previous',
+      ]);
+      await svc.flush();
+    } finally {
+      openMock.mockRestore();
+      renameMock.mockRestore();
+    }
   });
 
   it('stops at the since boundary without applying a line-count cap', async () => {

@@ -12,6 +12,7 @@ import type {
   TableInfo,
   ColumnInfo,
 } from './adapter.interface.js';
+import { safeNumericRangeExpression } from '../mapping/numeric-range.js';
 
 /**
  * Matches a bare SQL identifier (`price`, `updatedAt`) or a single double-quoted
@@ -436,7 +437,9 @@ export class PostgresAdapter implements DatabaseAdapter {
    */
   async probeSearchableColumns(query: SearchableColumnsProbeQuery): Promise<void> {
     const filterColumns = query.filterColumns ?? [];
-    if (query.columns.length === 0 && filterColumns.length === 0) return;
+    const rangeColumns = query.rangeColumns ?? [];
+    if (query.columns.length === 0 && filterColumns.length === 0 && rangeColumns.length === 0)
+      return;
     const db = this.getDb();
 
     // Same OR-within-the-group shape `applyBaseFilterAndConditions` gives a
@@ -445,9 +448,12 @@ export class PostgresAdapter implements DatabaseAdapter {
     // first. Searchable columns stay uncast (live search has no `::text`).
     // String-filter columns use `${column}::text ILIKE`, matching the live
     // `=` branch, so enum/integer status can pass `/health` (#26694, #27056).
+    // Range columns use the same CASE expression as the live path, ensuring
+    // placeholders such as `N/A` never reach a numeric cast (#29552).
     const searchClause = [
       ...query.columns.map((column) => `${column} ILIKE ? ESCAPE '\\'`),
       ...filterColumns.map((column) => `${column}::text ILIKE ? ESCAPE '\\'`),
+      ...rangeColumns.map((column) => `${safeNumericRangeExpression(column)} IS NOT NULL`),
     ].join(' OR ');
     const bindings = [...query.columns, ...filterColumns].map(
       () => `%${escapeLikePattern(query.probeTerm)}%`,

@@ -119,6 +119,18 @@ describe('buildQuery', () => {
     );
   });
 
+  it.each(['\0', 'Hyundai\0Sonata'])(
+    'rejects a search value containing a NUL byte before it reaches the database: %j',
+    (search) => {
+      expect(() => buildQuery({ search }, baseConfig)).toThrow(
+        expect.objectContaining({
+          statusCode: 400,
+          message: 'Query parameter "search" must not contain a NUL byte',
+        }),
+      );
+    },
+  );
+
   it('limits search expansion to the first 10 terms', () => {
     const result = buildQuery(
       { search: Array.from({ length: 11 }, (_, index) => `term${index + 1}`).join(' ') },
@@ -148,6 +160,18 @@ describe('buildQuery', () => {
       value: 'Toyota',
     });
   });
+
+  it.each(['\0', 'Toyota\0'])(
+    'rejects a string filter value containing a NUL byte before it reaches the database: %j',
+    (value) => {
+      expect(() => buildQuery({ 'filter.make': value }, baseConfig)).toThrow(
+        expect.objectContaining({
+          statusCode: 400,
+          message: 'Query parameter "filter.make" must not contain a NUL byte',
+        }),
+      );
+    },
+  );
 
   it('passes filter.color=white through as string equality for the adapter to match case-insensitively', () => {
     const result = buildQuery(
@@ -251,32 +275,36 @@ describe('buildQuery', () => {
     });
   });
 
-  it('generates gte/lte conditions, cast to ::numeric so a text/varchar column still compares correctly (#28985)', () => {
+  it('generates guarded gte/lte conditions so dirty text values are skipped (#29552)', () => {
     const result = buildQuery(
       { 'filter.minPrice': '10000', 'filter.maxPrice': '50000' },
       baseConfig,
     );
     expect(result.conditions).toContainEqual({
-      column: 'price::numeric',
+      column:
+        "CASE WHEN btrim(price::text) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(price::text)::numeric END",
       operator: '>=',
       value: 10000,
     });
     expect(result.conditions).toContainEqual({
-      column: 'price::numeric',
+      column:
+        "CASE WHEN btrim(price::text) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(price::text)::numeric END",
       operator: '<=',
       value: 50000,
     });
   });
 
-  it('generates year range conditions, cast to ::numeric (#28985)', () => {
+  it('generates guarded year range conditions (#29552)', () => {
     const result = buildQuery({ 'filter.minYear': '2020', 'filter.maxYear': '2022' }, baseConfig);
     expect(result.conditions).toContainEqual({
-      column: 'year::numeric',
+      column:
+        "CASE WHEN btrim(year::text) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(year::text)::numeric END",
       operator: '>=',
       value: 2020,
     });
     expect(result.conditions).toContainEqual({
-      column: 'year::numeric',
+      column:
+        "CASE WHEN btrim(year::text) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(year::text)::numeric END",
       operator: '<=',
       value: 2022,
     });

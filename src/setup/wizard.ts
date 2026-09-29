@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { input, select, confirm, checkbox, password } from '@inquirer/prompts';
 import { parse } from 'dotenv';
 import * as yaml from 'js-yaml';
-import { loadConfig } from '../config/config.loader.js';
+import { loadConfig, parseConnectorConfig } from '../config/config.loader.js';
 import type {
   ConnectorConfig,
   RelationConfig,
@@ -645,8 +645,8 @@ export async function runWizard(): Promise<void> {
     }
   }
   const existingEnv = hasExistingEnv ? parse(readFileSync(envPath, 'utf-8')) : {};
-  const existingApiKey = existingEnv['CONNECTOR_API_KEY'];
-  const existingPendingApiKey = existingEnv['CONNECTOR_API_KEY_PENDING'];
+  const existingApiKey = existingEnv['CONNECTOR_API_KEY']?.trim() || undefined;
+  const existingPendingApiKey = existingEnv['CONNECTOR_API_KEY_PENDING']?.trim() || undefined;
 
   // Step 1: Database Connection
   console.log('Step 1: Database Connection');
@@ -1261,7 +1261,13 @@ export async function runWizard(): Promise<void> {
     );
     const generatedOrEnteredKey = generateKey
       ? `kc_${randomBytes(24).toString('hex')}`
-      : (existingApiKey ?? (await input({ message: 'Enter your API key:' })));
+      : (existingApiKey ??
+        (
+          await input({
+            message: 'Enter your API key:',
+            validate: (value) => (value.trim() ? true : 'Enter a non-empty API key.'),
+          })
+        ).trim());
 
     currentApiKey = existingApiKey ?? generatedOrEnteredKey;
     if (existingApiKey && generateKey) pendingApiKey = generatedOrEnteredKey;
@@ -1501,9 +1507,6 @@ export async function runWizard(): Promise<void> {
     await validationAdapter.disconnect();
   }
 
-  // Write config file
-  if (hasExistingConfig) backupPrivateFile(configPath);
-  if (hasExistingEnv) backupPrivateFile(envPath);
   // js-yaml v5 replaced `quotingType: '"'` with `quoteStyle: 'double'`.
   const yamlContent = yaml.dump(config, { lineWidth: 120, quoteStyle: 'double' });
   // The wizard and `npm run validate` run on the host, while Compose runs the
@@ -1538,6 +1541,22 @@ export async function runWizard(): Promise<void> {
     // retain DB_HOST for host-side setup and validation commands.
     CONNECTOR_CONTAINER_DB_HOST: bundledLoopbackDbTrap ? 'host.docker.internal' : null,
   });
+  // The inventory probe uses a directly constructed adapter, so it never
+  // parses auth with the entered secret. Refuse to write if loadConfig would
+  // reject the interpolated result (for example CONNECTOR_API_KEY='').
+  try {
+    validateProspectiveConfig(yamlContent, envContent);
+  } catch (error) {
+    console.error(
+      `Cannot save configuration: generated config is invalid: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    await db.destroy();
+    return;
+  }
+  if (hasExistingConfig) backupPrivateFile(configPath);
+  if (hasExistingEnv) backupPrivateFile(envPath);
   writePrivateFile(configPath, yamlContent);
   console.log(`✅ Configuration saved to ${configPath}`);
   writePrivateFile(envPath, envContent);
@@ -1685,6 +1704,24 @@ export function mergeEnvironmentFile(
       : `${result}${result.endsWith('\n') || !result ? '' : '\n'}${line}\n`;
   }
   return result.endsWith('\n') ? result : `${result}\n`;
+}
+
+/** Parse generated YAML with the prospective .env values, without changing the process environment. */
+function validateProspectiveConfig(yamlContent: string, envContent: string): void {
+  const envValues = parse(envContent);
+  const previous = new Map<string, string | undefined>();
+  for (const [name, value] of Object.entries(envValues)) {
+    previous.set(name, process.env[name]);
+    process.env[name] = value;
+  }
+  try {
+    parseConnectorConfig(yamlContent);
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 }
 
 /** Load the existing config with its local .env values, without changing the process environment. */

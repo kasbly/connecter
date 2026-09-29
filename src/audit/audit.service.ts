@@ -127,7 +127,23 @@ export class AuditService {
       return { entries: [], total: 0, totalIsCapped: false };
     }
 
-    await this.flush();
+    // Reserve the write queue for the complete snapshot, not merely for the
+    // writes that happened before this request. A rotation renames every
+    // generation, so letting one run between opening the active file and a
+    // rotated file can make the same inode appear twice and hide another one.
+    const query = this.writeQueue.then(() => this.readEntries(options));
+    // A failed read must reach the caller, while later audit writes still need
+    // a usable queue.
+    this.writeQueue = query.then(
+      () => undefined,
+      () => undefined,
+    );
+    return query;
+  }
+
+  private async readEntries(
+    options: AuditQueryOptions,
+  ): Promise<{ entries: AuditEntry[]; total: number; totalIsCapped: boolean }> {
     const offset = (options.page - 1) * options.pageSize;
     const countLimit = resolveAuditQueryCountLimit(options);
     const entries: AuditEntry[] = [];

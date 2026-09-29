@@ -76,6 +76,11 @@ export interface SearchableColumnsProbeQuery {
    * match the live `=` branch (#26694). Searchable `columns` stay uncast.
    */
   filterColumns?: string[];
+  /**
+   * `type: gte` / `type: lte` filter columns. Probed with the same guarded
+   * numeric expression as live range filters.
+   */
+  rangeColumns?: string[];
   /** Throwaway term guaranteed to match nothing; only its operator resolution matters. */
   probeTerm: string;
   baseFilter?: string;
@@ -136,8 +141,9 @@ export interface DatabaseAdapter {
   queryRelation(query: RelationQuery): Promise<Map<string, Record<string, unknown>[]>>;
   /**
    * Zero-row check that the database can resolve `ILIKE` against every
-   * configured searchable column and `::text ILIKE` against every
-   * `type: string` filter column, without reading a single row of the
+   * configured searchable column, `::text ILIKE` against every `type: string`
+   * filter column, and the guarded numeric expression for every range column,
+   * without reading a single row of the
    * merchant's table. Mirrors {@link queryRelation}'s `WHERE FALSE` pattern:
    * operator resolution happens during parse analysis, before the planner
    * folds the `WHERE FALSE` constant. Searchable columns stay uncast so a
