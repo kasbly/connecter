@@ -15,7 +15,11 @@ import {
   resolveInventoryStatus,
   validateInventoryItemWireContract,
 } from '../mapping/field-mapper.js';
-import { DEFAULT_PAGE_SIZE, getDefaultSort } from '../mapping/query-builder.js';
+import {
+  DEFAULT_PAGE_SIZE,
+  getDefaultSort,
+  getSearchableColumns,
+} from '../mapping/query-builder.js';
 
 let cachedVersion: string | null = null;
 
@@ -191,7 +195,7 @@ export async function probeInventoryResource(
   // Search and configured filters do not need to be selected for a normal
   // inventory response, but they are column expressions the resource can use.
   // Include them in the probe so startup catches those latent mapping errors.
-  const searchableColumns = resourceConfig.searchableColumns ?? [];
+  const searchableColumns = getSearchableColumns(resourceConfig);
   // `type: string` filters compile to `${column}::text ILIKE` on the live
   // `=` branch (`applyBaseFilterAndConditions`). Probe them the same way so
   // an enum/integer status mapping the query path can serve is not classified
@@ -215,7 +219,7 @@ export async function probeInventoryResource(
   const selectColumns = Array.from(
     new Set([
       ...getRequiredColumns(resourceConfig),
-      ...searchableColumns,
+      ...(resourceConfig.searchableColumns ?? []),
       ...Object.values(resourceConfig.filterableColumns ?? {}).map(({ column }) => column),
     ]),
   );
@@ -342,6 +346,7 @@ export async function probeInventoryResource(
           validateInventoryItemWireContract(
             mapRowToInventoryItem(row, resourceConfig, sampleRelationData),
             mappedImageValues,
+            resourceConfig.imageUrlPrefix,
           );
         } catch (error) {
           pageViolations.push({ externalId, error: errorMessage(error) });
@@ -351,7 +356,10 @@ export async function probeInventoryResource(
         // advisory, not a broken mapping: the listing is served, just without
         // that photo. Counting it as a violation took the whole catalog offline
         // for every WordPress-shaped store (#25790).
-        if (getImageValueProblems(mappedImageValues).unservable.length > 0) {
+        if (
+          getImageValueProblems(mappedImageValues, resourceConfig.imageUrlPrefix).unservable
+            .length > 0
+        ) {
           unservableImageIds.push(externalId);
         }
       }

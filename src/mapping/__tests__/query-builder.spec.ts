@@ -100,6 +100,56 @@ describe('buildQuery', () => {
     expect(searchConditions[0]!.value).toBe('Hyundai');
   });
 
+  it('searches flattened relation values alongside main-table columns (#30073)', () => {
+    const result = buildQuery(
+      { search: 'leather' },
+      {
+        ...baseConfig,
+        relations: {
+          features: {
+            schema: 'catalog',
+            table: 'CarFeature',
+            foreignKey: 'carId',
+            referenceKey: 'id',
+            fields: { name: 'name' },
+            flatten: 'name',
+          },
+        },
+      },
+    );
+
+    expect(result.conditions).toContainEqual({
+      column:
+        'COALESCE((SELECT string_agg(__kasbly_search_relation.name::text, \' \') FROM "catalog"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = id), \'\')',
+      operator: 'ILIKE',
+      value: 'leather',
+      _group: 'leather',
+    });
+  });
+
+  it('lets an operator opt a flattened relation out of search', () => {
+    const result = buildQuery(
+      { search: 'leather' },
+      {
+        ...baseConfig,
+        searchableColumns: undefined,
+        relations: {
+          features: {
+            table: 'CarFeature',
+            foreignKey: 'carId',
+            referenceKey: 'id',
+            fields: { name: 'name' },
+            flatten: 'name',
+            searchable: false,
+          },
+        },
+      },
+    );
+
+    expect(result.conditions).toEqual([]);
+    expect(result.ignoredFilters).toEqual(['search']);
+  });
+
   it('reports a non-empty search when no searchable columns are configured', () => {
     const result = buildQuery(
       { search: 'iPhone' },

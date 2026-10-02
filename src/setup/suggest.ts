@@ -111,6 +111,8 @@ const PUBLISHED_PATTERNS = [
   /^visible$/i,
 ];
 
+const IN_STOCK_PATTERNS = [/^in_?stock$/i, /^available$/i, /^stock$/i, /^quantity$/i];
+
 // Columns to suggest as soft-delete filter
 const SOFT_DELETE_PATTERNS = [/^deleted_?at$/i, /^removed_?at$/i, /^archived_?at$/i];
 
@@ -205,6 +207,27 @@ export function suggestPublishedColumn(columns: IntrospectedColumn[]): string | 
   for (const col of columns) {
     for (const pattern of PUBLISHED_PATTERNS) {
       if (pattern.test(col.name)) return col.name;
+    }
+  }
+  return null;
+}
+
+/**
+ * Suggest the column used to hide sold-out inventory. Boolean availability
+ * columns use `= true`; numeric stock/quantity columns use `> 0`.
+ */
+export function suggestInStockFilter(
+  columns: IntrospectedColumn[],
+): { column: string; expression: string } | null {
+  for (const col of columns) {
+    if (!IN_STOCK_PATTERNS.some((pattern) => pattern.test(col.name))) continue;
+
+    const type = col.type.trim().toLowerCase();
+    if (type === 'boolean' || type === 'bool') {
+      return { column: col.name, expression: `${col.name} = true` };
+    }
+    if (NUMERIC_TYPES.has(type)) {
+      return { column: col.name, expression: `${col.name} > 0` };
     }
   }
   return null;
@@ -445,19 +468,26 @@ const NON_ENUM_EXTENSION_UDT_NAMES = new Set(['geometry', 'geography']);
 
 /**
  * Whether a column is safe to expose as a free-form inventory attribute — the
- * same text/numeric/enum allowlist `suggestFilterableColumns` already applies
- * to filters. Excludes binary and other opaque types (bytea, tsvector,
- * geometry/geography, arrays of any of those, etc.): node-postgres returns
- * those as Buffers or other non-JSON-safe values, and `JSON.stringify`
- * mangles a Buffer into `{"type":"Buffer","data":[...]}` on the wire —
- * inflating every response without ever rendering as a photo.
+ * text, booleans, numeric values, JSON, arrays, and enums are safe to expose.
+ * Excludes binary and other opaque types (bytea, tsvector, geometry/geography,
+ * and arrays of those): node-postgres returns those as Buffers or other
+ * non-JSON-safe values, and `JSON.stringify` mangles a Buffer into
+ * `{"type":"Buffer","data":[...]}` on the wire.
  */
 export function isAttributeEligibleColumn(
   column: Pick<IntrospectedColumn, 'type' | 'udtName'>,
 ): boolean {
   const normalizedType = column.type.trim().toLowerCase();
   if (isTextColumn(column)) return true;
+  if (normalizedType === 'boolean' || normalizedType === 'bool') return true;
   if (NUMERIC_TYPES.has(normalizedType)) return true;
+  if (normalizedType === 'json' || normalizedType === 'jsonb') {
+    return true;
+  }
+  if (normalizedType === 'array') {
+    const arrayElementType = column.udtName?.trim().toLowerCase().replace(/^_/, '') ?? '';
+    return !['bytea', ...NON_ENUM_EXTENSION_UDT_NAMES].includes(arrayElementType);
+  }
   if (normalizedType === 'user-defined') {
     const udtName = column.udtName?.trim().toLowerCase() ?? '';
     return !NON_ENUM_EXTENSION_UDT_NAMES.has(udtName);

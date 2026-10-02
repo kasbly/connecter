@@ -276,12 +276,15 @@ resources:
       status: 'status' # Leave unmapped only when every listing is Active
       # Optional: one URL, a PostgreSQL text[] value, or a JSON array of URL strings.
       # Row images come first, followed by images from relations below.
-      # Values must be absolute http(s) URLs. A site-relative path or a bare
-      # filename ("/wp-content/uploads/car-123.jpg", "car-123.jpg") cannot be
-      # resolved by Kasbly, so it is dropped and `/health` reports the listing
-      # under `unservableImageIds`. The listing is still served — without that
-      # photo — so store absolute URLs, or expose them through a view.
+      # Values may be absolute http(s) URLs, site-relative paths, or bare
+      # filenames. During `npm run setup`, enter your public site origin when
+      # prompted to resolve relative values. `/diagnostics` reports any values
+      # that still cannot be served under `unservableImageIds`.
       images: 'image_urls'
+
+    # Optional public origin used for site-relative and bare image paths.
+    # `npm run setup` writes this after its Image URL origin prompt.
+    imageUrlPrefix: 'https://shop.example.com'
 
     # Source-system values for Kasbly's accepted status tokens.
     # Omit the whole block to accept ACTIVE, DRAFT, RESERVED, SOLD, and EXPIRED

@@ -88,6 +88,7 @@ const relationSchema = z.object({
   imageUrlField: z.string().optional(),
   filter: z.string().optional(),
   flatten: z.string().optional(),
+  searchable: z.boolean().optional(),
   publishAs: z.string().optional(),
   orderBy: z
     .object({
@@ -103,6 +104,25 @@ const inventoryResourceSchema = z.object({
   baseFilter: z.string().optional(),
   idColumn: z.string().min(1),
   updatedAtColumn: z.string().optional(),
+  imageUrlPrefix: z
+    .string()
+    .trim()
+    .refine((value) => {
+      try {
+        const url = new URL(value);
+        return (
+          (url.protocol === 'http:' || url.protocol === 'https:') &&
+          url.username === '' &&
+          url.password === '' &&
+          url.pathname === '/' &&
+          url.search === '' &&
+          url.hash === ''
+        );
+      } catch {
+        return false;
+      }
+    }, 'imageUrlPrefix must be an absolute http(s) origin, such as https://shop.example.com')
+    .optional(),
   fields: z
     .object({
       title: z.string().min(1),

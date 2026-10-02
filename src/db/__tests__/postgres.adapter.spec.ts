@@ -884,6 +884,35 @@ describe('PostgresAdapter list count (#17420)', () => {
     expect(countQuery.bindings.slice(0, 4)).toEqual(dataQuery.bindings.slice(0, 4));
   });
 
+  it('applies flattened feature search to both list and count queries (#30073)', async () => {
+    const { conditions } = buildQuery(
+      { search: 'leather' },
+      {
+        table: 'Car',
+        idColumn: 'id',
+        fields: { title: 'title', price: 'price' },
+        relations: {
+          features: {
+            table: 'CarFeature',
+            foreignKey: 'carId',
+            referenceKey: 'id',
+            fields: { name: 'name' },
+            flatten: 'name',
+          },
+        },
+      },
+    );
+
+    const { countQuery, dataQuery } = await runListQuery({ count: 1, conditions });
+    const featureSearch =
+      "COALESCE((SELECT string_agg(__kasbly_search_relation.name::text, ' ') FROM \"public\".\"CarFeature\" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = id), '') ILIKE ? ESCAPE '\\'";
+
+    expect(dataQuery.sql).toContain(featureSearch);
+    expect(countQuery.sql).toContain(featureSearch);
+    expect(dataQuery.bindings).toContain('%leather%');
+    expect(countQuery.bindings).toContain('%leather%');
+  });
+
   it('matches filter.color=white against a stored White value via case-insensitive exact ILIKE', async () => {
     const conditions: QueryCondition[] = [{ column: 'color', operator: '=', value: 'white' }];
 

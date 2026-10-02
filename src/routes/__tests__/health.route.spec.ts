@@ -809,6 +809,38 @@ describe('health route', () => {
     await app.close();
   });
 
+  it('resolves relative image paths with imageUrlPrefix without diagnostics warnings', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [
+        {
+          id: '1',
+          title: 'Test',
+          price: 100,
+          image_urls: '/wp-content/uploads/2026/03/car-123.jpg',
+        },
+        { id: '2', title: 'Also test', price: 200, image_urls: 'car-456.jpg' },
+      ],
+      total: 2,
+    });
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        imageUrlPrefix: 'https://shop.example.com',
+        fields: { ...inventoryResource.fields, images: 'image_urls' },
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).not.toHaveProperty('unservableImageIds');
+    await app.close();
+  });
+
   it('names the listings whose image values cannot be served', () => {
     const warning = formatUnservableImageWarning(['car-123']);
 

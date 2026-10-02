@@ -4,6 +4,7 @@ import {
   suggestIdColumn,
   suggestUpdatedAtColumn,
   suggestPublishedColumn,
+  suggestInStockFilter,
   suggestSoftDeleteColumn,
   suggestRelations,
   suggestSearchableColumns,
@@ -253,6 +254,23 @@ describe('suggestPublishedColumn', () => {
 
   it('returns null when none found', () => {
     expect(suggestPublishedColumn([col('name')])).toBeNull();
+  });
+});
+
+describe('suggestInStockFilter', () => {
+  it('finds boolean availability columns and numeric stock columns', () => {
+    expect(suggestInStockFilter([col('in_stock', 'boolean')])).toEqual({
+      column: 'in_stock',
+      expression: 'in_stock = true',
+    });
+    expect(suggestInStockFilter([col('quantity', 'integer')])).toEqual({
+      column: 'quantity',
+      expression: 'quantity > 0',
+    });
+  });
+
+  it('skips stock-shaped columns with unsupported types', () => {
+    expect(suggestInStockFilter([col('stock', 'text')])).toBeNull();
   });
 });
 
@@ -612,11 +630,14 @@ describe('isTextColumn', () => {
 });
 
 describe('isAttributeEligibleColumn', () => {
-  it('allows text, numeric, and enum columns', () => {
+  it('allows text, boolean, numeric, JSON, array, and enum columns', () => {
     expect(isAttributeEligibleColumn(col('title', 'text'))).toBe(true);
     expect(isAttributeEligibleColumn(col('sku', 'character varying'))).toBe(true);
     expect(isAttributeEligibleColumn(col('year', 'integer'))).toBe(true);
     expect(isAttributeEligibleColumn(col('price', 'numeric'))).toBe(true);
+    expect(isAttributeEligibleColumn(col('in_stock', 'boolean'))).toBe(true);
+    expect(isAttributeEligibleColumn(col('tags', 'ARRAY'))).toBe(true);
+    expect(isAttributeEligibleColumn(col('metadata', 'jsonb'))).toBe(true);
     expect(
       isAttributeEligibleColumn({ ...col('color', 'USER-DEFINED'), udtName: 'color_enum' }),
     ).toBe(true);
@@ -638,10 +659,6 @@ describe('isAttributeEligibleColumn', () => {
     expect(isAttributeEligibleColumn(col('search_vector', 'tsvector'))).toBe(false);
   });
 
-  it('rejects array columns', () => {
-    expect(isAttributeEligibleColumn(col('tags', 'ARRAY'))).toBe(false);
-  });
-
   it('rejects PostGIS geometry/geography columns even though they also report as user-defined', () => {
     expect(
       isAttributeEligibleColumn({ ...col('location', 'USER-DEFINED'), udtName: 'geometry' }),
@@ -651,9 +668,11 @@ describe('isAttributeEligibleColumn', () => {
     ).toBe(false);
   });
 
-  it('rejects json/jsonb columns, matching the filterable-columns allowlist', () => {
-    expect(isAttributeEligibleColumn(col('metadata', 'json'))).toBe(false);
-    expect(isAttributeEligibleColumn(col('metadata', 'jsonb'))).toBe(false);
+  it('rejects arrays of opaque values', () => {
+    expect(isAttributeEligibleColumn({ ...col('photos', 'ARRAY'), udtName: '_bytea' })).toBe(false);
+    expect(isAttributeEligibleColumn({ ...col('areas', 'ARRAY'), udtName: '_geometry' })).toBe(
+      false,
+    );
   });
 });
 

@@ -78,6 +78,12 @@ export interface RelationConfig {
   imageUrlField?: string;
   filter?: string;
   flatten?: string;
+  /**
+   * Include the flattened child value in free-text inventory search. Defaults
+   * to true for flattened relations so feature tables created by older setup
+   * runs become searchable when the connector is upgraded.
+   */
+  searchable?: boolean;
   orderBy?: RelationOrderByConfig;
   /**
    * Customer-facing attribute key for a `flatten`/generic relation's output.
@@ -96,6 +102,8 @@ export interface InventoryResourceConfig {
   baseFilter?: string;
   idColumn: string;
   updatedAtColumn?: string;
+  /** Public http(s) origin used to resolve site-relative image paths. */
+  imageUrlPrefix?: string;
   fields: Record<string, string>;
   /** Values used by the source system for each Kasbly inventory status. */
   statusValues?: StatusValuesConfig;

@@ -53,6 +53,7 @@ function formatWireIssues(issues: z.core.$ZodIssue[]): string {
 export function validateInventoryItemWireContract(
   item: ConnectorInventoryItem,
   mappedImageValues: unknown[] = [],
+  imageUrlPrefix?: string,
 ): void {
   let serialized: string;
   try {
@@ -68,7 +69,7 @@ export function validateInventoryItemWireContract(
     );
   }
 
-  const { malformed } = getImageValueProblems(mappedImageValues);
+  const { malformed } = getImageValueProblems(mappedImageValues, imageUrlPrefix);
   if (malformed.length > 0) {
     throw new Error(`Inventory sample violates wire contract: ${malformed.join('; ')}`);
   }
@@ -83,8 +84,8 @@ export interface ImageValueProblems {
   malformed: string[];
   /**
    * Values `normalizeImageUrls` already drops while leaving the rest of the
-   * listing intact: a well-formed string that is not an absolute http(s) URL
-   * (a site-relative path, a bare filename, a storage key, #25790), an object
+   * listing intact: a well-formed image string that cannot be resolved with
+   * its configured public origin (a storage key, #25790), an object
    * shape such as a jsonb images column storing `[{"src": "...", "alt": "..."}]`
    * instead of plain strings (#27421), or a non-string scalar such as a
    * leftover numeric id or boolean (#28747). The listing itself is still
@@ -104,13 +105,17 @@ export interface ImageValueProblems {
  * mapping: title, price and currency are still valid, so the listing is served
  * without those images (#25790, #24913).
  */
-export function getImageValueProblems(mappedImageValues: readonly unknown[]): ImageValueProblems {
+export function getImageValueProblems(
+  mappedImageValues: readonly unknown[],
+  imageUrlPrefix?: string,
+): ImageValueProblems {
   const problems: ImageValueProblems = { malformed: [], unservable: [] };
   mappedImageValues.forEach((value, index) => {
     collectImageValueProblems(
       value,
       `images${mappedImageValues.length > 1 ? `[${index}]` : ''}`,
       problems,
+      imageUrlPrefix,
     );
   });
   return problems;
@@ -120,11 +125,12 @@ function collectImageValueProblems(
   value: unknown,
   path: string,
   problems: ImageValueProblems,
+  imageUrlPrefix?: string,
 ): void {
   if (value === null || value === undefined) return;
   if (Array.isArray(value)) {
     value.forEach((entry, index) => {
-      collectImageValueProblems(entry, `${path}[${index}]`, problems);
+      collectImageValueProblems(entry, `${path}[${index}]`, problems, imageUrlPrefix);
     });
     return;
   }
@@ -153,12 +159,12 @@ function collectImageValueProblems(
       return;
     }
     parsed.forEach((entry, index) => {
-      collectImageValueProblems(entry, `${path}[${index}]`, problems);
+      collectImageValueProblems(entry, `${path}[${index}]`, problems, imageUrlPrefix);
     });
     return;
   }
 
-  if (!/^https?:\/\//i.test(trimmed)) {
+  if (!normalizeImageUrls(trimmed, imageUrlPrefix).length) {
     problems.unservable.push(
       `${path}: image values must be absolute http(s) URLs (got ${JSON.stringify(trimmed)})`,
     );
@@ -281,7 +287,7 @@ export function mapRowToInventoryItem(
 
   // Row images are emitted first so a primary image stored on the inventory row
   // remains first when it is supplemented by a related image table.
-  const images = normalizeImageUrls(fields['images']);
+  const images = normalizeImageUrls(fields['images'], config.imageUrlPrefix);
 
   // Process relations
   if (config.relations) {
@@ -292,7 +298,9 @@ export function mapRowToInventoryItem(
 
       if (relationConfig.imageUrlField) {
         for (const relationRow of relRows) {
-          images.push(...normalizeImageUrls(relationRow[relationConfig.imageUrlField]));
+          images.push(
+            ...normalizeImageUrls(relationRow[relationConfig.imageUrlField], config.imageUrlPrefix),
+          );
         }
       } else if (relationConfig.flatten) {
         // `publishAs` (when set by the wizard) is the semantic name AI card
@@ -343,9 +351,9 @@ export function mapRowToInventoryItem(
  * Normalize a configured image field from PostgreSQL (which returns text arrays
  * as JavaScript arrays), a JSON array, or one URL into non-empty string URLs.
  */
-export function normalizeImageUrls(value: unknown): string[] {
+export function normalizeImageUrls(value: unknown, imageUrlPrefix?: string): string[] {
   if (Array.isArray(value)) {
-    return value.flatMap(normalizeImageUrls);
+    return value.flatMap((entry) => normalizeImageUrls(entry, imageUrlPrefix));
   }
 
   if (typeof value !== 'string') return [];
@@ -356,13 +364,32 @@ export function normalizeImageUrls(value: unknown): string[] {
   if (url.startsWith('[')) {
     try {
       const parsed = JSON.parse(url) as unknown;
-      return Array.isArray(parsed) ? parsed.flatMap(normalizeImageUrls) : [];
+      return Array.isArray(parsed)
+        ? parsed.flatMap((entry) => normalizeImageUrls(entry, imageUrlPrefix))
+        : [];
     } catch {
       return [];
     }
   }
 
-  return /^https?:\/\//i.test(url) ? [url] : [];
+  if (/^https?:\/\//i.test(url)) return [url];
+
+  const prefix = getImageUrlPrefix(imageUrlPrefix);
+  if (!prefix || url.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(url)) return [];
+
+  if (url.startsWith('/')) return [`${prefix}${url}`];
+  return [`${prefix}/${url}`];
+}
+
+/** Return a normalized public origin, defensively ignoring invalid legacy config. */
+function getImageUrlPrefix(imageUrlPrefix: string | undefined): string | undefined {
+  if (!imageUrlPrefix) return undefined;
+  try {
+    const url = new URL(imageUrlPrefix);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function resolveColumnValue(row: Record<string, unknown>, columnExpr: string): unknown {

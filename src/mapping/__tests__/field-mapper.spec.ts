@@ -390,6 +390,21 @@ describe('mapRowToInventoryItem', () => {
     ]);
   });
 
+  it('resolves site-relative paths and bare filenames against imageUrlPrefix', () => {
+    const prefix = 'https://shop.example.com';
+    expect(normalizeImageUrls('/wp-content/uploads/2026/03/car-123.jpg', prefix)).toEqual([
+      'https://shop.example.com/wp-content/uploads/2026/03/car-123.jpg',
+    ]);
+    expect(normalizeImageUrls('car-123.jpg', prefix)).toEqual([
+      'https://shop.example.com/car-123.jpg',
+    ]);
+    expect(normalizeImageUrls('["/one.jpg", "two.jpg"]', prefix)).toEqual([
+      'https://shop.example.com/one.jpg',
+      'https://shop.example.com/two.jpg',
+    ]);
+    expect(normalizeImageUrls('//untrusted.example/image.jpg', prefix)).toEqual([]);
+  });
+
   it('serves valid URLs when the mapped images column mixes URLs with numeric ids (#28747)', () => {
     const config = {
       ...baseConfig,
@@ -697,6 +712,15 @@ describe('validateInventoryItemWireContract', () => {
 });
 
 describe('getImageValueProblems', () => {
+  it('does not flag relative paths when imageUrlPrefix can resolve them', () => {
+    expect(
+      getImageValueProblems(
+        ['/wp-content/uploads/2026/03/car-123.jpg', 'car-123.jpg'],
+        'https://shop.example.com',
+      ),
+    ).toEqual({ malformed: [], unservable: [] });
+  });
+
   it('reports a relative path or bare filename as unservable, not malformed', () => {
     expect(getImageValueProblems(['/wp-content/uploads/2026/03/car-123.jpg'])).toEqual({
       malformed: [],

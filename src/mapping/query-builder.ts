@@ -10,6 +10,58 @@ const MAX_PAGE_OFFSET = 100_000;
 export const DEFAULT_PAGE_SIZE = 20;
 const MAX_SEARCH_LENGTH = 200;
 const MAX_SEARCH_TERMS = 10;
+const SAFE_COLUMN_EXPRESSION = /^([A-Za-z_][A-Za-z0-9_]*|"(?:[^"]|"")+")$/;
+const RELATION_SEARCH_ALIAS = '__kasbly_search_relation';
+
+function quoteIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+function isSafeColumnExpression(expression: string): boolean {
+  return SAFE_COLUMN_EXPRESSION.test(expression);
+}
+
+/**
+ * Returns main-table searchable columns and scalar subqueries for flattened
+ * child relations. This preserves the existing term grouping: one term can
+ * match either a listing column or a flattened feature value.
+ */
+export function getSearchableColumns(config: InventoryResourceConfig): string[] {
+  const columns = [...(config.searchableColumns ?? [])];
+
+  for (const relation of Object.values(config.relations ?? {})) {
+    if (!relation.flatten || relation.searchable === false) continue;
+
+    const flattenedColumn = relation.fields[relation.flatten];
+    if (
+      !flattenedColumn ||
+      !isSafeColumnExpression(flattenedColumn) ||
+      !isSafeColumnExpression(relation.foreignKey) ||
+      !isSafeColumnExpression(relation.referenceKey)
+    ) {
+      continue;
+    }
+
+    const relationSchema = relation.schema ?? config.schema ?? 'public';
+    if (
+      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(relationSchema) ||
+      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(relation.table)
+    ) {
+      continue;
+    }
+
+    const relationFilter = relation.filter
+      ? ` AND (${relation.filter.replaceAll('?', '\\?')})`
+      : '';
+    columns.push(
+      `COALESCE((SELECT string_agg(${RELATION_SEARCH_ALIAS}.${flattenedColumn}::text, ' ') ` +
+        `FROM ${quoteIdentifier(relationSchema)}.${quoteIdentifier(relation.table)} AS ${RELATION_SEARCH_ALIAS} ` +
+        `WHERE ${RELATION_SEARCH_ALIAS}.${relation.foreignKey} = ${relation.referenceKey}${relationFilter}), '')`,
+    );
+  }
+
+  return columns;
+}
 
 export interface ParsedQuery {
   conditions: QueryCondition[];
@@ -123,6 +175,7 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   const requestedSortBy = getSingleQueryValue(params, 'sortBy');
   const requestedSortDirection = getSingleQueryValue(params, 'sortDirection');
   const statusFilter = getSingleQueryValue(params, 'filter.status');
+  const searchableColumns = getSearchableColumns(config);
   const fixedActiveStatus = isFixedActiveStatus(config);
 
   const configuredFilterKeys = new Set(Object.keys(config.filterableColumns ?? {}));
@@ -140,7 +193,7 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   // which made a caller mistake an unfiltered catalog page for search results.
   // Keep this capability signal in the existing response contract used for
   // unsupported configured filters.
-  if (search?.trim() && (config.searchableColumns?.length ?? 0) === 0) {
+  if (search?.trim() && searchableColumns.length === 0) {
     ignoredFilters.push('search');
   }
 
@@ -190,7 +243,7 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
 
   // Search across searchable columns
   // Split search into individual terms — each term must match at least one searchable column (AND between terms, OR between columns per term)
-  if (search && config.searchableColumns && config.searchableColumns.length > 0) {
+  if (search && searchableColumns.length > 0) {
     const searchTerms = search
       .split(/\s+/)
       .map((t) => t.trim())
@@ -198,7 +251,7 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
       .slice(0, MAX_SEARCH_TERMS);
 
     for (const term of searchTerms) {
-      for (const col of config.searchableColumns) {
+      for (const col of searchableColumns) {
         conditions.push({
           column: col,
           operator: 'ILIKE',

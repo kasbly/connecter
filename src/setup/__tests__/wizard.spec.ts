@@ -81,6 +81,8 @@ describe('getStatusValueDefault', () => {
     expect(getStatusValueDefault('gone', { EXPIRED: ['gone'] })).toBe('EXPIRED');
     expect(getStatusValueDefault('Reserved')).toBe('RESERVED');
     expect(getStatusValueDefault('draft', { ACTIVE: ['other'] })).toBe('DRAFT');
+    expect(getStatusValueDefault('true')).toBe('ACTIVE');
+    expect(getStatusValueDefault('false')).toBe('SOLD');
     expect(getStatusValueDefault('mystery')).toBe(UNMAPPED_FIELD_VALUE);
   });
 });
@@ -126,6 +128,15 @@ describe('getFieldMappingPrompt', () => {
     expect(prompt.choices.map((choice) => choice.value)).toContain('amount');
     expect(prompt.choices.map((choice) => choice.value)).not.toContain('formatted_price');
     expect(prompt.choices.map((choice) => choice.value)).not.toContain('legacy_price');
+  });
+
+  it('offers boolean columns for status mappings', () => {
+    const prompt = getFieldMappingPrompt('status', [
+      { name: 'name', type: 'text' },
+      { name: 'in_stock', type: 'boolean' },
+    ]);
+
+    expect(prompt.choices.map((choice) => choice.value)).toContain('in_stock');
   });
 
   it('does not offer UUID columns for status mappings', () => {
@@ -1117,6 +1128,9 @@ describe('runWizard', () => {
       if (message.startsWith('Public DNS name')) {
         return Promise.resolve('connector.merchant.example');
       }
+      if (message.startsWith('Public site origin for relative image paths')) {
+        return Promise.resolve('https://shop.example.com');
+      }
       return Promise.resolve('reader');
     });
     promptMocks.password.mockResolvedValue('p@ss#word');
@@ -1207,6 +1221,8 @@ describe('runWizard', () => {
       );
       const relations = config.resources.inventory.relations ?? {};
 
+      expect(config.resources.inventory.imageUrlPrefix).toBe('https://shop.example.com');
+
       // The images relation's map key is still the disambiguated
       // `table__foreignKey` key (unchanged from #26144), and it now also
       // carries a `filter` built from the operator's gallery/featured picks —
@@ -1225,6 +1241,7 @@ describe('runWizard', () => {
       expect(relations['CarFeatures__carId']).toMatchObject({
         table: 'CarFeatures',
         flatten: 'name',
+        searchable: true,
         publishAs: 'features',
       });
 

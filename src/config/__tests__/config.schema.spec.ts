@@ -58,6 +58,44 @@ describe('connectorConfigSchema database TLS options', () => {
 });
 
 describe('connectorConfigSchema inventory fields', () => {
+  it('accepts a public image URL origin and rejects a path or non-http scheme', () => {
+    const withPrefix = {
+      ...createConfigInput(),
+      resources: {
+        inventory: {
+          ...createConfigInput().resources.inventory,
+          imageUrlPrefix: 'https://shop.example.com',
+        },
+      },
+    };
+
+    expect(connectorConfigSchema.parse(withPrefix).resources.inventory.imageUrlPrefix).toBe(
+      'https://shop.example.com',
+    );
+    expect(() =>
+      connectorConfigSchema.parse({
+        ...withPrefix,
+        resources: {
+          inventory: {
+            ...withPrefix.resources.inventory,
+            imageUrlPrefix: 'https://shop.example.com/store',
+          },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      connectorConfigSchema.parse({
+        ...withPrefix,
+        resources: {
+          inventory: {
+            ...withPrefix.resources.inventory,
+            imageUrlPrefix: 'ftp://shop.example.com',
+          },
+        },
+      }),
+    ).toThrow();
+  });
+
   it('defaults schemas to public and keeps schemas separate from table names', () => {
     const config = connectorConfigSchema.parse({
       ...createConfigInput(),

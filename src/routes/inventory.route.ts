@@ -46,7 +46,11 @@ function mapValidatedInventoryItem(
   relationData: Map<string, Map<string, Record<string, unknown>[]>>,
 ): ConnectorInventoryItem {
   const item = mapRowToInventoryItem(row, resourceConfig, relationData);
-  validateInventoryItemWireContract(item, getMappedImageValues(row, resourceConfig, relationData));
+  validateInventoryItemWireContract(
+    item,
+    getMappedImageValues(row, resourceConfig, relationData),
+    resourceConfig.imageUrlPrefix,
+  );
   return item;
 }
 

@@ -21,6 +21,7 @@ import {
   suggestIdColumn,
   suggestUpdatedAtColumn,
   suggestPublishedColumn,
+  suggestInStockFilter,
   suggestSoftDeleteColumn,
   suggestRelations,
   suggestSearchableColumns,
@@ -95,7 +96,7 @@ function isCompatibleFieldColumn(field: FieldMappingTarget, column: MappingColum
     // PostgreSQL reports enum columns as USER-DEFINED, with the enum name in
     // udt_name. Integer status codes are common in older catalogues too.
     return (
-      /(char|text|xml|enum|smallint|integer)/.test(normalizedType) ||
+      /(char|text|xml|enum|smallint|integer|boolean|bool)/.test(normalizedType) ||
       (normalizedType === 'user-defined' && Boolean(column.udtName?.trim()))
     );
   }
@@ -134,6 +135,8 @@ export function getStatusValueDefault(
   for (const status of INVENTORY_STATUSES) {
     if (existingStatusValues?.[status]?.includes(value)) return status;
   }
+  if (value.toLowerCase() === 'true') return 'ACTIVE';
+  if (value.toLowerCase() === 'false') return 'SOLD';
   const byName = INVENTORY_STATUSES.find((status) => status.toLowerCase() === value.toLowerCase());
   return byName ?? UNMAPPED_FIELD_VALUE;
 }
@@ -591,6 +594,9 @@ async function collectConfiguredRelation(options: {
     );
     if (nameCol && selectedColumnNames.has(nameCol.name)) {
       relation['flatten'] = nameCol.name;
+      // Keep this explicit in generated config. Runtime also treats omitted
+      // legacy values as enabled so upgraded connectors gain the behavior.
+      relation['searchable'] = true;
     }
   }
 
@@ -934,7 +940,7 @@ export async function runWizard(): Promise<void> {
 
   // Let user select which remaining columns to include as attributes. Columns
   // whose SQL type cannot round-trip as a plain attribute value (bytea,
-  // tsvector, geometry, arrays of those, etc.) are excluded up front —
+  // tsvector, geometry, and arrays of those, etc.) are excluded up front —
   // node-postgres hands those back as Buffers or other opaque values that
   // JSON.stringify mangles into `{"type":"Buffer","data":[...]}` on the wire
   // (#28247) — the same text/numeric/enum allowlist filterable columns use.
@@ -949,6 +955,21 @@ export async function runWizard(): Promise<void> {
       !/_at$/.test(column.name) &&
       isAttributeEligibleColumn(column),
   );
+
+  const unsupportedTagColumns = selectedTable.columns.filter((column) => {
+    const normalizedType = column.type.trim().toLowerCase();
+    return (
+      /(?:tag|feature)/i.test(column.name) &&
+      (normalizedType === 'array' || normalizedType === 'json' || normalizedType === 'jsonb')
+    );
+  });
+  if (unsupportedTagColumns.length > 0) {
+    console.log(
+      `Note: ${unsupportedTagColumns.map((column) => `"${column.name}"`).join(', ')} ` +
+        'is JSON/array data and cannot be published or searched as a plain attribute. ' +
+        'If it contains customer-facing tags, add a flattened relation in Step 5 instead.',
+    );
+  }
 
   let additionalAttributes: string[] = [];
   if (unmappedColumns.length > 0) {
@@ -1042,6 +1063,7 @@ export async function runWizard(): Promise<void> {
   // Step 4: Filters
   console.log('\nStep 4: Filters');
   const publishedColumn = suggestPublishedColumn(selectedTable.columns);
+  const inStockFilter = suggestInStockFilter(selectedTable.columns);
   const softDeleteColumn = suggestSoftDeleteColumn(selectedTable.columns);
 
   let baseFilterParts: string[] = [];
@@ -1056,6 +1078,21 @@ export async function runWizard(): Promise<void> {
     });
     if (usePublished) {
       baseFilterParts.push(`${quoteIfNeeded(publishedColumn)} = true`);
+    }
+  }
+
+  if (inStockFilter) {
+    const stockFilterExpression = inStockFilter.expression.replace(
+      inStockFilter.column,
+      quoteIfNeeded(inStockFilter.column),
+    );
+    const exposeInStock = await confirm({
+      message: `Only expose in-stock items? (detected column: ${inStockFilter.column})`,
+      default:
+        existingConfig?.resources.inventory.baseFilter?.includes(stockFilterExpression) ?? true,
+    });
+    if (exposeInStock) {
+      baseFilterParts.push(stockFilterExpression);
     }
   }
 
@@ -1392,6 +1429,31 @@ export async function runWizard(): Promise<void> {
     ...filterableColumnsFromSelection,
   };
 
+  // WordPress and Magento commonly store /wp-content/... paths rather than
+  // absolute URLs. Ask wherever images are mapped (on the inventory row or a
+  // relation) so the connector can turn those paths into public image URLs.
+  let imageUrlPrefix = existingInventory?.imageUrlPrefix;
+  if (fieldMappings.images || hasImagesRelation) {
+    console.log('\nStep 6a: Image URL origin');
+    const configuredPrefix = await input({
+      message:
+        'Public site origin for relative image paths (for example https://shop.example.com). Leave blank when image URLs are already absolute:',
+      default: imageUrlPrefix,
+      validate: (value) => {
+        const origin = value.trim();
+        return (
+          !origin ||
+          isPublicImageUrlOrigin(origin) ||
+          'Enter an absolute http(s) origin without a path, query, or fragment.'
+        );
+      },
+    });
+    // Inquirer only returns strings after validation; retain this guard for
+    // non-interactive callers that bypass a prompt's validator.
+    const origin = typeof configuredPrefix === 'string' ? configuredPrefix.trim() : '';
+    imageUrlPrefix = isPublicImageUrlOrigin(origin) ? origin : undefined;
+  }
+
   const config = {
     ...existingConfig,
     version: existingConfig?.version ?? 1,
@@ -1439,6 +1501,7 @@ export async function runWizard(): Promise<void> {
         ...(baseFilterParts.length > 0 ? { baseFilter: baseFilterParts.join(' AND ') } : {}),
         idColumn: quoteIfNeeded(idColumn),
         ...(updatedAtColumn ? { updatedAtColumn: quoteIfNeeded(updatedAtColumn) } : {}),
+        ...(imageUrlPrefix ? { imageUrlPrefix } : {}),
         fields,
         ...(statusValues ? { statusValues } : {}),
         ...(unknownStatusPolicy ? { unknownStatusPolicy } : {}),
@@ -1744,6 +1807,22 @@ export function loadExistingSetupConfig(configPath: string, envPath: string): Co
 /** Convert the legacy container-only host value back to the host-side default on reruns. */
 export function getSetupHostDefault(host: string | undefined): string {
   return host === 'host.docker.internal' ? 'localhost' : (host ?? 'localhost');
+}
+
+function isPublicImageUrlOrigin(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      parsed.username === '' &&
+      parsed.password === '' &&
+      parsed.pathname === '/' &&
+      parsed.search === '' &&
+      parsed.hash === ''
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Format a concise YAML-style preview of changes to wizard-owned inventory mappings. */

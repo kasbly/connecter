@@ -219,6 +219,45 @@ describe('inventory routes', () => {
     await app.close();
   });
 
+  it('GET /inventory?search= includes flattened feature values in search conditions (#30073)', async () => {
+    const mockAdapter = createMockDbAdapter();
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: {
+        ...testConfig,
+        relations: {
+          features: {
+            table: 'ProductFeature',
+            foreignKey: 'productId',
+            referenceKey: 'id',
+            fields: { value: 'value' },
+            flatten: 'value',
+          },
+        },
+      },
+    });
+
+    const response = await app.inject({ method: 'GET', url: '/inventory?search=leather' });
+
+    expect(response.statusCode).toBe(200);
+    expect(mockAdapter.query).toHaveBeenCalledWith(
+      'Product',
+      expect.arrayContaining([
+        expect.objectContaining({
+          column: expect.stringContaining('FROM "public"."ProductFeature"'),
+          operator: 'ILIKE',
+          value: 'leather',
+        }),
+      ]),
+      expect.anything(),
+      expect.anything(),
+      undefined,
+      expect.anything(),
+    );
+    await app.close();
+  });
+
   it('GET /inventory reports unsupported filters and still queries configured filters', async () => {
     const mockAdapter = createMockDbAdapter();
     const app = Fastify();
