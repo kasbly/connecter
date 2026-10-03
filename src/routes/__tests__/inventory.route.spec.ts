@@ -1014,7 +1014,7 @@ describe('inventory routes', () => {
     await app.close();
   });
 
-  it('GET /inventory/:id returns 502 when the mapped item violates the wire contract', async () => {
+  it('GET /inventory/:id returns 404 when the mapped item violates the wire contract', async () => {
     const mockAdapter = createMockDbAdapter({
       queryById: vi.fn().mockResolvedValue({
         id: '42',
@@ -1035,7 +1035,7 @@ describe('inventory routes', () => {
       url: '/inventory/42',
     });
 
-    expect(response.statusCode).toBe(502);
+    expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({
       error: expect.stringContaining('price'),
     });

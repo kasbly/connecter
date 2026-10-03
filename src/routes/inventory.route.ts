@@ -433,7 +433,9 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
         (request as FastifyRequest & { auditItems?: number }).auditItems = 1;
         return item;
       } catch (error) {
-        return reply.code(502).send({ error: errorMessage(error) });
+        // Keep detail semantics aligned with the list endpoint: a row that
+        // violates the public wire contract is withheld, not an upstream outage.
+        return reply.code(404).send({ error: errorMessage(error) });
       }
     },
   );
