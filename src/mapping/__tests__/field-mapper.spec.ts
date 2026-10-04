@@ -7,6 +7,7 @@ import {
   getSourceStatusValues,
   mapRowToInventoryItem,
   normalizeImageUrls,
+  normalizeListingUrl,
   resolveInventoryStatus,
   validateInventoryItemWireContract,
 } from '../field-mapper.js';
@@ -53,6 +54,37 @@ describe('mapRowToInventoryItem', () => {
     expect(result.attributes.makeEn).toBe('Hyundai');
     expect(result.attributes.year).toBe(2024);
     expect(result.updatedAt).toBe('2026-01-15T10:00:00.000Z');
+  });
+
+  it('resolves relative listing URL attributes against imageUrlPrefix and drops schemeless hosts', () => {
+    const config: InventoryResourceConfig = {
+      ...baseConfig,
+      imageUrlPrefix: 'https://shop.example.com',
+      attributes: { url: 'permalink', listingUrl: 'alternate_permalink' },
+    };
+
+    expect(
+      mapRowToInventoryItem(
+        {
+          id: '1',
+          title: 'Test',
+          price: 100,
+          permalink: '/product/honda-civic/',
+          alternate_permalink: '//untrusted.example/product/honda-civic/',
+        },
+        config,
+        new Map(),
+      ).attributes,
+    ).toEqual({ url: 'https://shop.example.com/product/honda-civic/' });
+    expect(normalizeListingUrl('honda-civic', 'https://shop.example.com')).toBe(
+      'https://shop.example.com/honda-civic',
+    );
+    expect(
+      normalizeListingUrl('https://catalog.example/honda-civic', 'https://shop.example.com'),
+    ).toBe('https://catalog.example/honda-civic');
+    expect(
+      normalizeListingUrl('//untrusted.example/honda-civic', 'https://shop.example.com'),
+    ).toBeUndefined();
   });
 
   it('handles literal string values in config', () => {

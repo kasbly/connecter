@@ -9,6 +9,7 @@ import {
   createResourceHealthCheck,
   formatUnknownStatusWarning,
   formatUnservableImageWarning,
+  formatUnservableListingUrlWarning,
   formatWireContractViolationWarning,
   probeInventoryResource,
   registerHealthRoute,
@@ -847,6 +848,34 @@ describe('health route', () => {
     expect(warning).toContain('"car-123"');
     expect(warning).toContain('absolute http(s) URLs');
     expect(formatUnservableImageWarning([])).toBeNull();
+  });
+
+  it('reports relative listing URLs without an origin and clears the advisory once configured', async () => {
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [{ id: '1', title: 'Test', price: 100, permalink: '/product/honda-civic/' }],
+      total: 1,
+    });
+    await expect(
+      probeInventoryResource(dbAdapter, {
+        ...inventoryResource,
+        attributes: { url: 'permalink' },
+      }),
+    ).resolves.toMatchObject({ unservableListingUrlIds: ['1'] });
+
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [{ id: '1', title: 'Test', price: 100, permalink: '/product/honda-civic/' }],
+      total: 1,
+    });
+    await expect(
+      probeInventoryResource(dbAdapter, {
+        ...inventoryResource,
+        imageUrlPrefix: 'https://shop.example.com',
+        attributes: { url: 'permalink' },
+      }),
+    ).resolves.toMatchObject({ unservableListingUrlIds: [] });
+
+    expect(formatUnservableListingUrlWarning(['1'])).toContain('public site origin');
   });
 
   it('names the unmapped values and the status they are reported as', () => {

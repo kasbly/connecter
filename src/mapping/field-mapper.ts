@@ -20,6 +20,9 @@ export interface ConnectorInventoryItem {
   updatedAt: string | null;
 }
 
+/** Attribute names Kasbly recognizes as a per-listing customer URL. */
+export const LISTING_URL_ATTRIBUTE_KEYS = ['url', 'listingUrl', 'listing_url', 'link', 'handle'];
+
 /**
  * Keep the standalone producer on the same strict inventory wire contract its
  * consumers enforce. Validation happens after JSON serialization so values
@@ -285,6 +288,17 @@ export function mapRowToInventoryItem(
     }
   }
 
+  // WordPress and Magento frequently keep the public listing path in a
+  // permalink/href column rather than storing an absolute URL. Use the same
+  // configured public origin as images so Kasbly receives a customer-safe URL.
+  for (const key of LISTING_URL_ATTRIBUTE_KEYS) {
+    const value = attributes[key];
+    if (typeof value !== 'string') continue;
+    const url = normalizeListingUrl(value, config.imageUrlPrefix);
+    if (url) attributes[key] = url;
+    else delete attributes[key];
+  }
+
   // Row images are emitted first so a primary image stored on the inventory row
   // remains first when it is supplemented by a related image table.
   const images = normalizeImageUrls(fields['images'], config.imageUrlPrefix);
@@ -379,6 +393,41 @@ export function normalizeImageUrls(value: unknown, imageUrlPrefix?: string): str
 
   if (url.startsWith('/')) return [`${prefix}${url}`];
   return [`${prefix}/${url}`];
+}
+
+/**
+ * Turn a configured per-listing URL into a public http(s) URL. Unlike images,
+ * one invalid value simply means no customer link for that listing.
+ */
+export function normalizeListingUrl(value: unknown, imageUrlPrefix?: string): string | undefined {
+  if (typeof value !== 'string') return undefined;
+
+  const url = value.trim();
+  if (!url) return undefined;
+  if (/^https?:\/\//i.test(url)) return url;
+
+  const prefix = getImageUrlPrefix(imageUrlPrefix);
+  if (!prefix || url.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(url)) return undefined;
+
+  return url.startsWith('/') ? `${prefix}${url}` : `${prefix}/${url}`;
+}
+
+/** Return configured listing URL values the mapper cannot turn into public URLs. */
+export function getUnservableListingUrlValues(
+  row: Record<string, unknown>,
+  config: InventoryResourceConfig,
+): unknown[] {
+  if (!config.attributes) return [];
+  return LISTING_URL_ATTRIBUTE_KEYS.flatMap((key) => {
+    const columnExpr = config.attributes?.[key];
+    if (!columnExpr) return [];
+    const value = resolveColumnValue(row, columnExpr);
+    return typeof value === 'string' &&
+      value.trim() &&
+      !normalizeListingUrl(value, config.imageUrlPrefix)
+      ? [value]
+      : [];
+  });
 }
 
 /** Return a normalized public origin, defensively ignoring invalid legacy config. */

@@ -58,6 +58,7 @@ const resourceProbeMocks = vi.hoisted(() => {
       unknownStatusValues: [],
       wireContractViolationIds: [],
       unservableImageIds: [],
+      unservableListingUrlIds: [],
     }),
   };
 });
@@ -1128,6 +1129,8 @@ describe('runWizard', () => {
       if (message.startsWith('Public DNS name')) {
         return Promise.resolve('connector.merchant.example');
       }
+      if (message.startsWith('Public site origin'))
+        return Promise.resolve('https://shop.example.com');
       if (message.startsWith('Public site origin for relative image paths')) {
         return Promise.resolve('https://shop.example.com');
       }
@@ -1305,6 +1308,9 @@ describe('runWizard', () => {
       if (message.startsWith('PostgreSQL schema')) return Promise.resolve('merchant_data');
       if (message.startsWith('Public DNS name')) {
         return Promise.resolve('connector.merchant.example');
+      }
+      if (message.startsWith('Public site origin')) {
+        return Promise.resolve('https://shop.example.com');
       }
       return Promise.resolve('reader');
     });
@@ -2602,6 +2608,9 @@ describe('runWizard', () => {
       if (message.startsWith('Public DNS name')) {
         return Promise.resolve('connector.merchant.example');
       }
+      if (message.startsWith('Public site origin')) {
+        return Promise.resolve('https://shop.example.com');
+      }
       return Promise.resolve('reader');
     });
     promptMocks.password.mockResolvedValue('p@ss#word');
@@ -2659,6 +2668,12 @@ describe('runWizard', () => {
         join(directory, '.env'),
       );
       expect(config.resources.inventory.attributes?.url).toBe('"permalink"');
+      expect(config.resources.inventory.imageUrlPrefix).toBe('https://shop.example.com');
+      expect(promptMocks.input).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining('relative image or listing paths'),
+        }),
+      );
     } finally {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
@@ -2957,6 +2972,7 @@ describe('runWizard', () => {
       unknownStatusValues: ['UNDER_OFFER'],
       wireContractViolationIds: ['42'],
       unservableImageIds: ['43'],
+      unservableListingUrlIds: ['44'],
     });
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('available_products'));
@@ -3025,6 +3041,7 @@ describe('runWizard', () => {
       // A relative image path is an advisory, never a reason to refuse the
       // save — setup still writes the config (#25790).
       expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('"43"'));
+      expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('"44"'));
       // The pre-save probe's unknownStatusValues must reach the operator the same
       // way `npm run validate` already surfaces it (cli.ts) — otherwise a status
       // value the probe found unmapped is saved and silently hidden under

@@ -21,6 +21,8 @@ export interface ConnectorValidationResult {
   wireContractViolationIds: string[];
   /** Sampled listing ids served without an image value that is not a URL. */
   unservableImageIds: string[];
+  /** Sampled listing ids whose mapped customer URL needs a public origin. */
+  unservableListingUrlIds: string[];
 }
 
 /**
@@ -37,6 +39,7 @@ export async function validateConnectorConfig(
   const {
     formatUnknownStatusWarning,
     formatUnservableImageWarning,
+    formatUnservableListingUrlWarning,
     formatWireContractViolationWarning,
     probeInventoryResource,
   } = await import('../routes/health.route.js');
@@ -52,10 +55,15 @@ export async function validateConnectorConfig(
   let unknownStatusValues: string[];
   let wireContractViolationIds: string[];
   let unservableImageIds: string[];
+  let unservableListingUrlIds: string[];
   try {
     await dbAdapter.connect();
-    ({ unknownStatusValues, wireContractViolationIds, unservableImageIds } =
-      await probeInventoryResource(dbAdapter, inventoryResource));
+    ({
+      unknownStatusValues,
+      wireContractViolationIds,
+      unservableImageIds,
+      unservableListingUrlIds,
+    } = await probeInventoryResource(dbAdapter, inventoryResource));
   } finally {
     await dbAdapter.disconnect();
   }
@@ -67,12 +75,15 @@ export async function validateConnectorConfig(
   if (wireContractWarning) console.warn(`Warning: ${wireContractWarning}`);
   const unservableImageWarning = formatUnservableImageWarning(unservableImageIds);
   if (unservableImageWarning) console.warn(`Warning: ${unservableImageWarning}`);
+  const unservableListingUrlWarning = formatUnservableListingUrlWarning(unservableListingUrlIds);
+  if (unservableListingUrlWarning) console.warn(`Warning: ${unservableListingUrlWarning}`);
 
   return {
     unknownStatusValues,
     unknownStatusPolicy,
     wireContractViolationIds,
     unservableImageIds,
+    unservableListingUrlIds,
   };
 }
 

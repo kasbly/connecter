@@ -53,6 +53,7 @@ describe('validate reporting', () => {
       { id: '1', title: 'Test', price: 100, availability: 'for_sale' },
     ],
     extraFields: Record<string, string> = {},
+    attributes?: Record<string, string>,
   ): DatabaseAdapter {
     const dbAdapter = {
       connect: vi.fn().mockResolvedValue(undefined),
@@ -77,6 +78,7 @@ describe('validate reporting', () => {
             ...extraFields,
           },
           statusValues: { ACTIVE: ['for_sale'] },
+          ...(attributes ? { attributes } : {}),
           unknownStatusPolicy: 'RESERVED',
         },
       },
@@ -95,6 +97,7 @@ describe('validate reporting', () => {
       unknownStatusPolicy: 'RESERVED',
       wireContractViolationIds: [],
       unservableImageIds: [],
+      unservableListingUrlIds: [],
     });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"under_offer"'));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('RESERVED'));
@@ -129,6 +132,7 @@ describe('validate reporting', () => {
       unknownStatusPolicy: 'RESERVED',
       wireContractViolationIds: ['42'],
       unservableImageIds: [],
+      unservableListingUrlIds: [],
     });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"42"'));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('withheld from customers'));
@@ -168,9 +172,33 @@ describe('validate reporting', () => {
       unknownStatusPolicy: 'RESERVED',
       wireContractViolationIds: [],
       unservableImageIds: ['1', '2'],
+      unservableListingUrlIds: [],
     });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('absolute http(s) URLs'));
     expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('withheld from customers'));
     expect(dbAdapter.disconnect).toHaveBeenCalled();
   }, 15_000);
+
+  it('warns when a mapped relative permalink has no public origin', async () => {
+    mockConnector(
+      ['for_sale'],
+      [
+        {
+          id: '1',
+          title: 'Valid listing',
+          price: 100,
+          availability: 'for_sale',
+          permalink: '/product/honda-civic/',
+        },
+      ],
+      {},
+      { url: 'permalink' },
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    await expect(validateConnectorConfig(packageJsonPath)).resolves.toMatchObject({
+      unservableListingUrlIds: ['1'],
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('public site origin'));
+  });
 });

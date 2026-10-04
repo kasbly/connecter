@@ -441,6 +441,8 @@ const SEARCHABLE_PATTERNS: RegExp[] = [
   /^body$/i,
   /make/i,
   /model/i,
+  /color/i,
+  /fuel_?type/i,
   /brand/i,
   /manufacturer/i,
 ];

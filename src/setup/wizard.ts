@@ -40,6 +40,7 @@ import { createDatabaseAdapter } from '../db/adapter.factory.js';
 import {
   formatUnknownStatusWarning,
   formatUnservableImageWarning,
+  formatUnservableListingUrlWarning,
   formatWireContractViolationWarning,
   probeInventoryResource,
 } from '../routes/health.route.js';
@@ -1429,15 +1430,17 @@ export async function runWizard(): Promise<void> {
     ...filterableColumnsFromSelection,
   };
 
-  // WordPress and Magento commonly store /wp-content/... paths rather than
-  // absolute URLs. Ask wherever images are mapped (on the inventory row or a
-  // relation) so the connector can turn those paths into public image URLs.
+  const hasListingUrlAttribute = ['url', 'listingUrl', 'listing_url', 'link', 'handle'].some(
+    (key) => Boolean(attributes[key]),
+  );
+  // WordPress and Magento commonly store public image and permalink paths
+  // relative to the site origin. Ask whenever either mapping needs resolving.
   let imageUrlPrefix = existingInventory?.imageUrlPrefix;
-  if (fieldMappings.images || hasImagesRelation) {
-    console.log('\nStep 6a: Image URL origin');
+  if (fieldMappings.images || hasImagesRelation || hasListingUrlAttribute) {
+    console.log('\nStep 6a: Public URL origin');
     const configuredPrefix = await input({
       message:
-        'Public site origin for relative image paths (for example https://shop.example.com). Leave blank when image URLs are already absolute:',
+        'Public site origin for relative image or listing paths (for example https://shop.example.com). Leave blank when URLs are already absolute:',
       default: imageUrlPrefix,
       validate: (value) => {
         const origin = value.trim();
@@ -1546,8 +1549,12 @@ export async function runWizard(): Promise<void> {
   });
   try {
     await validationAdapter.connect();
-    const { unknownStatusValues, wireContractViolationIds, unservableImageIds } =
-      await probeInventoryResource(validationAdapter, config.resources.inventory);
+    const {
+      unknownStatusValues,
+      wireContractViolationIds,
+      unservableImageIds,
+      unservableListingUrlIds,
+    } = await probeInventoryResource(validationAdapter, config.resources.inventory);
     // Mirrors `npm run validate` (cli.ts): an unmapped source status is silently
     // reported as unknownStatusPolicy and withheld from customers, so the
     // operator must be told before the config is saved, not just at the next
@@ -1558,6 +1565,8 @@ export async function runWizard(): Promise<void> {
     if (warning) console.warn(`Warning: ${warning}`);
     const imageWarning = formatUnservableImageWarning(unservableImageIds);
     if (imageWarning) console.warn(`Warning: ${imageWarning}`);
+    const listingUrlWarning = formatUnservableListingUrlWarning(unservableListingUrlIds);
+    if (listingUrlWarning) console.warn(`Warning: ${listingUrlWarning}`);
   } catch (error) {
     console.error(
       `Cannot save configuration: inventory sample violates the wire contract: ${
@@ -1694,9 +1703,6 @@ export async function runWizard(): Promise<void> {
   // now checks every alias Kasbly reads, not just `url`/`listingUrl`, so a
   // column already published under `listing_url`/`link`/`handle` no longer
   // trips a false warning (#28246).
-  const hasListingUrlAttribute = ['url', 'listingUrl', 'listing_url', 'link', 'handle'].some(
-    (key) => Boolean(attributes[key]),
-  );
   if (!hasListingUrlAttribute) {
     console.log(
       '   No listing-URL column was mapped: every AI product card will be missing its link ' +

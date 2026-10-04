@@ -7,6 +7,7 @@ import type { InventoryResourceConfig, UnknownStatusPolicy } from '../config/con
 import type { DatabaseAdapter, QueryCondition } from '../db/adapter.interface.js';
 import {
   getImageValueProblems,
+  getUnservableListingUrlValues,
   getMappedImageValues,
   getRelationConfigs,
   getRequiredColumns,
@@ -154,6 +155,8 @@ export interface ResourceHealth {
    * reason to withhold the listing or take the resource offline (#25790).
    */
   unservableImageIds?: string[];
+  /** externalIds of sampled rows with a listing URL that needs a public origin. */
+  unservableListingUrlIds?: string[];
 }
 
 export interface InventoryResourceProbeResult {
@@ -163,6 +166,8 @@ export interface InventoryResourceProbeResult {
   wireContractViolationIds: string[];
   /** externalIds of sampled rows served without an unusable image value. */
   unservableImageIds: string[];
+  /** externalIds of sampled rows served without a customer-facing listing URL. */
+  unservableListingUrlIds: string[];
 }
 
 export type ResourceHealthCheck = () => Promise<ResourceHealth>;
@@ -333,6 +338,7 @@ export async function probeInventoryResource(
   // advisory instead of taking the whole resource offline (#24913).
   let wireContractViolationIds: string[] = [];
   const unservableImageIds: string[] = [];
+  const unservableListingUrlIds: string[] = [];
   if (rows.length > 0) {
     const evaluateRows = (
       sampleRows: Record<string, unknown>[],
@@ -361,6 +367,9 @@ export async function probeInventoryResource(
             .length > 0
         ) {
           unservableImageIds.push(externalId);
+        }
+        if (getUnservableListingUrlValues(row, resourceConfig).length > 0) {
+          unservableListingUrlIds.push(externalId);
         }
       }
       return pageViolations;
@@ -397,7 +406,12 @@ export async function probeInventoryResource(
 
   const statusColumn = resourceConfig.fields['status'];
   if (!statusColumn)
-    return { unknownStatusValues: [], wireContractViolationIds, unservableImageIds };
+    return {
+      unknownStatusValues: [],
+      wireContractViolationIds,
+      unservableImageIds,
+      unservableListingUrlIds,
+    };
 
   const observedStatuses = await probeStatusValues(dbAdapter, resourceConfig, statusColumn, rows);
 
@@ -414,7 +428,12 @@ export async function probeInventoryResource(
     .sort()
     .slice(0, UNKNOWN_STATUS_VALUE_LIMIT);
 
-  return { unknownStatusValues, wireContractViolationIds, unservableImageIds };
+  return {
+    unknownStatusValues,
+    wireContractViolationIds,
+    unservableImageIds,
+    unservableListingUrlIds,
+  };
 }
 
 /**
@@ -518,6 +537,20 @@ export function formatUnservableImageWarning(unservableImageIds: readonly string
   );
 }
 
+/** One operator-facing line for relative/malformed mapped listing URLs. */
+export function formatUnservableListingUrlWarning(
+  unservableListingUrlIds: readonly string[],
+): string | null {
+  if (unservableListingUrlIds.length === 0) return null;
+
+  const ids = unservableListingUrlIds.map((id) => JSON.stringify(id)).join(', ');
+  return (
+    `Inventory sample rows have listing URLs that are not absolute http(s) URLs: ${ids}. ` +
+    'Those customer links are dropped. Set resources.inventory.imageUrlPrefix to the public site origin ' +
+    '(rerun `npm run setup`), or set a listing URL template in Kasbly.'
+  );
+}
+
 export function createResourceHealthCheck(
   dbAdapter: DatabaseAdapter,
   resourceConfig: InventoryResourceConfig,
@@ -538,12 +571,20 @@ export function createResourceHealthCheck(
 
     if (!resourceProbeInFlight) {
       resourceProbeInFlight = probeInventoryResource(dbAdapter, resourceConfig)
-        .then(({ unknownStatusValues, wireContractViolationIds, unservableImageIds }) => ({
-          ok: true,
-          ...(unknownStatusValues.length > 0 ? { unknownStatusValues } : {}),
-          ...(wireContractViolationIds.length > 0 ? { wireContractViolationIds } : {}),
-          ...(unservableImageIds.length > 0 ? { unservableImageIds } : {}),
-        }))
+        .then(
+          ({
+            unknownStatusValues,
+            wireContractViolationIds,
+            unservableImageIds,
+            unservableListingUrlIds,
+          }) => ({
+            ok: true,
+            ...(unknownStatusValues.length > 0 ? { unknownStatusValues } : {}),
+            ...(wireContractViolationIds.length > 0 ? { wireContractViolationIds } : {}),
+            ...(unservableImageIds.length > 0 ? { unservableImageIds } : {}),
+            ...(unservableListingUrlIds.length > 0 ? { unservableListingUrlIds } : {}),
+          }),
+        )
         .catch((error: unknown) => ({
           ok: false,
           error: errorMessage(error),
@@ -625,6 +666,9 @@ function buildDiagnosticFields(snapshot: HealthSnapshot): Record<string, unknown
       : {}),
     ...(resourceHealth?.unservableImageIds?.length
       ? { unservableImageIds: resourceHealth.unservableImageIds }
+      : {}),
+    ...(resourceHealth?.unservableListingUrlIds?.length
+      ? { unservableListingUrlIds: resourceHealth.unservableListingUrlIds }
       : {}),
   };
 }

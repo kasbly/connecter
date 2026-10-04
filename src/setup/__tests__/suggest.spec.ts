@@ -565,6 +565,8 @@ describe('suggestSearchableColumns', () => {
       col('title', 'text'),
       col('makeEn', 'character varying'),
       col('modelEn', 'character varying'),
+      col('color', 'character varying'),
+      col('fuelType', 'character varying'),
       col('price', 'numeric'),
       col('year', 'integer'),
     ];
@@ -575,6 +577,8 @@ describe('suggestSearchableColumns', () => {
     expect(names).toContain('title');
     expect(names).toContain('makeEn');
     expect(names).toContain('modelEn');
+    expect(names).toContain('color');
+    expect(names).toContain('fuelType');
     expect(names).not.toContain('price');
     expect(names).not.toContain('year');
     expect(names).not.toContain('id');
