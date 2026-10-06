@@ -269,6 +269,18 @@ describe('suggestInStockFilter', () => {
     });
   });
 
+  it.each([
+    ['is_in_stock', 'boolean', 'is_in_stock = true'],
+    ['isInStock', 'boolean', 'isInStock = true'],
+    ['stock_quantity', 'integer', 'stock_quantity > 0'],
+    ['stockQuantity', 'integer', 'stockQuantity > 0'],
+    ['qty', 'integer', 'qty > 0'],
+    ['inventory_quantity', 'integer', 'inventory_quantity > 0'],
+    ['inventoryQuantity', 'integer', 'inventoryQuantity > 0'],
+  ])('finds %s platform availability columns', (column, type, expression) => {
+    expect(suggestInStockFilter([col(column, type)])).toEqual({ column, expression });
+  });
+
   it('skips stock-shaped columns with unsupported types', () => {
     expect(suggestInStockFilter([col('stock', 'text')])).toBeNull();
   });
@@ -567,6 +579,12 @@ describe('suggestSearchableColumns', () => {
       col('modelEn', 'character varying'),
       col('color', 'character varying'),
       col('fuelType', 'character varying'),
+      col('sku', 'text'),
+      col('product_sku', 'text'),
+      col('barcode', 'text'),
+      col('vin', 'text'),
+      col('ean', 'text'),
+      col('upc', 'text'),
       col('price', 'numeric'),
       col('year', 'integer'),
     ];
@@ -579,6 +597,9 @@ describe('suggestSearchableColumns', () => {
     expect(names).toContain('modelEn');
     expect(names).toContain('color');
     expect(names).toContain('fuelType');
+    expect(names).toEqual(
+      expect.arrayContaining(['sku', 'product_sku', 'barcode', 'vin', 'ean', 'upc']),
+    );
     expect(names).not.toContain('price');
     expect(names).not.toContain('year');
     expect(names).not.toContain('id');
@@ -589,10 +610,11 @@ describe('suggestSearchableColumns', () => {
     expect(suggestSearchableColumns(columns)).toEqual([]);
   });
 
-  it('skips primary key text columns', () => {
-    const columns = [col('id', 'text', true), col('title', 'text')];
+  it('keeps arbitrary primary-key text columns out but suggests identifier primary keys', () => {
+    const columns = [col('id', 'text', true), col('sku', 'text', true), col('title', 'text')];
     const names = suggestSearchableColumns(columns).map((s) => s.columnName);
     expect(names).not.toContain('id');
+    expect(names).toContain('sku');
     expect(names).toContain('title');
   });
 

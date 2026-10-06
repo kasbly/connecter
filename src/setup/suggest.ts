@@ -111,7 +111,16 @@ const PUBLISHED_PATTERNS = [
   /^visible$/i,
 ];
 
-const IN_STOCK_PATTERNS = [/^in_?stock$/i, /^available$/i, /^stock$/i, /^quantity$/i];
+const IN_STOCK_PATTERNS = [
+  /^is_?in_?stock$/i,
+  /^in_?stock$/i,
+  /^available$/i,
+  /^stock$/i,
+  /^quantity$/i,
+  /^stock_?quantity$/i,
+  /^qty$/i,
+  /^inventory_?quantity$/i,
+];
 
 // Columns to suggest as soft-delete filter
 const SOFT_DELETE_PATTERNS = [/^deleted_?at$/i, /^removed_?at$/i, /^archived_?at$/i];
@@ -429,6 +438,15 @@ export function isTextColumn(column: Pick<IntrospectedColumn, 'type' | 'udtName'
   );
 }
 
+const IDENTIFIER_SEARCHABLE_PATTERNS: RegExp[] = [
+  /^sku$/i,
+  /^product_?sku$/i,
+  /^barcode$/i,
+  /^vin$/i,
+  /^ean$/i,
+  /^upc$/i,
+];
+
 // Columns likely useful for text search
 const SEARCHABLE_PATTERNS: RegExp[] = [
   /^title$/i,
@@ -445,6 +463,7 @@ const SEARCHABLE_PATTERNS: RegExp[] = [
   /fuel_?type/i,
   /brand/i,
   /manufacturer/i,
+  ...IDENTIFIER_SEARCHABLE_PATTERNS,
 ];
 
 // Numeric DB types
@@ -507,11 +526,11 @@ export function suggestSearchableColumns(
   const suggestions: SearchableColumnSuggestion[] = [];
 
   for (const col of columns) {
-    if (col.isPrimaryKey) continue;
     if (!isTextColumn(col)) continue;
 
     const matchesPattern = SEARCHABLE_PATTERNS.some((p) => p.test(col.name));
-    if (matchesPattern) {
+    const isIdentifier = IDENTIFIER_SEARCHABLE_PATTERNS.some((p) => p.test(col.name));
+    if (matchesPattern && (!col.isPrimaryKey || isIdentifier)) {
       suggestions.push({ columnName: col.name, confidence: 'high' });
     }
   }

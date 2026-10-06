@@ -997,11 +997,11 @@ export async function runWizard(): Promise<void> {
   // Step 3b: Searchable Columns
   console.log('\nStep 3b: Search Configuration');
   const searchSuggestions = suggestSearchableColumns(selectedTable.columns);
+  const suggestedSearchNames = new Set(searchSuggestions.map((s) => s.columnName));
   const allTextColumns = selectedTable.columns
     .filter(isTextColumn)
-    .filter((c) => !c.isPrimaryKey)
+    .filter((column) => !column.isPrimaryKey || suggestedSearchNames.has(column.name))
     .map((c) => c.name);
-  const suggestedSearchNames = new Set(searchSuggestions.map((s) => s.columnName));
   const mappedTitleColumn = selectedTable.columns.find(
     (column) => isTextColumn(column) && quoteIfNeeded(column.name) === fieldMappings.title,
   )?.name;
@@ -1015,7 +1015,9 @@ export async function runWizard(): Promise<void> {
         value: name,
         checked:
           existingConfig?.resources.inventory.searchableColumns?.includes(quoteIfNeeded(name)) ??
-          (suggestedSearchNames.has(name) || name === mappedTitleColumn),
+          (suggestedSearchNames.has(name) ||
+            name === mappedTitleColumn ||
+            additionalAttributes.includes(name)),
       })),
     });
   }

@@ -647,10 +647,14 @@ describe('runWizard', () => {
     promptMocks.confirm.mockImplementation(({ message }) =>
       Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
     );
-    promptMocks.checkbox.mockImplementation(({ message }) => {
-      if (message.startsWith('Select additional')) return Promise.resolve([]);
+    promptMocks.checkbox.mockImplementation(({ message, choices }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve(['catalog_code']);
       if (message.startsWith('Which columns should be searchable')) {
-        return Promise.resolve(['headline', 'description']);
+        return Promise.resolve(
+          choices
+            .filter((choice: { checked: boolean }) => choice.checked)
+            .map((choice: { value: string }) => choice.value),
+        );
       }
       if (message.startsWith('Which filters should be available')) {
         return Promise.resolve(['minPrice', 'maxPrice', 'currency']);
@@ -668,6 +672,7 @@ describe('runWizard', () => {
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
               { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'catalog_code', type: 'text', nullable: false, isPrimaryKey: false },
               { name: 'headline', type: 'character', nullable: false, isPrimaryKey: false },
               { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
               { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
@@ -728,7 +733,9 @@ describe('runWizard', () => {
       );
       expect(config.resources.inventory.fields.price).toBe('"price"');
       expect(config.resources.inventory.schema).toBe('merchant_data');
-      expect(config.resources.inventory).not.toHaveProperty('attributes');
+      expect(config.resources.inventory.attributes).toMatchObject({
+        catalog_code: '"catalog_code"',
+      });
       // The bundled `docker compose up -d` the wizard recommends cannot resolve
       // without CONNECTOR_DOMAIN, and attributes every request to Caddy without
       // trustedProxies, so a fresh run has to emit both.
@@ -780,8 +787,21 @@ describe('runWizard', () => {
           message: 'Which columns should be searchable? (full-text search)',
           choices: expect.arrayContaining([
             expect.objectContaining({ name: 'headline', value: 'headline', checked: true }),
+            expect.objectContaining({ name: 'sku', value: 'sku', checked: true }),
+            expect.objectContaining({ name: 'catalog_code', value: 'catalog_code', checked: true }),
           ]),
         }),
+      );
+      expect(config.resources.inventory.searchableColumns).toContain('"sku"');
+      expect(buildQuery({ search: 'sonata-2024' }, config.resources.inventory).conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ column: '"sku"', operator: 'ILIKE', value: 'sonata-2024' }),
+          expect.objectContaining({
+            column: '"catalog_code"',
+            operator: 'ILIKE',
+            value: 'sonata-2024',
+          }),
+        ]),
       );
       expect(buildQuery({ sortBy: 'price' }, config.resources.inventory).sort.column).toBe(
         config.resources.inventory.fields.price,
