@@ -332,8 +332,9 @@ describe('derivePublishedRelationName', () => {
 });
 
 describe('toConfigLiteral', () => {
-  it('produces the connector config literal form', () => {
+  it('produces the connector config literal form and escapes apostrophes', () => {
     expect(toConfigLiteral('SAR')).toBe("'SAR'");
+    expect(toConfigLiteral("Men's")).toBe("'Men''s'");
   });
 });
 
@@ -1119,7 +1120,7 @@ describe('runWizard', () => {
   it('writes an images filter from a detected type column and publishes a flatten relation under its semantic name, not the internal map key (#27231)', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
-    const distinctImageTypes = ['featured', 'gallery', 'icon', 'invoice', 'thumbnail'];
+    const distinctImageTypes = ["Men's", 'featured', 'gallery', 'icon', 'invoice', 'thumbnail'];
     const db = Object.assign(vi.fn(), {
       destroy: vi.fn().mockResolvedValue(undefined),
       withSchema: vi.fn(() => ({
@@ -1169,7 +1170,7 @@ describe('runWizard', () => {
       if (message.startsWith('Select columns from Image')) return Promise.resolve(['url']);
       if (message.startsWith('Select columns from CarFeatures')) return Promise.resolve(['name']);
       if (message.startsWith('Which "type" values on Image')) {
-        return Promise.resolve(['gallery', 'featured']);
+        return Promise.resolve(['gallery', 'featured', "Men's"]);
       }
       return Promise.resolve([]);
     });
@@ -1253,7 +1254,7 @@ describe('runWizard', () => {
       expect(relations['Image__carId']).toMatchObject({
         table: 'Image',
         imageUrlField: 'url',
-        filter: `"type" = 'gallery' OR "type" = 'featured'`,
+        filter: `"type" = 'gallery' OR "type" = 'featured' OR "type" = 'Men''s'`,
       });
 
       // The features relation's map key is still the disambiguated internal

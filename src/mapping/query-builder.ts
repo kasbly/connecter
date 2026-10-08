@@ -43,6 +43,7 @@ export function getSearchableColumns(config: InventoryResourceConfig): string[] 
     }
 
     const relationSchema = relation.schema ?? config.schema ?? 'public';
+    const inventorySchema = config.schema ?? 'public';
     if (
       !/^[A-Za-z_][A-Za-z0-9_]*$/.test(relationSchema) ||
       !/^[A-Za-z_][A-Za-z0-9_]*$/.test(relation.table)
@@ -56,7 +57,7 @@ export function getSearchableColumns(config: InventoryResourceConfig): string[] 
     columns.push(
       `COALESCE((SELECT string_agg(${RELATION_SEARCH_ALIAS}.${flattenedColumn}::text, ' ') ` +
         `FROM ${quoteIdentifier(relationSchema)}.${quoteIdentifier(relation.table)} AS ${RELATION_SEARCH_ALIAS} ` +
-        `WHERE ${RELATION_SEARCH_ALIAS}.${relation.foreignKey} = ${relation.referenceKey}${relationFilter}), '')`,
+        `WHERE ${RELATION_SEARCH_ALIAS}.${relation.foreignKey} = ${quoteIdentifier(inventorySchema)}.${quoteIdentifier(config.table)}.${relation.referenceKey}${relationFilter}), '')`,
     );
   }
 

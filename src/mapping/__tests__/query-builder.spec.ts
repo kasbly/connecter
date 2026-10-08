@@ -111,7 +111,9 @@ describe('buildQuery', () => {
             table: 'CarFeature',
             foreignKey: 'carId',
             referenceKey: 'id',
-            fields: { name: 'name' },
+            // Wizard-created child tables have their own id; the correlated
+            // reference must therefore remain bound to the outer Car table.
+            fields: { id: 'id', name: 'name' },
             flatten: 'name',
           },
         },
@@ -120,7 +122,7 @@ describe('buildQuery', () => {
 
     expect(result.conditions).toContainEqual({
       column:
-        'COALESCE((SELECT string_agg(__kasbly_search_relation.name::text, \' \') FROM "catalog"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = id), \'\')',
+        'COALESCE((SELECT string_agg(__kasbly_search_relation.name::text, \' \') FROM "catalog"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = "public"."Car".id), \'\')',
       operator: 'ILIKE',
       value: 'leather',
       _group: 'leather',

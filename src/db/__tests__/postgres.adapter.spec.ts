@@ -138,6 +138,24 @@ describe('PostgresAdapter relation probes', () => {
     );
   });
 
+  it('preserves an escaped SQL string literal in a relation filter', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.queryRelation({
+      table: 'images',
+      foreignKey: 'inventory_id',
+      parentIds: [],
+      fields: { url: 'url' },
+      filter: `"type" = 'Men''s'`,
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      `SELECT url as "url", inventory_id as "__fk" FROM "public"."images" WHERE FALSE AND ("type" = 'Men''s')`,
+    );
+  });
+
   // #28097: a jsonb key-exists `?` operator in a relation `filter` hits the
   // same knex positional-binding desync as a baseFilter `?` — escape it here
   // too, even on the zero-parentIds probe branch (which passes no bindings
@@ -896,7 +914,9 @@ describe('PostgresAdapter list count (#17420)', () => {
             table: 'CarFeature',
             foreignKey: 'carId',
             referenceKey: 'id',
-            fields: { name: 'name' },
+            // A child id must not shadow the parent reference key in the
+            // correlated search subquery.
+            fields: { id: 'id', name: 'name' },
             flatten: 'name',
           },
         },
@@ -905,7 +925,7 @@ describe('PostgresAdapter list count (#17420)', () => {
 
     const { countQuery, dataQuery } = await runListQuery({ count: 1, conditions });
     const featureSearch =
-      "COALESCE((SELECT string_agg(__kasbly_search_relation.name::text, ' ') FROM \"public\".\"CarFeature\" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = id), '') ILIKE ? ESCAPE '\\'";
+      'COALESCE((SELECT string_agg(__kasbly_search_relation.name::text, \' \') FROM "public"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = "public"."Car".id), \'\') ILIKE ? ESCAPE \'\\\'';
 
     expect(dataQuery.sql).toContain(featureSearch);
     expect(countQuery.sql).toContain(featureSearch);

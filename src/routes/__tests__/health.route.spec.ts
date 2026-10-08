@@ -975,6 +975,69 @@ describe('health route', () => {
     await app.close();
   });
 
+  it('reports a statement-timeout relation probe failure as "transient" (#31280)', async () => {
+    const app = Fastify();
+    const timeoutError = Object.assign(new Error('canceling statement due to statement timeout'), {
+      code: '57014',
+    });
+    const dbAdapter: DatabaseAdapter = {
+      healthCheck: vi.fn().mockResolvedValue(true),
+      query: vi.fn().mockResolvedValue({
+        rows: [{ id: '1', title: 'Test', price: 100 }],
+        total: 1,
+      }),
+      queryRelation: vi.fn().mockRejectedValue(timeoutError),
+    } as unknown as DatabaseAdapter;
+    const resource = {
+      ...inventoryResource,
+      relations: {
+        images: {
+          table: 'images',
+          foreignKey: 'inventory_id',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+        },
+      },
+    };
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, resource));
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      resources: 'transient',
+      resourceError: expect.stringContaining('Inventory relation "images" probe failed'),
+    });
+    await app.close();
+  });
+
+  it('reports a statement-timeout second-page probe failure as "transient" (#31280)', async () => {
+    const app = Fastify();
+    const timeoutError = Object.assign(new Error('canceling statement due to statement timeout'), {
+      code: '57014',
+    });
+    const dbAdapter: DatabaseAdapter = {
+      healthCheck: vi.fn().mockResolvedValue(true),
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [{ id: '1', title: 'Test', price: 'not-a-number' }],
+          total: 2,
+        })
+        .mockRejectedValueOnce(timeoutError),
+    } as unknown as DatabaseAdapter;
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      resources: 'transient',
+      resourceError: expect.stringContaining('statement timeout'),
+    });
+    await app.close();
+  });
+
   it('reports a dropped-connection probe failure as "transient" too (#28391)', async () => {
     const app = Fastify();
     const resetError = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });

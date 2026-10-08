@@ -253,6 +253,18 @@ export async function probeInventoryResource(
           selectColumns,
         );
 
+  const wrapProbeError = (error: unknown, message: string) => {
+    const wrapped = new Error(message);
+    // Keep a transient database failure distinguishable from a genuine mapping
+    // error after adding probe context to its message (#28391, #31280).
+    const code =
+      typeof error === 'object' && error !== null ? Reflect.get(error, 'code') : undefined;
+    if (typeof code === 'string') {
+      Object.assign(wrapped, { code });
+    }
+    return wrapped;
+  };
+
   try {
     ({ rows } = await runProbeQuery([], DEFAULT_PAGE_SIZE));
     // Selecting a searchable or filter column only proves it exists. Real
@@ -277,20 +289,11 @@ export async function probeInventoryResource(
       });
     }
   } catch (error) {
-    const wrapped = new Error(
+    throw wrapProbeError(
+      error,
       `Inventory resource probe failed for table "${resourceConfig.table}" ` +
         `(columns: ${selectColumns.join(', ')}): ${errorMessage(error)}`,
     );
-    // Preserve the driver's SQLSTATE/error code on the wrapped error so
-    // `createResourceHealthCheck` can still tell a one-off statement timeout
-    // or dropped connection apart from a genuine mapping error, even though
-    // the message itself is rebuilt here to add table/column context (#28391).
-    const code =
-      typeof error === 'object' && error !== null ? Reflect.get(error, 'code') : undefined;
-    if (typeof code === 'string') {
-      Object.assign(wrapped, { code });
-    }
-    throw wrapped;
   }
 
   // Loads relation rows keyed by relationName -> parent reference value for a
@@ -318,7 +321,8 @@ export async function probeInventoryResource(
           });
           return [relationName, relationRows] as const;
         } catch (error) {
-          throw new Error(
+          throw wrapProbeError(
+            error,
             `Inventory relation "${relationName}" probe failed for table ` +
               `"${relationConfig.table}": ${errorMessage(error)}`,
           );
@@ -390,7 +394,16 @@ export async function probeInventoryResource(
       // resolves every page-2 relation lookup to nothing, so a broken
       // relation-sourced image value silently passes and the probe fails
       // open exactly where this second sample exists to catch it.
-      const { rows: nextRows } = await runProbeQuery([], DEFAULT_PAGE_SIZE, 2);
+      let nextRows: Record<string, unknown>[];
+      try {
+        ({ rows: nextRows } = await runProbeQuery([], DEFAULT_PAGE_SIZE, 2));
+      } catch (error) {
+        throw wrapProbeError(
+          error,
+          `Inventory resource probe failed for table "${resourceConfig.table}" ` +
+            `(columns: ${selectColumns.join(', ')}): ${errorMessage(error)}`,
+        );
+      }
       const nextViolations =
         nextRows.length > 0 ? evaluateRows(nextRows, await loadRelationData(nextRows)) : [];
 
