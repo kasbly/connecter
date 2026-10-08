@@ -469,6 +469,15 @@ npm run build
 Restart however you run the process (`npm start`, your process manager, etc.) after the build
 completes.
 
+**Mapping-default fixes need `npm run setup`.** Some behavior fixes change what the setup wizard
+suggests rather than what the code does at runtime — for example searching by SKU/barcode/VIN, or
+hiding sold-out items with an in-stock filter. The runtime only reads `searchableColumns` and
+`baseFilter` from your git-ignored `connector.config.yml`, so `git pull` never rewrites them. To
+pick the new defaults up, re-run `npm run setup` (it starts from your existing answers, pre-checks
+newly suggested identifier search columns, and defaults a newly detected in-stock filter to Yes),
+then rebuild/restart as above. `npm run validate` only probes the existing mapping; it does not
+change it.
+
 **After either path**, re-run `npm run validate` to confirm your configuration and inventory
 mapping still hold against the updated code before pointing traffic at it:
 

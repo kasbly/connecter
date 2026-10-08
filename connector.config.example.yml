@@ -94,6 +94,7 @@ resources:
       maxYear: { column: 'year', type: 'lte' }
       make: { column: '"makeEn"', type: 'string' }
       model: { column: '"modelEn"', type: 'string' }
+      category: { column: "'car'", type: 'string' }
       fuelType: { column: '"fuelType"', type: 'string' }
       transmission: { column: 'transmission', type: 'string' }
       color: { column: 'color', type: 'string' }

@@ -2264,6 +2264,153 @@ describe('runWizard', () => {
     }
   });
 
+  it('pre-checks SKU search and defaults in-stock to Yes when the existing YAML predates them (#31602)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+
+    vi.clearAllMocks();
+    // A config written before the wizard suggested identifier search or an
+    // in-stock filter: no sku in searchableColumns, no qty predicate.
+    writeFileSync(
+      join(directory, 'connector.config.yml'),
+      [
+        'version: 1',
+        'auth:',
+        '  apiKeys:',
+        '    - key: key',
+        '      label: test',
+        'database:',
+        '  type: postgres',
+        '  host: database.example.com',
+        '  port: 5432',
+        '  database: catalog',
+        '  user: reader',
+        '  password: secret',
+        '  ssl: false',
+        'resources:',
+        '  inventory:',
+        '    table: products',
+        '    idColumn: id',
+        '    fields:',
+        '      title: title',
+        '      price: price',
+        '      currency: currency',
+        '    searchableColumns:',
+        '      - \'"title"\'',
+        '    baseFilter: \'"published" = true AND "deletedAt" IS NULL\'',
+        '',
+      ].join('\n'),
+    );
+
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
+    for (const answer of [
+      'title',
+      'price',
+      'currency',
+      '\0unmapped',
+      '\0unmapped',
+      'description',
+      '\0unmapped',
+    ]) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+    for (const answer of [
+      'database.example.com',
+      '5432',
+      'catalog',
+      'reader',
+      'public',
+      'connector.merchant.example',
+    ]) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    // Accept every prompt's default, as an operator pressing Enter would.
+    promptMocks.confirm.mockImplementation(({ message, default: answer }) =>
+      Promise.resolve(message.startsWith('Existing connector configuration') || (answer ?? false)),
+    );
+    promptMocks.checkbox.mockImplementation(({ message, choices }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve([]);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(
+          choices
+            .filter((choice: { checked: boolean }) => choice.checked)
+            .map((choice: { value: string }) => choice.value),
+        );
+      }
+      if (message.startsWith('Which filters should be available')) {
+        return Promise.resolve(['minPrice', 'maxPrice', 'currency']);
+      }
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 100,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'published', type: 'boolean', nullable: false, isPrimaryKey: false },
+              { name: 'qty', type: 'integer', nullable: false, isPrimaryKey: false },
+              { name: 'deletedAt', type: 'timestamp', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      expect(promptMocks.checkbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Which columns should be searchable? (full-text search)',
+          choices: expect.arrayContaining([
+            expect.objectContaining({ value: 'sku', checked: true }),
+            expect.objectContaining({ value: 'title', checked: true }),
+            expect.objectContaining({ value: 'description', checked: false }),
+          ]),
+        }),
+      );
+      expect(promptMocks.confirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Only expose in-stock items? (detected column: qty)',
+          default: true,
+        }),
+      );
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(config.resources.inventory.searchableColumns).toContain('"sku"');
+      expect(config.resources.inventory.baseFilter).toContain('"qty" > 0');
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('suggests a listing-URL column as an attribute mapping, wiring it onto attributes.url for resolvePublicListingUrl (#25311)', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();

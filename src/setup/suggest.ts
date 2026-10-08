@@ -447,6 +447,42 @@ const IDENTIFIER_SEARCHABLE_PATTERNS: RegExp[] = [
   /^upc$/i,
 ];
 
+/**
+ * Default for a searchable-column checkbox on a wizard rerun. A column already in the
+ * existing `searchableColumns` stays checked. An identifier column (sku, barcode, vin,
+ * ...) missing from an older file was never asked about, so it is pre-checked rather
+ * than treated as an explicit uncheck. Any other column missing from the file keeps the
+ * operator's earlier choice (unchecked). With no existing list, `freshDefault` applies.
+ * `quotedName` is the column as it appears in the config (`"sku"`).
+ */
+export function getSearchableColumnDefault(
+  columnName: string,
+  quotedName: string,
+  existingSearchableColumns: string[] | undefined,
+  freshDefault: boolean,
+): boolean {
+  if (!existingSearchableColumns) return freshDefault;
+  if (existingSearchableColumns.includes(quotedName)) return true;
+  return IDENTIFIER_SEARCHABLE_PATTERNS.some((p) => p.test(columnName));
+}
+
+/**
+ * Default for the "only expose in-stock items" confirm. Yes when the existing
+ * `baseFilter` already has the stock predicate, or has no predicate on the stock column
+ * at all (a file written before the wizard detected it). No only when the operator
+ * filtered that column some other way. `quotedColumn` is the column as written in the
+ * config.
+ */
+export function getInStockFilterDefault(
+  existingBaseFilter: string | undefined,
+  quotedColumn: string,
+  stockFilterExpression: string,
+): boolean {
+  if (existingBaseFilter === undefined) return true;
+  if (existingBaseFilter.includes(stockFilterExpression)) return true;
+  return !existingBaseFilter.includes(quotedColumn);
+}
+
 // Columns likely useful for text search
 const SEARCHABLE_PATTERNS: RegExp[] = [
   /^title$/i,
@@ -457,6 +493,11 @@ const SEARCHABLE_PATTERNS: RegExp[] = [
   /^desc$/i,
   /^details$/i,
   /^body$/i,
+  // The category field the wizard maps by default (see FIELD_PATTERNS): a
+  // customer asking for "laptops" must reach rows whose category is 'Laptops'.
+  /^category$/i,
+  /^type$/i,
+  /^product_?type$/i,
   /make/i,
   /model/i,
   /color/i,

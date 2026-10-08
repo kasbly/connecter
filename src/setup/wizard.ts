@@ -30,6 +30,8 @@ import {
   suggestJoinColumn,
   classifyRelationType,
   isTextColumn,
+  getInStockFilterDefault,
+  getSearchableColumnDefault,
   isAttributeEligibleColumn,
   isListingUrlColumn,
   type FilterableColumnSuggestion,
@@ -1006,6 +1008,10 @@ export async function runWizard(): Promise<void> {
     (column) => isTextColumn(column) && quoteIfNeeded(column.name) === fieldMappings.title,
   )?.name;
 
+  const mappedCategoryColumn = selectedTable.columns.find(
+    (column) => isTextColumn(column) && quoteIfNeeded(column.name) === fieldMappings.category,
+  )?.name;
+
   let searchableColumns: string[] = [];
   if (allTextColumns.length > 0) {
     searchableColumns = await checkbox({
@@ -1013,11 +1019,15 @@ export async function runWizard(): Promise<void> {
       choices: allTextColumns.map((name) => ({
         name,
         value: name,
-        checked:
-          existingConfig?.resources.inventory.searchableColumns?.includes(quoteIfNeeded(name)) ??
-          (suggestedSearchNames.has(name) ||
+        checked: getSearchableColumnDefault(
+          name,
+          quoteIfNeeded(name),
+          existingConfig?.resources.inventory.searchableColumns,
+          suggestedSearchNames.has(name) ||
             name === mappedTitleColumn ||
-            additionalAttributes.includes(name)),
+            name === mappedCategoryColumn ||
+            additionalAttributes.includes(name),
+        ),
       })),
     });
   }
@@ -1091,8 +1101,11 @@ export async function runWizard(): Promise<void> {
     );
     const exposeInStock = await confirm({
       message: `Only expose in-stock items? (detected column: ${inStockFilter.column})`,
-      default:
-        existingConfig?.resources.inventory.baseFilter?.includes(stockFilterExpression) ?? true,
+      default: getInStockFilterDefault(
+        existingConfig?.resources.inventory.baseFilter,
+        quoteIfNeeded(inStockFilter.column),
+        stockFilterExpression,
+      ),
     });
     if (exposeInStock) {
       baseFilterParts.push(stockFilterExpression);

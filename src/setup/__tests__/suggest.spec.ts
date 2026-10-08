@@ -8,6 +8,8 @@ import {
   suggestSoftDeleteColumn,
   suggestRelations,
   suggestSearchableColumns,
+  getSearchableColumnDefault,
+  getInStockFilterDefault,
   suggestFilterableColumns,
   isAttributeEligibleColumn,
   isTextColumn,
@@ -283,6 +285,37 @@ describe('suggestInStockFilter', () => {
 
   it('skips stock-shaped columns with unsupported types', () => {
     expect(suggestInStockFilter([col('stock', 'text')])).toBeNull();
+  });
+});
+
+describe('getSearchableColumnDefault', () => {
+  it('pre-checks identifier columns an older file never listed, but keeps other unchecked choices', () => {
+    for (const name of ['sku', 'barcode', 'vin', 'ean', 'upc']) {
+      expect(getSearchableColumnDefault(name, `"${name}"`, ['"title"'], false)).toBe(true);
+    }
+    expect(getSearchableColumnDefault('notes', '"notes"', ['"title"'], true)).toBe(false);
+    expect(getSearchableColumnDefault('title', '"title"', ['"title"'], false)).toBe(true);
+  });
+
+  it('uses the fresh suggestion when there is no existing list', () => {
+    expect(getSearchableColumnDefault('notes', '"notes"', undefined, true)).toBe(true);
+    expect(getSearchableColumnDefault('notes', '"notes"', undefined, false)).toBe(false);
+  });
+});
+
+describe('getInStockFilterDefault', () => {
+  it('defaults to Yes when the existing filter has no stock predicate', () => {
+    expect(getInStockFilterDefault(undefined, '"qty"', '"qty" > 0')).toBe(true);
+    expect(
+      getInStockFilterDefault('"published" = true AND "deletedAt" IS NULL', '"qty"', '"qty" > 0'),
+    ).toBe(true);
+  });
+
+  it('stays Yes when the stock predicate is already there and No when the operator filtered the column differently', () => {
+    expect(getInStockFilterDefault('"qty" > 0 AND "deletedAt" IS NULL', '"qty"', '"qty" > 0')).toBe(
+      true,
+    );
+    expect(getInStockFilterDefault('"qty" >= 5', '"qty"', '"qty" > 0')).toBe(false);
   });
 });
 
@@ -604,6 +637,14 @@ describe('suggestSearchableColumns', () => {
     expect(names).not.toContain('year');
     expect(names).not.toContain('id');
   });
+
+  it.each(['category', 'product_type', 'productType', 'type'])(
+    'suggests a %s column so free-text search reaches the category (#31603)',
+    (name) => {
+      const columns = [col('id', 'integer', true), col('title', 'text'), col(name, 'text')];
+      expect(suggestSearchableColumns(columns).map((s) => s.columnName)).toEqual(['title', name]);
+    },
+  );
 
   it('returns empty for table with no text columns', () => {
     const columns = [col('id', 'integer', true), col('price', 'numeric'), col('year', 'integer')];
