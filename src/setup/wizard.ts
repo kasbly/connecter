@@ -44,6 +44,7 @@ import {
   formatUnservableImageWarning,
   formatUnservableListingUrlWarning,
   formatWireContractViolationWarning,
+  isTransientProbeError,
   probeInventoryResource,
 } from '../routes/health.route.js';
 import { buildOrderByClause } from '../db/postgres.adapter.js';
@@ -458,7 +459,7 @@ async function collectConfiguredRelation(options: {
   existingRelationName: string | undefined;
   db: Awaited<ReturnType<typeof introspectDatabase>>['db'];
   usedPublishedNames: Set<string>;
-}): Promise<{ name: string; relation: RelationConfig }> {
+}): Promise<{ name: string; relation: RelationConfig } | undefined> {
   const {
     suggestion,
     relTable,
@@ -502,6 +503,13 @@ async function collectConfiguredRelation(options: {
             (col) => /name/i.test(col.name) || /value/i.test(col.name) || /label/i.test(col.name),
           )
         : undefined;
+  if (selectableColumns.length === 0) {
+    console.log(
+      `\nNote: ${suggestion.table} has no eligible columns to expose. ` +
+        'A blob/binary column cannot become images[] or a relation attribute.',
+    );
+    return undefined;
+  }
   const selectedColumns = await checkbox({
     message: `Select columns from ${suggestion.table} to expose:`,
     choices: selectableColumns.map((col) => ({
@@ -623,6 +631,30 @@ async function collectConfiguredRelation(options: {
   return { name: relationName, relation };
 }
 
+function printInventorySortIndexHint(
+  schema: string,
+  table: string,
+  idColumn: string,
+  updatedAtColumn: string | undefined,
+): void {
+  // GET /inventory and its /health sample sort `<sortColumn> DESC NULLS LAST, <idColumn> DESC`.
+  // Only this composite index can serve that order; the read-only connector cannot create it,
+  // so print the statement for the operator to run by hand.
+  const sortIndexColumn = updatedAtColumn ?? idColumn;
+  const sortIndexClause =
+    sortIndexColumn === idColumn
+      ? `${quoteIfNeeded(sortIndexColumn)} DESC NULLS LAST`
+      : `${quoteIfNeeded(sortIndexColumn)} DESC NULLS LAST, ${quoteIfNeeded(idColumn)} DESC`;
+  console.log(
+    '   Create this index so GET /inventory can use it (the connector is read-only and ' +
+      'cannot create it itself); without it, every inventory page sorts the whole table:',
+  );
+  console.log(
+    `   CREATE INDEX CONCURRENTLY kasbly_connector_sort_idx ON ` +
+      `${quoteIfNeeded(schema)}.${quoteIfNeeded(table)} (${sortIndexClause});`,
+  );
+  console.log('');
+}
 export async function runWizard(): Promise<void> {
   console.log('\n🔧 Kasbly Connector Setup\n');
 
@@ -1175,7 +1207,7 @@ export async function runWizard(): Promise<void> {
         db,
         usedPublishedNames,
       });
-      relations[configured.name] = configured.relation;
+      if (configured) relations[configured.name] = configured.relation;
     }
   }
 
@@ -1262,7 +1294,7 @@ export async function runWizard(): Promise<void> {
       db,
       usedPublishedNames,
     });
-    relations[configured.name] = configured.relation;
+    if (configured) relations[configured.name] = configured.relation;
   }
 
   // A blob/bytea column can never become images[] (#28247) — if the operator
@@ -1583,13 +1615,23 @@ export async function runWizard(): Promise<void> {
     const listingUrlWarning = formatUnservableListingUrlWarning(unservableListingUrlIds);
     if (listingUrlWarning) console.warn(`Warning: ${listingUrlWarning}`);
   } catch (error) {
-    console.error(
-      `Cannot save configuration: inventory sample violates the wire contract: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+    const message = error instanceof Error ? error.message : String(error);
+    const isWireContractFailure = message.startsWith(
+      'Inventory resource probe failed for sample row:',
     );
+    console.error(
+      `Cannot save configuration: ${
+        isWireContractFailure
+          ? 'inventory sample violates the wire contract'
+          : 'inventory probe failed'
+      }: ${message}`,
+    );
+    // The contextual error preserves its transient database code, so show the sort-index remedy before exit.
+    if (isTransientProbeError(error)) {
+      printInventorySortIndexHint(selectedSchema, selectedTableName, idColumn, updatedAtColumn);
+    }
     await db.destroy();
-    return;
+    throw error;
   } finally {
     await validationAdapter.disconnect();
   }
@@ -1726,25 +1768,7 @@ export async function runWizard(): Promise<void> {
         'works — see Step 3a above) or set a listing URL template on this source in Kasbly.',
     );
   }
-  // GET /inventory (and the /health sample it shares) always sorts `<sortColumn> DESC
-  // NULLS LAST, <idColumn> DESC` (postgres.adapter.ts's buildOrderByClause) — Postgres'
-  // default DESC sort is NULLS FIRST, so only this exact composite index can serve that
-  // order. A plain btree(sortColumn) index cannot. The connector runs read-only and can
-  // never create it itself, so print the statement for the operator to run by hand.
-  const sortIndexColumn = updatedAtColumn ?? idColumn;
-  const sortIndexClause =
-    sortIndexColumn === idColumn
-      ? `${quoteIfNeeded(sortIndexColumn)} DESC NULLS LAST`
-      : `${quoteIfNeeded(sortIndexColumn)} DESC NULLS LAST, ${quoteIfNeeded(idColumn)} DESC`;
-  console.log(
-    '   Create this index so GET /inventory can use it (the connector is read-only and ' +
-      'cannot create it itself); without it, every inventory page sorts the whole table:',
-  );
-  console.log(
-    `   CREATE INDEX CONCURRENTLY kasbly_connector_sort_idx ON ` +
-      `${quoteIfNeeded(selectedSchema)}.${quoteIfNeeded(selectedTableName)} (${sortIndexClause});`,
-  );
-  console.log('');
+  printInventorySortIndexHint(selectedSchema, selectedTableName, idColumn, updatedAtColumn);
 
   await db.destroy();
 }

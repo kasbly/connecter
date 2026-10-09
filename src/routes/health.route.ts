@@ -104,10 +104,29 @@ const TRANSIENT_PROBE_ERROR_CODES = new Set([
   'EPIPE',
 ]);
 
-function isTransientProbeError(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) return false;
-  const code = Reflect.get(error, 'code');
-  return typeof code === 'string' && TRANSIENT_PROBE_ERROR_CODES.has(code);
+export function isTransientProbeError(error: unknown): boolean {
+  const visited = new Set<object>();
+  let candidate = error;
+
+  while (typeof candidate === 'object' && candidate !== null && !visited.has(candidate)) {
+    visited.add(candidate);
+    const code = Reflect.get(candidate, 'code');
+    const name = Reflect.get(candidate, 'name');
+    const message = Reflect.get(candidate, 'message');
+
+    if (
+      (typeof code === 'string' && TRANSIENT_PROBE_ERROR_CODES.has(code)) ||
+      name === 'KnexTimeoutError' ||
+      name === 'TimeoutError' ||
+      (typeof message === 'string' && /connection terminated/i.test(message))
+    ) {
+      return true;
+    }
+
+    candidate = Reflect.get(candidate, 'cause');
+  }
+
+  return false;
 }
 
 /** Most distinct source status values one probe reports (#23293). */
@@ -254,13 +273,18 @@ export async function probeInventoryResource(
         );
 
   const wrapProbeError = (error: unknown, message: string) => {
-    const wrapped = new Error(message);
+    const wrapped = new Error(message, { cause: error });
     // Keep a transient database failure distinguishable from a genuine mapping
     // error after adding probe context to its message (#28391, #31280).
     const code =
       typeof error === 'object' && error !== null ? Reflect.get(error, 'code') : undefined;
+    const name =
+      typeof error === 'object' && error !== null ? Reflect.get(error, 'name') : undefined;
     if (typeof code === 'string') {
       Object.assign(wrapped, { code });
+    }
+    if (typeof name === 'string') {
+      Object.assign(wrapped, { name });
     }
     return wrapped;
   };

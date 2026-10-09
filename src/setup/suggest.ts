@@ -300,8 +300,12 @@ function looksLikeJoinColumn(name: string): boolean {
 
 /** Classify a child table the same way FK-discovered relations are typed. */
 export function classifyRelationType(table: IntrospectedTable): RelationSuggestion['relationType'] {
-  const hasImageColumns = table.columns.some((col) =>
-    IMAGE_COLUMN_PATTERNS.some((p) => p.test(col.name)),
+  const hasImageColumns = table.columns.some(
+    (col) =>
+      // A binary column called `image` or `photo` is not an images[] source.
+      // Keep this in sync with the relation picker so a bytea/geometry column
+      // cannot turn a low-confidence relation into an auto-accepted image one.
+      isAttributeEligibleColumn(col) && IMAGE_COLUMN_PATTERNS.some((p) => p.test(col.name)),
   );
   if (hasImageColumns) return 'images';
   if (table.columns.length <= 5) return 'features';

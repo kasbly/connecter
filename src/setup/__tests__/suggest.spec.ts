@@ -743,6 +743,19 @@ describe('isAttributeEligibleColumn', () => {
   });
 });
 
+describe('classifyRelationType', () => {
+  it('does not classify a binary image-named column as an images relation', () => {
+    expect(
+      classifyRelationType({
+        name: 'images',
+        kind: 'table',
+        rowCount: 1,
+        columns: [col('id', 'uuid', true), col('car_id', 'uuid'), col('image', 'bytea')],
+      }),
+    ).not.toBe('images');
+  });
+});
+
 describe('suggestFilterableColumns', () => {
   it('suggests price as gte/lte pair', () => {
     const columns = [col('id', 'integer', true), col('price', 'numeric')];

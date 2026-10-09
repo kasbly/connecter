@@ -1057,6 +1057,27 @@ describe('health route', () => {
     await app.close();
   });
 
+  it.each([
+    new Error('Connection terminated unexpectedly'),
+    Object.assign(new Error('pool exhausted'), { name: 'KnexTimeoutError' }),
+  ])('reports uncoded transient probe failures as "transient" (#31857)', async (probeError) => {
+    const app = Fastify();
+    const dbAdapter: DatabaseAdapter = {
+      healthCheck: vi.fn().mockResolvedValue(true),
+      query: vi.fn().mockRejectedValue(probeError),
+    } as unknown as DatabaseAdapter;
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, inventoryResource));
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      database: 'connected',
+      resources: 'transient',
+    });
+    await app.close();
+  });
+
   // #28989: the public mirror (`kasbly/connecter`) never bumped
   // `package.json`'s version through 56 syncs, so `/health.version` reported
   // "1.0.0" no matter how many real fixes shipped. `sync-connector.yml` now

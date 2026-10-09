@@ -76,6 +76,73 @@ vi.mock('../../routes/health.route.js', async (importOriginal) => {
   };
 });
 
+function mockWizardProbeFailureSetup() {
+  const db = Object.assign(vi.fn(), {
+    destroy: vi.fn().mockResolvedValue(undefined),
+    withSchema: vi.fn(() => ({
+      table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+    })),
+  });
+  vi.clearAllMocks();
+  promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+  promptMocks.select.mockImplementationOnce(() => Promise.resolve('available_products'));
+  promptMocks.select.mockImplementationOnce(() => Promise.resolve('sku'));
+  promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
+  for (const answer of [
+    'title',
+    'price',
+    'currency',
+    '\0unmapped',
+    '\0unmapped',
+    '\0unmapped',
+    '\0unmapped',
+  ]) {
+    promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+  }
+  promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
+  promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+  for (const answer of [
+    'database.example.com',
+    '5432',
+    'catalog',
+    'reader',
+    'merchant_data',
+    'connector.merchant.example',
+  ]) {
+    promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+  }
+  promptMocks.password.mockResolvedValueOnce('p@ss#word');
+  promptMocks.confirm.mockImplementation(({ message }) =>
+    Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+  );
+  promptMocks.checkbox.mockImplementation(({ message }) => {
+    if (message.startsWith('Select additional')) return Promise.resolve([]);
+    if (message.startsWith('Which columns should be searchable')) return Promise.resolve(['title']);
+    return Promise.resolve([]);
+  });
+  vi.mocked(introspectDatabase).mockResolvedValueOnce({
+    db: db as never,
+    result: {
+      tables: [
+        {
+          name: 'available_products',
+          kind: 'view',
+          rowCount: 40,
+          columns: [
+            { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
+            { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+            { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+            { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+          ],
+        },
+      ],
+      foreignKeys: [],
+    },
+    retriedWithTls: false,
+  });
+  return db;
+}
+
 describe('getStatusValueDefault', () => {
   it('keeps an existing mapping, then matches by name, and never defaults to ACTIVE', () => {
     expect(getStatusValueDefault('sold', { SOLD: ['sold'] })).toBe('SOLD');
@@ -1536,9 +1603,7 @@ describe('runWizard', () => {
     }
   });
 
-  // #28393 leftover of #28247: the row-attribute picker already hid bytea,
-  // but the sibling relation-column picker still offered it. A generic
-  // relation then ships the whole row into attributes as Buffer JSON.
+  // #28393: the relation-column picker must not offer bytea as a generic attribute.
   it('hides a bytea child column from the relation-column picker for a features/generic relation', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
@@ -1649,6 +1714,100 @@ describe('runWizard', () => {
         config.resources.inventory.relations?.['ProductDocuments__product_id']?.fields,
       ).toEqual({ label: '"label"' });
     } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  it('skips a blob-only child relation instead of opening an empty checkbox', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.clearAllMocks();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('cars');
+      if (message.startsWith('Which column is the unique listing id')) return Promise.resolve('id');
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+      if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
+        return Promise.resolve(fieldMatch[1]);
+      }
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('merchant_data');
+      if (message.startsWith('Public DNS name'))
+        return Promise.resolve('connector.merchant.example');
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(message.startsWith('Which columns should be searchable') ? ['title'] : []),
+    );
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'cars',
+            kind: 'table',
+            rowCount: 40,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ],
+          },
+          {
+            name: 'images',
+            kind: 'table',
+            rowCount: 80,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'car_id', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'image', type: 'bytea', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [
+          {
+            constraintName: 'images_car_id_fkey',
+            fromTable: 'images',
+            fromColumn: 'car_id',
+            toTable: 'cars',
+            toColumn: 'id',
+          },
+        ],
+      },
+      retriedWithTls: false,
+    });
+    try {
+      process.chdir(directory);
+      await runWizard();
+      expect(promptMocks.checkbox).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Select columns from images to expose:' }),
+      );
+      expect(consoleLog).toHaveBeenCalledWith(expect.stringContaining('no eligible columns'));
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(config.resources.inventory.relations).toBeUndefined();
+    } finally {
+      consoleLog.mockRestore();
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
     }
@@ -3230,91 +3389,73 @@ describe('runWizard', () => {
     }
   });
 
-  it('does not print or persist an API key when the mapping probe rejects', async () => {
+  it('reports a systematic sample-row contract failure and exits unsuccessfully', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
-    const db = Object.assign(vi.fn(), {
-      destroy: vi.fn().mockResolvedValue(undefined),
-      withSchema: vi.fn(() => ({
-        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
-      })),
-    });
-    vi.clearAllMocks();
+    const db = mockWizardProbeFailureSetup();
     resourceProbeMocks.probeInventoryResource.mockRejectedValueOnce(
-      new Error('Invalid updatedAt date'),
+      new Error('Inventory resource probe failed for sample row: Invalid updatedAt date'),
     );
     const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('available_products'));
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('sku'));
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
-    for (const answer of [
-      'title',
-      'price',
-      'currency',
-      '\0unmapped',
-      '\0unmapped',
-      '\0unmapped',
-      '\0unmapped',
-    ]) {
-      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
-    }
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
-    for (const answer of [
-      'database.example.com',
-      '5432',
-      'catalog',
-      'reader',
-      'merchant_data',
-      'connector.merchant.example',
-    ]) {
-      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
-    }
-    promptMocks.password.mockResolvedValueOnce('p@ss#word');
-    promptMocks.confirm.mockImplementation(({ message }) =>
-      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
-    );
-    promptMocks.checkbox.mockImplementation(({ message }) => {
-      if (message.startsWith('Select additional')) return Promise.resolve([]);
-      if (message.startsWith('Which columns should be searchable')) {
-        return Promise.resolve(['title']);
-      }
-      return Promise.resolve([]);
-    });
-    vi.mocked(introspectDatabase).mockResolvedValueOnce({
-      db: db as never,
-      result: {
-        tables: [
-          {
-            name: 'available_products',
-            kind: 'view',
-            rowCount: 40,
-            columns: [
-              { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
-              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
-              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
-              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
-            ],
-          },
-        ],
-        foreignKeys: [],
-      },
-      retriedWithTls: false,
-    });
 
     try {
       process.chdir(directory);
-      await runWizard();
+      await expect(runWizard()).rejects.toThrow('Invalid updatedAt date');
 
       expect(consoleError).toHaveBeenCalledWith(
         expect.stringContaining(
-          'Cannot save configuration: inventory sample violates the wire contract: Invalid updatedAt date',
+          'Cannot save configuration: inventory sample violates the wire contract: ' +
+            'Inventory resource probe failed for sample row: Invalid updatedAt date',
         ),
       );
       expect(consoleLog).not.toHaveBeenCalledWith(expect.stringContaining('✓ API key:'));
       expect(consoleLog).not.toHaveBeenCalledWith(expect.stringContaining('✓ New staged API key:'));
+      expect(existsSync(join(directory, '.env'))).toBe(false);
+      expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
+      expect(resourceProbeMocks.adapter.disconnect).toHaveBeenCalledOnce();
+      expect(db.destroy).toHaveBeenCalledOnce();
+    } finally {
+      consoleLog.mockRestore();
+      consoleError.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a statement-timeout probe honestly, prints the index hint, and exits unsuccessfully', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = mockWizardProbeFailureSetup();
+    resourceProbeMocks.probeInventoryResource.mockRejectedValueOnce(
+      Object.assign(
+        new Error(
+          'Inventory resource probe failed for table "available_products": statement timeout',
+        ),
+        {
+          code: '57014',
+        },
+      ),
+    );
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      process.chdir(directory);
+      await expect(runWizard()).rejects.toThrow('statement timeout');
+
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining('Cannot save configuration: inventory probe failed:'),
+      );
+      expect(consoleError).not.toHaveBeenCalledWith(
+        expect.stringContaining('inventory sample violates the wire contract'),
+      );
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'CREATE INDEX CONCURRENTLY kasbly_connector_sort_idx ON "merchant_data".' +
+            '"available_products" ("sku" DESC NULLS LAST);',
+        ),
+      );
       expect(existsSync(join(directory, '.env'))).toBe(false);
       expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
       expect(resourceProbeMocks.adapter.disconnect).toHaveBeenCalledOnce();
