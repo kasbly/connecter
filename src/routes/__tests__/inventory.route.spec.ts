@@ -1260,6 +1260,88 @@ describe('inventory routes', () => {
     await app.close();
   });
 
+  // #32165: a parent id that cannot coerce onto the child FK type (22P02/22003)
+  // must not 500 the page — the relation is just empty for that request.
+  it.each(['22P02', '22003'])(
+    'serves listings with empty images when queryRelation rejects with %s (#32165)',
+    async (code) => {
+      const relationConfig: InventoryResourceConfig = {
+        ...testConfig,
+        relations: {
+          images: {
+            table: 'Image',
+            foreignKey: 'productId',
+            referenceKey: 'id',
+            fields: { url: 'url' },
+            imageUrlField: 'url',
+          },
+        },
+      };
+      const row = {
+        id: 'DRAFT-99',
+        name: 'Test Item',
+        price: 99.99,
+        updatedAt: '2026-02-01T00:00:00Z',
+      };
+      const queryRelation = vi
+        .fn()
+        .mockRejectedValue(Object.assign(new Error('invalid input syntax'), { code }));
+      const app = Fastify();
+      registerInventoryRoutes(app, {
+        dbAdapter: createMockDbAdapter({
+          query: vi.fn().mockResolvedValue({ rows: [row], total: 1 }),
+          queryById: vi.fn().mockResolvedValue(row),
+          queryRelation,
+        }),
+        resourceConfig: relationConfig,
+      });
+
+      const listResponse = await app.inject({ method: 'GET', url: '/inventory' });
+      const itemResponse = await app.inject({ method: 'GET', url: '/inventory/DRAFT-99' });
+
+      expect(listResponse.statusCode).toBe(200);
+      expect(listResponse.json().items).toHaveLength(1);
+      expect(listResponse.json().items[0].images ?? []).toEqual([]);
+      expect(itemResponse.statusCode).toBe(200);
+      expect(itemResponse.json().images ?? []).toEqual([]);
+      expect(queryRelation).toHaveBeenCalledTimes(2);
+
+      await app.close();
+    },
+  );
+
+  it('still surfaces a non-coercion queryRelation failure as a 500 (#32165)', async () => {
+    const relationConfig: InventoryResourceConfig = {
+      ...testConfig,
+      relations: {
+        images: {
+          table: 'Image',
+          foreignKey: 'productId',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+        },
+      },
+    };
+    const row = { id: '42', name: 'Test Item', price: 99.99, updatedAt: '2026-02-01T00:00:00Z' };
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: createMockDbAdapter({
+        query: vi.fn().mockResolvedValue({ rows: [row], total: 1 }),
+        queryById: vi.fn().mockResolvedValue(row),
+        queryRelation: vi
+          .fn()
+          .mockRejectedValue(Object.assign(new Error('boom'), { code: '42P01' })),
+      }),
+      resourceConfig: relationConfig,
+    });
+
+    expect((await app.inject({ method: 'GET', url: '/inventory' })).statusCode).toBe(500);
+    expect((await app.inject({ method: 'GET', url: '/inventory/42' })).statusCode).toBe(500);
+
+    await app.close();
+  });
+
   it('queries a relation with no explicit schema in the resource\'s own non-public schema, not "public" (#28100)', async () => {
     const relationConfig: InventoryResourceConfig = {
       ...testConfig,

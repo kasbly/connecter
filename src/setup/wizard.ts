@@ -28,6 +28,7 @@ import {
   suggestFilterableColumns,
   suggestImageTypeColumn,
   suggestJoinColumn,
+  suggestReferenceColumn,
   classifyRelationType,
   isTextColumn,
   getInStockFilterDefault,
@@ -1174,6 +1175,11 @@ export async function runWizard(): Promise<void> {
     relationSuggestions.map((suggestion) => suggestion.table),
   );
 
+  const findExistingRelation = (table: string, foreignKey: string) =>
+    Object.entries(existingConfig?.resources.inventory.relations ?? {}).find(
+      ([, relation]) =>
+        relation.table === table && unquoteIdentifier(relation.foreignKey) === foreignKey,
+    );
   for (const suggestion of relationSuggestions) {
     const relTable = result.tables.find((t) => t.name === suggestion.table);
     if (!relTable) continue;
@@ -1182,12 +1188,9 @@ export async function runWizard(): Promise<void> {
     // a matching existing key when rerunning setup, but default new relations to a
     // table+foreignKey key so accepting more than one relation — including two FKs
     // from the same child table (#26144) — cannot overwrite a previous one.
-    const existingRelationEntry = Object.entries(
-      existingConfig?.resources.inventory.relations ?? {},
-    ).find(
-      ([, relation]) =>
-        relation.table === suggestion.table &&
-        unquoteIdentifier(relation.foreignKey) === suggestion.foreignKeyColumn,
+    const existingRelationEntry = findExistingRelation(
+      suggestion.table,
+      suggestion.foreignKeyColumn,
     );
 
     const addRelation = await confirm({
@@ -1269,20 +1272,29 @@ export async function runWizard(): Promise<void> {
       ...(suggestedFk ? { default: suggestedFk } : {}),
     });
 
+    const existingRelationEntry = findExistingRelation(tableName, foreignKeyColumn);
+
+    // The child column may join a non-id parent column (sku/permalink, #32166).
+    const referenceColumn = await select({
+      message: `Which column on ${selectedTableName} does ${tableName}.${foreignKeyColumn} match?`,
+      choices: selectedTable.columns.map(({ name }) => ({ name, value: name })),
+      default: suggestReferenceColumn({
+        parentColumns: selectedTable.columns,
+        childColumn: foreignKeyColumn,
+        idColumn,
+        savedReference: existingRelationEntry
+          ? unquoteIdentifier(existingRelationEntry[1].referenceKey)
+          : undefined,
+      }),
+    });
+
     const suggestion: RelationSuggestion = {
       table: tableName,
       foreignKeyColumn,
-      toColumn: idColumn,
+      toColumn: referenceColumn,
       relationType: classifyRelationType(relTable),
       confidence: 'low',
     };
-    const existingRelationEntry = Object.entries(
-      existingConfig?.resources.inventory.relations ?? {},
-    ).find(
-      ([, relation]) =>
-        relation.table === suggestion.table &&
-        unquoteIdentifier(relation.foreignKey) === suggestion.foreignKeyColumn,
-    );
     const configured = await collectConfiguredRelation({
       suggestion,
       relTable,

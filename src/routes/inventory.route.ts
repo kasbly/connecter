@@ -1,5 +1,5 @@
-import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import type { InventoryResourceConfig } from '../config/config.types.js';
+import type { FastifyBaseLogger, FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import type { InventoryResourceConfig, RelationConfig } from '../config/config.types.js';
 import type {
   DatabaseAdapter,
   QueryCondition,
@@ -171,19 +171,14 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
         if (relationConfigs.length > 0) {
           const relationResults = await Promise.all(
             relationConfigs.map(([relationName, relationConfig]) =>
-              dbAdapter
-                .queryRelation({
-                  ...((relationConfig.schema ?? resourceConfig.schema)
-                    ? { schema: relationConfig.schema ?? resourceConfig.schema }
-                    : {}),
-                  table: relationConfig.table,
-                  foreignKey: relationConfig.foreignKey,
-                  parentIds: getReferenceValues(rows, relationConfig.referenceKey),
-                  fields: relationConfig.fields,
-                  filter: relationConfig.filter,
-                  orderBy: relationConfig.orderBy,
-                })
-                .then((result) => [relationName, result] as const),
+              loadRelation(
+                dbAdapter,
+                resourceConfig,
+                relationName,
+                relationConfig,
+                getReferenceValues(rows, relationConfig.referenceKey),
+                request.log,
+              ),
             ),
           );
           for (const [relationName, result] of relationResults) {
@@ -408,19 +403,14 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       if (relationConfigs.length > 0) {
         const relationResults = await Promise.all(
           relationConfigs.map(([relationName, relationConfig]) =>
-            dbAdapter
-              .queryRelation({
-                ...((relationConfig.schema ?? resourceConfig.schema)
-                  ? { schema: relationConfig.schema ?? resourceConfig.schema }
-                  : {}),
-                table: relationConfig.table,
-                foreignKey: relationConfig.foreignKey,
-                parentIds: getReferenceValues([row], relationConfig.referenceKey),
-                fields: relationConfig.fields,
-                filter: relationConfig.filter,
-                orderBy: relationConfig.orderBy,
-              })
-              .then((result) => [relationName, result] as const),
+            loadRelation(
+              dbAdapter,
+              resourceConfig,
+              relationName,
+              relationConfig,
+              getReferenceValues([row], relationConfig.referenceKey),
+              request.log,
+            ),
           ),
         );
         for (const [relationName, result] of relationResults) {
@@ -439,6 +429,41 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       }
     },
   );
+}
+
+// Loads one relation for the given parent ids. A value PostgreSQL cannot coerce
+// onto the child FK's type (22P02/22003) must not 500 the whole request: the
+// relation is treated as empty for this request, so listings are still served
+// without their related rows (#32165).
+async function loadRelation(
+  dbAdapter: DatabaseAdapter,
+  resourceConfig: InventoryResourceConfig,
+  relationName: string,
+  relationConfig: RelationConfig,
+  parentIds: (string | number)[],
+  log: FastifyBaseLogger,
+): Promise<readonly [string, Map<string, Record<string, unknown>[]>]> {
+  try {
+    const result = await dbAdapter.queryRelation({
+      ...((relationConfig.schema ?? resourceConfig.schema)
+        ? { schema: relationConfig.schema ?? resourceConfig.schema }
+        : {}),
+      table: relationConfig.table,
+      foreignKey: relationConfig.foreignKey,
+      parentIds,
+      fields: relationConfig.fields,
+      filter: relationConfig.filter,
+      orderBy: relationConfig.orderBy,
+    });
+    return [relationName, result] as const;
+  } catch (error) {
+    if (!isUncoercibleValueError(error)) throw error;
+    log.warn(
+      { relation: relationName, error: errorMessage(error) },
+      'Omitting relation rows: a parent id cannot be coerced to the relation foreign key type',
+    );
+    return [relationName, new Map()] as const;
+  }
 }
 
 function getReferenceValues(

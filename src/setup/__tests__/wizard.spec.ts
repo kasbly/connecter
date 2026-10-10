@@ -1837,6 +1837,9 @@ describe('runWizard', () => {
       if (message.startsWith('Which column on product_images joins')) {
         return Promise.resolve('product_id');
       }
+      if (message.startsWith('Which column on available_products does product_images.product_id')) {
+        return Promise.resolve('id');
+      }
       const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
       if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
         return Promise.resolve(fieldMatch[1]);
@@ -1915,6 +1918,12 @@ describe('runWizard', () => {
           default: 'product_id',
         }),
       );
+      expect(promptMocks.select).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Which column on available_products does product_images.product_id match?',
+          default: 'id',
+        }),
+      );
       const config = loadExistingSetupConfig(
         join(directory, 'connector.config.yml'),
         join(directory, '.env'),
@@ -1923,6 +1932,134 @@ describe('runWizard', () => {
         table: 'product_images',
         foreignKey: '"product_id"',
         referenceKey: '"id"',
+        imageUrlField: 'url',
+      });
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('lets the operator map an unconstrained child table when no foreign key points at the inventory view and joins it to a non-id parent column (#32166)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('available_products');
+      if (message.startsWith('Which column is the unique listing id')) {
+        return Promise.resolve('id');
+      }
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      if (message.startsWith('Which table or view holds related rows')) {
+        return Promise.resolve('product_images');
+      }
+      if (message.startsWith('Which column on product_images joins')) {
+        return Promise.resolve('sku');
+      }
+      if (message.startsWith('Which column on available_products does product_images.sku')) {
+        return Promise.resolve('sku');
+      }
+      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+      if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
+        return Promise.resolve(fieldMatch[1]);
+      }
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('merchant_data');
+      if (message.startsWith('Public DNS name')) {
+        return Promise.resolve('connector.merchant.example');
+      }
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(
+        !message.startsWith('Does this database require TLS') &&
+          !message.startsWith('Add a related table or view that has no foreign key'),
+      ),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title']);
+      }
+      if (message.startsWith('Select columns from product_images')) return Promise.resolve(['url']);
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'available_products',
+            kind: 'view',
+            rowCount: 40,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ],
+          },
+          {
+            name: 'product_images',
+            kind: 'table',
+            rowCount: 200,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      expect(consoleLog).toHaveBeenCalledWith(EMPTY_RELATION_FK_HINT);
+      expect(promptMocks.select).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Which table or view holds related rows (for example photos)?',
+          default: 'product_images',
+        }),
+      );
+      expect(promptMocks.select).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Which column on product_images joins to available_products?',
+        }),
+      );
+      expect(promptMocks.select).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Which column on available_products does product_images.sku match?',
+          default: 'sku',
+        }),
+      );
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(config.resources.inventory.relations?.['product_images__sku']).toMatchObject({
+        table: 'product_images',
+        foreignKey: '"sku"',
+        referenceKey: '"sku"',
         imageUrlField: 'url',
       });
     } finally {
@@ -1954,6 +2091,9 @@ describe('runWizard', () => {
       }
       if (message.startsWith('Which column on product_images joins')) {
         return Promise.resolve('car_id');
+      }
+      if (message.startsWith('Which column on Car does product_images.car_id')) {
+        return Promise.resolve('id');
       }
       const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
       if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {

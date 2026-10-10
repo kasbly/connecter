@@ -97,6 +97,12 @@ function qualifiedTable(schema: string | undefined, table: string): string {
   return `${quoteIdentifier(schema ?? 'public')}.${quoteIdentifier(table)}`;
 }
 
+function isUncoercibleValueError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const code = Reflect.get(error, 'code');
+  return code === '22P02' || code === '22003';
+}
+
 function escapeLikePattern(value: unknown): string {
   return String(value).replace(/[\\%_]/g, '\\$&');
 }
@@ -388,22 +394,40 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
 
     const placeholders = query.parentIds.map(() => '?').join(', ');
-    let sql = `SELECT ${selectParts.join(', ')} FROM ${qualifiedTable(query.schema, query.table)} WHERE ${query.foreignKey} IN (${placeholders})`;
+    const baseSql = `SELECT ${selectParts.join(', ')} FROM ${qualifiedTable(query.schema, query.table)} WHERE`;
+    let tail = '';
     if (escapedFilter) {
-      sql += ` AND (${escapedFilter})`;
+      tail += ` AND (${escapedFilter})`;
     }
     if (query.orderBy) {
-      sql += ` ORDER BY ${buildOrderByClause(query.orderBy)}`;
+      tail += ` ORDER BY ${buildOrderByClause(query.orderBy)}`;
     } else {
       const [firstField] = Object.values(query.fields);
       const fallbackSorts: SortOptions[] = [
         { column: query.foreignKey, direction: 'asc' },
         ...(firstField ? [{ column: firstField, direction: 'asc' } as const] : []),
       ];
-      sql += ` ORDER BY ${fallbackSorts.map(buildOrderByClause).join(', ')}`;
+      tail += ` ORDER BY ${fallbackSorts.map(buildOrderByClause).join(', ')}`;
     }
 
-    const rawResult = await db.raw<{ rows: Record<string, unknown>[] }>(sql, query.parentIds);
+    let rawResult: { rows: Record<string, unknown>[] };
+    try {
+      rawResult = await db.raw<{ rows: Record<string, unknown>[] }>(
+        `${baseSql} ${query.foreignKey} IN (${placeholders})${tail}`,
+        query.parentIds,
+      );
+    } catch (error) {
+      // A parent id that cannot coerce onto the child FK's type (text SKU
+      // "DRAFT-99" against an integer FK, or a bigint against an integer FK)
+      // aborts the whole statement with 22P02/22003. Retry comparing as text
+      // so the dirty id is simply a miss and clean parents still get their
+      // rows. The indexed comparison above stays the fast path (#32165).
+      if (!isUncoercibleValueError(error)) throw error;
+      rawResult = await db.raw<{ rows: Record<string, unknown>[] }>(
+        `${baseSql} ${query.foreignKey}::text IN (${placeholders})${tail}`,
+        query.parentIds.map(String),
+      );
+    }
     const rows = rawResult.rows;
 
     for (const row of rows) {

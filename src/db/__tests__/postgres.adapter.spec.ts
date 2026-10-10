@@ -673,6 +673,56 @@ describe('PostgresAdapter relation ordering', () => {
     );
   });
 
+  // #32165: a parent id that cannot coerce onto the child FK type aborts the
+  // whole statement. Retry comparing as text so the dirty id is just a miss.
+  it.each(['22P02', '22003'])(
+    'retries with a text comparison when a parent id cannot coerce (%s) (#32165)',
+    async (code) => {
+      const adapter = createAdapterForRelationQuery();
+      rawMock.mockReset();
+      rawMock
+        .mockRejectedValueOnce(Object.assign(new Error('invalid input syntax'), { code }))
+        .mockResolvedValueOnce({ rows: [{ url: 'https://x/1.jpg', __fk: 1 }] });
+
+      const result = await adapter.queryRelation({
+        table: 'Image',
+        foreignKey: 'productId',
+        parentIds: [1, 'DRAFT-99'],
+        fields: { url: 'url' },
+      });
+
+      expect(rawMock).toHaveBeenCalledTimes(2);
+      expect(rawMock).toHaveBeenNthCalledWith(
+        1,
+        'SELECT url as "url", productId as "__fk" FROM "public"."Image" WHERE productId IN (?, ?) ORDER BY productId ASC NULLS LAST, url ASC NULLS LAST',
+        [1, 'DRAFT-99'],
+      );
+      expect(rawMock).toHaveBeenNthCalledWith(
+        2,
+        'SELECT url as "url", productId as "__fk" FROM "public"."Image" WHERE productId::text IN (?, ?) ORDER BY productId ASC NULLS LAST, url ASC NULLS LAST',
+        ['1', 'DRAFT-99'],
+      );
+      expect(result.get('1')).toEqual([{ url: 'https://x/1.jpg' }]);
+      expect(result.has('DRAFT-99')).toBe(false);
+    },
+  );
+
+  it('does not retry on an unrelated relation query error (#32165)', async () => {
+    const adapter = createAdapterForRelationQuery();
+    rawMock.mockReset();
+    rawMock.mockRejectedValue(Object.assign(new Error('missing table'), { code: '42P01' }));
+
+    await expect(
+      adapter.queryRelation({
+        table: 'Image',
+        foreignKey: 'productId',
+        parentIds: ['1'],
+        fields: { url: 'url' },
+      }),
+    ).rejects.toThrow('missing table');
+    expect(rawMock).toHaveBeenCalledTimes(1);
+  });
+
   it('keys relation rows by the string form of mixed-width foreign keys', async () => {
     const adapter = createAdapterForRelationQuery();
     rawMock.mockResolvedValue({

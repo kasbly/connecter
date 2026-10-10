@@ -313,6 +313,23 @@ export function classifyRelationType(table: IntrospectedTable): RelationSuggesti
 }
 
 /**
+ * Default parent column for a manually picked child join column (#32166): the
+ * previously saved reference on rerun, then a same-named parent column
+ * (sku/sku), then the listing id.
+ */
+export function suggestReferenceColumn(input: {
+  parentColumns: IntrospectedColumn[];
+  childColumn: string;
+  idColumn: string;
+  savedReference?: string;
+}): string {
+  const has = (name: string | undefined): name is string =>
+    name !== undefined && input.parentColumns.some((column) => column.name === name);
+  if (has(input.savedReference)) return input.savedReference;
+  return has(input.childColumn) ? input.childColumn : input.idColumn;
+}
+
+/**
  * Name-match heuristic for a child table that has no FOREIGN KEY pointing at
  * the inventory object (views cannot be FK targets; unconstrained catalogues
  * often store `product_id` / `car_id` without a constraint). Prefers
