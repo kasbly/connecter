@@ -180,11 +180,13 @@ function errorMessage(error: unknown): string {
 
 /**
  * Coerce a mapped price. `Number(null ?? 0)` is 0, which is legal on the wire
- * and would quote an unpriced listing as free. NULL/missing/non-finite values
+ * and would quote an unpriced listing as free. NULL/missing/blank/non-finite values
  * must fail the same contract empty title/currency already fail.
  */
 function toFinitePrice(value: unknown): number {
   if (value === null || value === undefined) return Number.NaN;
+  // `Number('')` and `Number('   ')` are 0: blank text cells are unpriced, not free.
+  if (typeof value === 'string' && value.trim() === '') return Number.NaN;
   const price = Number(value);
   return Number.isFinite(price) ? price : Number.NaN;
 }
@@ -449,9 +451,10 @@ export function resolveColumnValue(row: Record<string, unknown>, columnExpr: str
   }
 
   // Handle quoted column names (PostgreSQL-style), e.g. '"makeEn"'
-  const quotedMatch = /^"(.+)"$/.exec(columnExpr.trim());
+  // Embedded quotes are doubled by the setup wizard's quoteIfNeeded, so undo that.
+  const quotedMatch = /^"((?:[^"]|"")+)"$/.exec(columnExpr.trim());
   if (quotedMatch) {
-    return row[quotedMatch[1]!];
+    return row[quotedMatch[1]!.replaceAll('""', '"')];
   }
 
   // Plain column name

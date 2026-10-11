@@ -1,6 +1,6 @@
 import type { InventoryResourceConfig } from '../config/config.types.js';
 import type { QueryCondition, PaginationOptions, SortOptions } from '../db/adapter.interface.js';
-import { isSafeOrderByColumn } from '../db/postgres.adapter.js';
+import { isSafeOrderByColumn, RELATION_ROWS_PER_PARENT_LIMIT } from '../db/postgres.adapter.js';
 import { getRequiredColumns, getSourceStatusValues } from './field-mapper.js';
 import { safeNumericRangeExpression } from './numeric-range.js';
 
@@ -55,9 +55,11 @@ export function getSearchableColumns(config: InventoryResourceConfig): string[] 
       ? ` AND (${relation.filter.replaceAll('?', '\\?')})`
       : '';
     columns.push(
-      `COALESCE((SELECT string_agg(${RELATION_SEARCH_ALIAS}.${flattenedColumn}::text, ' ') ` +
+      `COALESCE((SELECT string_agg(${RELATION_SEARCH_ALIAS}_bounded.value, ' ') FROM (` +
+        `SELECT ${RELATION_SEARCH_ALIAS}.${flattenedColumn}::text AS value ` +
         `FROM ${quoteIdentifier(relationSchema)}.${quoteIdentifier(relation.table)} AS ${RELATION_SEARCH_ALIAS} ` +
-        `WHERE ${RELATION_SEARCH_ALIAS}.${relation.foreignKey} = ${quoteIdentifier(inventorySchema)}.${quoteIdentifier(config.table)}.${relation.referenceKey}${relationFilter}), '')`,
+        `WHERE ${RELATION_SEARCH_ALIAS}.${relation.foreignKey} = ${quoteIdentifier(inventorySchema)}.${quoteIdentifier(config.table)}.${relation.referenceKey}${relationFilter} ` +
+        `LIMIT ${RELATION_ROWS_PER_PARENT_LIMIT}) AS ${RELATION_SEARCH_ALIAS}_bounded), '')`,
     );
   }
 

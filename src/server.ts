@@ -9,6 +9,7 @@ import { buildRateLimitOptions } from './middleware/rate-limiter.js';
 import { UNMAPPED_STATUS_FALLBACK } from './mapping/field-mapper.js';
 import {
   createResourceHealthCheck,
+  isTransientProbeError,
   registerHealthRoute,
   type ResourceHealthCheck,
 } from './routes/health.route.js';
@@ -59,10 +60,15 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
 
   // Global error handler — never expose SQL or stack traces
   app.setErrorHandler((error: Error & { code?: string; statusCode?: number }, _request, reply) => {
-    // PostgreSQL uses SQLSTATE 57014 when statement_timeout cancels a query.
-    // Treat the bounded database interruption as temporary unavailability so
-    // callers can retry instead of receiving an opaque generic 500.
-    const statusCode = error.code === '57014' ? 503 : (error.statusCode ?? 500);
+    // A statement timeout (SQLSTATE 57014), exhausted pool, or dropped
+    // connection is a bounded, temporary database interruption. Report it as
+    // 503 — the same transient class `/health` uses — so callers can retry
+    // instead of receiving an opaque generic 500. `isTransientProbeError`
+    // also walks `cause`, so wrapped driver errors are recognised.
+    const statusCode =
+      (error.statusCode ?? 500) >= 500 && isTransientProbeError(error)
+        ? 503
+        : (error.statusCode ?? 500);
     app.log.error({ err: error }, 'Request error');
 
     void reply.code(statusCode).send({

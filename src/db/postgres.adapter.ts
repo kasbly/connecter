@@ -89,6 +89,16 @@ export function buildOrderByClause(sort: SortOptions): string {
  */
 export const DEFAULT_COUNT_LIMIT = 1000;
 
+/**
+ * Most child rows read per parent by {@link PostgresAdapter.queryRelation} (and
+ * aggregated per parent by the flattened-relation search subquery). A listing
+ * never needs more than a few dozen image URLs or features, so a parent that
+ * matches tens of thousands of child rows (variants, or a join that matches
+ * most of the table) is clipped instead of timing the statement out (503 on
+ * every `/inventory*` and `/health`) or exhausting memory.
+ */
+export const RELATION_ROWS_PER_PARENT_LIMIT = 100;
+
 function quoteIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
@@ -368,7 +378,9 @@ export class PostgresAdapter implements DatabaseAdapter {
     const result = new Map<string, Record<string, unknown>[]>();
 
     // Use a single raw query for maximum performance — avoids Knex builder overhead
-    const selectParts = Object.entries(query.fields).map(([alias, col]) => `${col} as "${alias}"`);
+    const selectParts = Object.entries(query.fields).map(
+      ([alias, col]) => `${col} as "${alias.replaceAll('"', '""')}"`,
+    );
     selectParts.push(`${query.foreignKey} as "__fk"`);
 
     // Relation `filter` is raw merchant SQL, same as `baseFilter` — escape any
@@ -394,26 +406,33 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
 
     const placeholders = query.parentIds.map(() => '?').join(', ');
-    const baseSql = `SELECT ${selectParts.join(', ')} FROM ${qualifiedTable(query.schema, query.table)} WHERE`;
-    let tail = '';
-    if (escapedFilter) {
-      tail += ` AND (${escapedFilter})`;
-    }
+    let orderBy: string;
     if (query.orderBy) {
-      tail += ` ORDER BY ${buildOrderByClause(query.orderBy)}`;
+      orderBy = buildOrderByClause(query.orderBy);
     } else {
       const [firstField] = Object.values(query.fields);
       const fallbackSorts: SortOptions[] = [
         { column: query.foreignKey, direction: 'asc' },
         ...(firstField ? [{ column: firstField, direction: 'asc' } as const] : []),
       ];
-      tail += ` ORDER BY ${fallbackSorts.map(buildOrderByClause).join(', ')}`;
+      orderBy = fallbackSorts.map(buildOrderByClause).join(', ');
     }
+    // Number each parent's rows in the relation's order and keep only the first
+    // RELATION_ROWS_PER_PARENT_LIMIT, so one parent with a huge child set cannot
+    // return (or buffer) the whole child table.
+    const boundedSql = (fkExpression: string): string =>
+      `SELECT ${Object.keys(query.fields)
+        .map((alias) => `"${alias}"`)
+        .join(', ')}, "__fk" FROM (SELECT ${selectParts.join(', ')}, ` +
+      `ROW_NUMBER() OVER (PARTITION BY ${fkExpression} ORDER BY ${orderBy}) as "__rn" ` +
+      `FROM ${qualifiedTable(query.schema, query.table)} WHERE ${fkExpression} IN (${placeholders})` +
+      `${escapedFilter ? ` AND (${escapedFilter})` : ''}) AS "__bounded" ` +
+      `WHERE "__rn" <= ${RELATION_ROWS_PER_PARENT_LIMIT} ORDER BY "__fk", "__rn"`;
 
     let rawResult: { rows: Record<string, unknown>[] };
     try {
       rawResult = await db.raw<{ rows: Record<string, unknown>[] }>(
-        `${baseSql} ${query.foreignKey} IN (${placeholders})${tail}`,
+        boundedSql(query.foreignKey),
         query.parentIds,
       );
     } catch (error) {
@@ -424,7 +443,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       // rows. The indexed comparison above stays the fast path (#32165).
       if (!isUncoercibleValueError(error)) throw error;
       rawResult = await db.raw<{ rows: Record<string, unknown>[] }>(
-        `${baseSql} ${query.foreignKey}::text IN (${placeholders})${tail}`,
+        boundedSql(`${query.foreignKey}::text`),
         query.parentIds.map(String),
       );
     }

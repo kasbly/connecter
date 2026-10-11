@@ -6,6 +6,7 @@ import {
   buildOrderByClause,
   resolveCountLimit,
   DEFAULT_COUNT_LIMIT,
+  RELATION_ROWS_PER_PARENT_LIMIT,
 } from '../postgres.adapter.js';
 import type { QueryCondition, SortOptions } from '../adapter.interface.js';
 import { buildQuery } from '../../mapping/query-builder.js';
@@ -135,6 +136,23 @@ describe('PostgresAdapter relation probes', () => {
 
     expect(rawMock).toHaveBeenCalledWith(
       'SELECT url as "url", inventory_id as "__fk" FROM "public"."images" WHERE FALSE AND (published = true) ORDER BY position ASC NULLS LAST',
+    );
+  });
+
+  it('escapes embedded double quotes in relation field aliases', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.queryRelation({
+      table: 'images',
+      foreignKey: 'inventory_id',
+      parentIds: [],
+      fields: { 'say "hi"': '"say ""hi"""' },
+    });
+
+    expect(rawMock).toHaveBeenCalledWith(
+      'SELECT "say ""hi""" as "say ""hi""", inventory_id as "__fk" FROM "public"."images" WHERE FALSE',
     );
   });
 
@@ -597,7 +615,7 @@ describe('PostgresAdapter relation ordering', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT url as "url", carId as "__fk" FROM "public"."Image" WHERE carId IN (?) ORDER BY position ASC NULLS LAST',
+      'SELECT "url", "__fk" FROM (SELECT url as "url", carId as "__fk", ROW_NUMBER() OVER (PARTITION BY carId ORDER BY position ASC NULLS LAST) as "__rn" FROM "public"."Image" WHERE carId IN (?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
       ['car-1'],
     );
   });
@@ -614,7 +632,7 @@ describe('PostgresAdapter relation ordering', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT url as "url", product_id as "__fk" FROM "catalog"."product_images" WHERE product_id IN (?) ORDER BY product_id ASC NULLS LAST, url ASC NULLS LAST',
+      'SELECT "url", "__fk" FROM (SELECT url as "url", product_id as "__fk", ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY product_id ASC NULLS LAST, url ASC NULLS LAST) as "__rn" FROM "catalog"."product_images" WHERE product_id IN (?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
       ['product-1'],
     );
   });
@@ -630,7 +648,7 @@ describe('PostgresAdapter relation ordering', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT url as "url", carId as "__fk" FROM "public"."Image" WHERE carId IN (?) ORDER BY carId ASC NULLS LAST, url ASC NULLS LAST',
+      'SELECT "url", "__fk" FROM (SELECT url as "url", carId as "__fk", ROW_NUMBER() OVER (PARTITION BY carId ORDER BY carId ASC NULLS LAST, url ASC NULLS LAST) as "__rn" FROM "public"."Image" WHERE carId IN (?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
       ['car-1'],
     );
   });
@@ -668,7 +686,7 @@ describe('PostgresAdapter relation ordering', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT url as "url", carId as "__fk" FROM "public"."Image" WHERE carId IN (?, ?) AND (metadata \\? \'published\') ORDER BY position ASC NULLS LAST',
+      'SELECT "url", "__fk" FROM (SELECT url as "url", carId as "__fk", ROW_NUMBER() OVER (PARTITION BY carId ORDER BY position ASC NULLS LAST) as "__rn" FROM "public"."Image" WHERE carId IN (?, ?) AND (metadata \\? \'published\')) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
       ['car-1', 'car-2'],
     );
   });
@@ -694,12 +712,12 @@ describe('PostgresAdapter relation ordering', () => {
       expect(rawMock).toHaveBeenCalledTimes(2);
       expect(rawMock).toHaveBeenNthCalledWith(
         1,
-        'SELECT url as "url", productId as "__fk" FROM "public"."Image" WHERE productId IN (?, ?) ORDER BY productId ASC NULLS LAST, url ASC NULLS LAST',
+        'SELECT "url", "__fk" FROM (SELECT url as "url", productId as "__fk", ROW_NUMBER() OVER (PARTITION BY productId ORDER BY productId ASC NULLS LAST, url ASC NULLS LAST) as "__rn" FROM "public"."Image" WHERE productId IN (?, ?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
         [1, 'DRAFT-99'],
       );
       expect(rawMock).toHaveBeenNthCalledWith(
         2,
-        'SELECT url as "url", productId as "__fk" FROM "public"."Image" WHERE productId::text IN (?, ?) ORDER BY productId ASC NULLS LAST, url ASC NULLS LAST',
+        'SELECT "url", "__fk" FROM (SELECT url as "url", productId as "__fk", ROW_NUMBER() OVER (PARTITION BY productId::text ORDER BY productId ASC NULLS LAST, url ASC NULLS LAST) as "__rn" FROM "public"."Image" WHERE productId::text IN (?, ?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
         ['1', 'DRAFT-99'],
       );
       expect(result.get('1')).toEqual([{ url: 'https://x/1.jpg' }]);
@@ -721,6 +739,24 @@ describe('PostgresAdapter relation ordering', () => {
       }),
     ).rejects.toThrow('missing table');
     expect(rawMock).toHaveBeenCalledTimes(1);
+  });
+
+  // #32461: one parent with tens of thousands of child rows must not time out
+  // (503 on /inventory and /health) or buffer the whole child table.
+  it('bounds relation rows per parent so one huge join cannot scan the child table (#32461)', async () => {
+    const adapter = createAdapterForRelationQuery();
+
+    await adapter.queryRelation({
+      table: 'Image',
+      foreignKey: 'carId',
+      parentIds: ['car-1'],
+      fields: { url: 'url' },
+    });
+
+    const sql = rawMock.mock.calls[0]?.[0] as string;
+    expect(sql).toContain(`PARTITION BY carId`);
+    expect(sql).toContain(`WHERE "__rn" <= ${RELATION_ROWS_PER_PARENT_LIMIT}`);
+    expect(RELATION_ROWS_PER_PARENT_LIMIT).toBe(100);
   });
 
   it('keys relation rows by the string form of mixed-width foreign keys', async () => {
@@ -975,7 +1011,7 @@ describe('PostgresAdapter list count (#17420)', () => {
 
     const { countQuery, dataQuery } = await runListQuery({ count: 1, conditions });
     const featureSearch =
-      'COALESCE((SELECT string_agg(__kasbly_search_relation.name::text, \' \') FROM "public"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = "public"."Car".id), \'\') ILIKE ? ESCAPE \'\\\'';
+      'COALESCE((SELECT string_agg(__kasbly_search_relation_bounded.value, \' \') FROM (SELECT __kasbly_search_relation.name::text AS value FROM "public"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = "public"."Car".id LIMIT 100) AS __kasbly_search_relation_bounded), \'\') ILIKE ? ESCAPE \'\\\'';
 
     expect(dataQuery.sql).toContain(featureSearch);
     expect(countQuery.sql).toContain(featureSearch);

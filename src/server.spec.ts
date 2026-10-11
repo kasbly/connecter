@@ -136,6 +136,118 @@ describe('buildApp database timeout handling', () => {
     }
   });
 
+  it.each([
+    ['ECONNRESET', Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })],
+    ['08006', Object.assign(new Error('connection failure'), { code: '08006' })],
+    [
+      'KnexTimeoutError',
+      Object.assign(new Error('Knex: Timeout acquiring a connection'), {
+        name: 'KnexTimeoutError',
+      }),
+    ],
+    [
+      'a wrapped ECONNRESET cause',
+      new Error('query failed', {
+        cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+      }),
+    ],
+  ])('returns 503 when the database connection drops mid-request (%s)', async (_label, dbError) => {
+    const config = connectorConfigSchema.parse({
+      version: 1,
+      auth: { apiKeys: [{ key: 'test-key', label: 'test' }] },
+      database: {
+        type: 'postgres',
+        host: 'database.internal',
+        database: 'inventory',
+        user: 'connector',
+        password: 'password',
+      },
+      resources: {
+        inventory: {
+          table: 'cars',
+          idColumn: 'id',
+          fields: { externalId: 'id', title: 'title', price: 'price', currency: "'SAR'" },
+        },
+      },
+      audit: { enabled: false },
+    });
+    const dbAdapter: DatabaseAdapter = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      query: vi.fn().mockRejectedValue(dbError),
+      queryById: vi.fn(),
+      queryRelation: vi.fn(),
+      probeSearchableColumns: vi.fn(),
+      healthCheck: vi.fn().mockResolvedValue(true),
+      introspect: vi.fn(),
+    };
+    const app = await buildApp({
+      config,
+      dbAdapter,
+      getResourceHealth: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/inventory',
+        headers: { 'x-api-key': 'test-key' },
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({ error: 'Internal server error' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps an unrelated database error as a generic 500', async () => {
+    const config = connectorConfigSchema.parse({
+      version: 1,
+      auth: { apiKeys: [{ key: 'test-key', label: 'test' }] },
+      database: {
+        type: 'postgres',
+        host: 'database.internal',
+        database: 'inventory',
+        user: 'connector',
+        password: 'password',
+      },
+      resources: {
+        inventory: {
+          table: 'cars',
+          idColumn: 'id',
+          fields: { externalId: 'id', title: 'title', price: 'price', currency: "'SAR'" },
+        },
+      },
+      audit: { enabled: false },
+    });
+    const dbAdapter: DatabaseAdapter = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      query: vi.fn().mockRejectedValue(Object.assign(new Error('boom'), { code: '42703' })),
+      queryById: vi.fn(),
+      queryRelation: vi.fn(),
+      probeSearchableColumns: vi.fn(),
+      healthCheck: vi.fn().mockResolvedValue(true),
+      introspect: vi.fn(),
+    };
+    const app = await buildApp({
+      config,
+      dbAdapter,
+      getResourceHealth: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/inventory',
+        headers: { 'x-api-key': 'test-key' },
+      });
+
+      expect(response.statusCode).toBe(500);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('audits requests rejected by the API key guard', async () => {
     const auditDir = await mkdtemp(join(tmpdir(), 'kasbly-connector-audit-'));
     const auditFile = join(auditDir, 'audit.log');

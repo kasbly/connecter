@@ -1366,6 +1366,148 @@ describe('runWizard', () => {
     }
   });
 
+  it('binds imageUrlField and flatten to the selected url/name column, not the first lookalike (thumbnail_url, filename) (#32460)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const distinctImageTypes = ['gallery'];
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+      raw: vi.fn(() => Promise.resolve({ rows: distinctImageTypes.map((value) => ({ value })) })),
+    });
+
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('Car');
+      if (message.startsWith('Which column is the unique listing id')) {
+        return Promise.resolve('id');
+      }
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+      if (fieldMatch && ['title', 'price', 'currency', 'description'].includes(fieldMatch[1]!)) {
+        return Promise.resolve(fieldMatch[1]);
+      }
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('merchant_data');
+      if (message.startsWith('Public DNS name')) {
+        return Promise.resolve('connector.merchant.example');
+      }
+      if (message.startsWith('Public site origin'))
+        return Promise.resolve('https://shop.example.com');
+      if (message.startsWith('Public site origin for relative image paths')) {
+        return Promise.resolve('https://shop.example.com');
+      }
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve([]);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title']);
+      }
+      if (message.startsWith('Which filters should be available')) return Promise.resolve([]);
+      if (message.startsWith('Select columns from Image')) return Promise.resolve(['url']);
+      if (message.startsWith('Select columns from CarFeatures')) return Promise.resolve(['name']);
+      if (message.startsWith('Which "type" values on Image')) return Promise.resolve([]);
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'Car',
+            kind: 'table',
+            rowCount: 50,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+          {
+            // README's example images table: a URL plus a `type` column that
+            // also stores non-photo rows (thumbnails, icons, invoices) mixed
+            // in with gallery/featured photos.
+            name: 'Image',
+            kind: 'table',
+            rowCount: 500,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'carId', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'thumbnail_url', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
+            ],
+          },
+          {
+            name: 'CarFeatures',
+            kind: 'table',
+            rowCount: 120,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'carId', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'filename', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'name', type: 'text', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [
+          {
+            constraintName: 'Image_carId_fkey',
+            fromTable: 'Image',
+            fromColumn: 'carId',
+            toTable: 'Car',
+            toColumn: 'id',
+          },
+          {
+            constraintName: 'CarFeatures_carId_fkey',
+            fromTable: 'CarFeatures',
+            fromColumn: 'carId',
+            toTable: 'Car',
+            toColumn: 'id',
+          },
+        ],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      const relations = config.resources.inventory.relations ?? {};
+
+      expect(relations['Image__carId']).toMatchObject({
+        table: 'Image',
+        imageUrlField: 'url',
+      });
+      expect(relations['CarFeatures__carId']).toMatchObject({
+        table: 'CarFeatures',
+        flatten: 'name',
+        searchable: true,
+      });
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("suffixes a second flatten relation's published name when two FKs onto the same child table derive the same semantic name (#27231)", async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();

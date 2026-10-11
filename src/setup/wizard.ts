@@ -447,6 +447,37 @@ async function collectTrustedProxies(
 
 const SKIP_MANUAL_RELATION = '\0none';
 
+// Several columns can match the url/name heuristics (`thumbnail_url` + `url`,
+// `filename` + `name`). Prefer the canonical column over the lookalike so
+// neither the pre-checked default nor the saved `imageUrlField`/`flatten`
+// binds to a thumbnail or file name by ordinal position (#32460).
+function pickPreferredColumn<T extends { name: string }>(
+  columns: readonly T[],
+  matches: RegExp,
+  exact: RegExp,
+  lookalike: RegExp,
+): T | undefined {
+  const candidates = columns.filter((col) => matches.test(col.name));
+  return (
+    candidates.find((col) => exact.test(col.name)) ??
+    candidates.find((col) => !lookalike.test(col.name)) ??
+    candidates[0]
+  );
+}
+
+function pickImageUrlColumn<T extends { name: string }>(columns: readonly T[]): T | undefined {
+  return pickPreferredColumn(columns, /url$|^src$/i, /^(url|src)$/i, /thumb|preview|icon/i);
+}
+
+function pickFlattenColumn<T extends { name: string }>(columns: readonly T[]): T | undefined {
+  return pickPreferredColumn(
+    columns,
+    /name|value|label/i,
+    /^(name|value|label)$/i,
+    /file_?name|filename/i,
+  );
+}
+
 export const EMPTY_RELATION_FK_HINT =
   'No foreign keys point at this table/view. Photos stored in a child table have to be added here, or as a row-level images column.';
 
@@ -498,11 +529,9 @@ async function collectConfiguredRelation(options: {
   });
   const defaultColumn =
     suggestion.relationType === 'images'
-      ? selectableColumns.find((col) => /url$/i.test(col.name) || /^src$/i.test(col.name))
+      ? pickImageUrlColumn(selectableColumns)
       : suggestion.relationType === 'features'
-        ? selectableColumns.find(
-            (col) => /name/i.test(col.name) || /value/i.test(col.name) || /label/i.test(col.name),
-          )
+        ? pickFlattenColumn(selectableColumns)
         : undefined;
   if (selectableColumns.length === 0) {
     console.log(
@@ -538,8 +567,10 @@ async function collectConfiguredRelation(options: {
   };
 
   if (suggestion.relationType === 'images') {
-    const urlCol = relTable.columns.find((c) => /url$/i.test(c.name) || /^src$/i.test(c.name));
-    if (urlCol && selectedColumnNames.has(urlCol.name)) {
+    const urlCol = pickImageUrlColumn(
+      relTable.columns.filter((c) => selectedColumnNames.has(c.name)),
+    );
+    if (urlCol) {
       relation['imageUrlField'] = urlCol.name;
     }
 
@@ -601,10 +632,10 @@ async function collectConfiguredRelation(options: {
       }
     }
   } else if (suggestion.relationType === 'features') {
-    const nameCol = relTable.columns.find(
-      (c) => /name/i.test(c.name) || /value/i.test(c.name) || /label/i.test(c.name),
+    const nameCol = pickFlattenColumn(
+      relTable.columns.filter((c) => selectedColumnNames.has(c.name)),
     );
-    if (nameCol && selectedColumnNames.has(nameCol.name)) {
+    if (nameCol) {
       relation['flatten'] = nameCol.name;
       // Keep this explicit in generated config. Runtime also treats omitted
       // legacy values as enabled so upgraded connectors gain the behavior.

@@ -8,6 +8,7 @@ import {
   mapRowToInventoryItem,
   normalizeImageUrls,
   normalizeListingUrl,
+  resolveColumnValue,
   resolveInventoryStatus,
   validateInventoryItemWireContract,
 } from '../field-mapper.js';
@@ -151,6 +152,18 @@ describe('mapRowToInventoryItem', () => {
     expect(Number.isFinite(missingPrice.price)).toBe(false);
     expect(() => validateInventoryItemWireContract(nullPrice)).toThrow(/price/);
     expect(() => validateInventoryItemWireContract(missingPrice)).toThrow(/price/);
+  });
+
+  it.each(['', '   ', '\t\n'])('does not coerce a blank price string %j to 0', (blank) => {
+    const result = mapRowToInventoryItem(
+      { id: '1', title: 'Test', price: blank },
+      baseConfig,
+      new Map(),
+    );
+
+    expect(result.price).not.toBe(0);
+    expect(Number.isFinite(result.price)).toBe(false);
+    expect(() => validateInventoryItemWireContract(result)).toThrow(/price/);
   });
 
   it('rejects locale-formatted PostgreSQL money values as invalid prices', () => {
@@ -910,5 +923,12 @@ describe('getRequiredColumns', () => {
     };
 
     expect(getRequiredColumns(configWithRelations)).toContain('"slug"');
+  });
+});
+
+describe('resolveColumnValue', () => {
+  it('unescapes doubled quotes in a quoted column name', () => {
+    expect(resolveColumnValue({ 'merchant"sku': 'A1' }, '"merchant""sku"')).toBe('A1');
+    expect(resolveColumnValue({ makeEn: 'Kia' }, '"makeEn"')).toBe('Kia');
   });
 });

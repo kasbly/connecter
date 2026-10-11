@@ -122,7 +122,7 @@ describe('buildQuery', () => {
 
     expect(result.conditions).toContainEqual({
       column:
-        'COALESCE((SELECT string_agg(__kasbly_search_relation.name::text, \' \') FROM "catalog"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = "public"."Car".id), \'\')',
+        'COALESCE((SELECT string_agg(__kasbly_search_relation_bounded.value, \' \') FROM (SELECT __kasbly_search_relation.name::text AS value FROM "catalog"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = "public"."Car".id LIMIT 100) AS __kasbly_search_relation_bounded), \'\')',
       operator: 'ILIKE',
       value: 'leather',
       _group: 'leather',
