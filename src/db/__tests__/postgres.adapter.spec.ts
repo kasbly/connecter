@@ -152,7 +152,7 @@ describe('PostgresAdapter relation probes', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT "say ""hi""" as "say ""hi""", inventory_id as "__fk" FROM "public"."images" WHERE FALSE',
+      'SELECT "say ""hi""" as "say ""hi""", inventory_id as "__fk" FROM "public"."images" WHERE FALSE ORDER BY inventory_id ASC NULLS LAST, ("say ""hi""")::text ASC NULLS LAST',
     );
   });
 
@@ -170,9 +170,48 @@ describe('PostgresAdapter relation probes', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      `SELECT url as "url", inventory_id as "__fk" FROM "public"."images" WHERE FALSE AND ("type" = 'Men''s')`,
+      `SELECT url as "url", inventory_id as "__fk" FROM "public"."images" WHERE FALSE AND ("type" = 'Men''s') ORDER BY inventory_id ASC NULLS LAST, (url)::text ASC NULLS LAST`,
     );
   });
+
+  it.each([
+    {
+      fields: { 'say "hi"': '"say ""hi"""' },
+      projection: '"say ""hi""", "__fk"',
+      innerProjection: '"say ""hi""" as "say ""hi""", inventory_id as "__fk"',
+      row: { 'say "hi"': 'hello', __fk: 1 },
+      expectedRow: { 'say "hi"': 'hello' },
+    },
+    {
+      fields: {} as Record<string, string>,
+      projection: '"__fk"',
+      innerProjection: 'inventory_id as "__fk"',
+      row: { __fk: 1 },
+      expectedRow: {},
+    },
+  ])(
+    'builds a valid bounded projection for $projection with populated parents',
+    async (testCase) => {
+      const adapter = new PostgresAdapter(createDatabaseConfig());
+      await adapter.connect();
+      rawMock.mockClear();
+      rawMock.mockResolvedValueOnce({ rows: [testCase.row] });
+
+      const result = await adapter.queryRelation({
+        table: 'images',
+        foreignKey: 'inventory_id',
+        parentIds: [1],
+        fields: testCase.fields,
+        orderBy: { column: 'position', direction: 'asc' },
+      });
+
+      expect(rawMock).toHaveBeenCalledWith(
+        `SELECT ${testCase.projection} FROM (SELECT ${testCase.innerProjection}, ROW_NUMBER() OVER (PARTITION BY inventory_id ORDER BY position ASC NULLS LAST) as "__rn" FROM "public"."images" WHERE inventory_id IN (?)) AS "__bounded" WHERE "__rn" <= ${RELATION_ROWS_PER_PARENT_LIMIT} ORDER BY "__fk", "__rn"`,
+        [1],
+      );
+      expect(result.get('1')).toEqual([testCase.expectedRow]);
+    },
+  );
 
   // #28097: a jsonb key-exists `?` operator in a relation `filter` hits the
   // same knex positional-binding desync as a baseFilter `?` — escape it here
@@ -192,7 +231,7 @@ describe('PostgresAdapter relation probes', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT url as "url", inventory_id as "__fk" FROM "public"."images" WHERE FALSE AND (metadata \\? \'published\')',
+      'SELECT url as "url", inventory_id as "__fk" FROM "public"."images" WHERE FALSE AND (metadata \\? \'published\') ORDER BY inventory_id ASC NULLS LAST, (url)::text ASC NULLS LAST',
     );
   });
 });
@@ -632,7 +671,7 @@ describe('PostgresAdapter relation ordering', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT "url", "__fk" FROM (SELECT url as "url", product_id as "__fk", ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY product_id ASC NULLS LAST, url ASC NULLS LAST) as "__rn" FROM "catalog"."product_images" WHERE product_id IN (?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
+      'SELECT "url", "__fk" FROM (SELECT url as "url", product_id as "__fk", ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY product_id ASC NULLS LAST, (url)::text ASC NULLS LAST) as "__rn" FROM "catalog"."product_images" WHERE product_id IN (?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
       ['product-1'],
     );
   });
@@ -648,10 +687,53 @@ describe('PostgresAdapter relation ordering', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT "url", "__fk" FROM (SELECT url as "url", carId as "__fk", ROW_NUMBER() OVER (PARTITION BY carId ORDER BY carId ASC NULLS LAST, url ASC NULLS LAST) as "__rn" FROM "public"."Image" WHERE carId IN (?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
+      'SELECT "url", "__fk" FROM (SELECT url as "url", carId as "__fk", ROW_NUMBER() OVER (PARTITION BY carId ORDER BY carId ASC NULLS LAST, (url)::text ASC NULLS LAST) as "__rn" FROM "public"."Image" WHERE carId IN (?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
       ['car-1'],
     );
   });
+
+  it.each([{ parentIds: [] }, { parentIds: ['1'] }])(
+    'sorts generic JSON payloads as text for parents $parentIds',
+    async ({ parentIds }) => {
+      const adapter = createAdapterForRelationQuery();
+      rawMock.mockResolvedValue({ rows: [{ payload: { color: 'red' }, __fk: 1 }] });
+
+      const result = await adapter.queryRelation({
+        table: 'metadata',
+        foreignKey: 'product_id',
+        parentIds,
+        fields: { payload: 'payload' },
+      });
+
+      const sql = rawMock.mock.calls[0]?.[0] as string;
+      expect(sql).toContain('ORDER BY product_id ASC NULLS LAST, (payload)::text ASC NULLS LAST');
+      expect(sql).toContain('payload as "payload"');
+      if (parentIds.length === 0) {
+        expect(sql).toContain('WHERE FALSE');
+        expect(result.size).toBe(0);
+      } else {
+        expect(sql).toContain(`WHERE "__rn" <= ${RELATION_ROWS_PER_PARENT_LIMIT}`);
+        expect(result.get('1')).toEqual([{ payload: { color: 'red' } }]);
+      }
+    },
+  );
+
+  it.each([{ parentIds: [] }, { parentIds: ['1'] }])(
+    'refuses unsafe implicit payload ordering for parents $parentIds',
+    async ({ parentIds }) => {
+      const adapter = createAdapterForRelationQuery();
+
+      await expect(
+        adapter.queryRelation({
+          table: 'metadata',
+          foreignKey: 'product_id',
+          parentIds,
+          fields: { payload: 'payload; DROP TABLE metadata' },
+        }),
+      ).rejects.toThrow(/unsafe column expression/);
+      expect(rawMock).not.toHaveBeenCalled();
+    },
+  );
 
   it('refuses unsafe configured relation ordering', async () => {
     const adapter = createAdapterForRelationQuery();
@@ -712,12 +794,12 @@ describe('PostgresAdapter relation ordering', () => {
       expect(rawMock).toHaveBeenCalledTimes(2);
       expect(rawMock).toHaveBeenNthCalledWith(
         1,
-        'SELECT "url", "__fk" FROM (SELECT url as "url", productId as "__fk", ROW_NUMBER() OVER (PARTITION BY productId ORDER BY productId ASC NULLS LAST, url ASC NULLS LAST) as "__rn" FROM "public"."Image" WHERE productId IN (?, ?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
+        'SELECT "url", "__fk" FROM (SELECT url as "url", productId as "__fk", ROW_NUMBER() OVER (PARTITION BY productId ORDER BY productId ASC NULLS LAST, (url)::text ASC NULLS LAST) as "__rn" FROM "public"."Image" WHERE productId IN (?, ?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
         [1, 'DRAFT-99'],
       );
       expect(rawMock).toHaveBeenNthCalledWith(
         2,
-        'SELECT "url", "__fk" FROM (SELECT url as "url", productId as "__fk", ROW_NUMBER() OVER (PARTITION BY productId::text ORDER BY productId ASC NULLS LAST, url ASC NULLS LAST) as "__rn" FROM "public"."Image" WHERE productId::text IN (?, ?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
+        'SELECT "url", "__fk" FROM (SELECT url as "url", productId as "__fk", ROW_NUMBER() OVER (PARTITION BY productId::text ORDER BY productId ASC NULLS LAST, (url)::text ASC NULLS LAST) as "__rn" FROM "public"."Image" WHERE productId::text IN (?, ?)) AS "__bounded" WHERE "__rn" <= 100 ORDER BY "__fk", "__rn"',
         ['1', 'DRAFT-99'],
       );
       expect(result.get('1')).toEqual([{ url: 'https://x/1.jpg' }]);

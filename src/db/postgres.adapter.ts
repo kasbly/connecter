@@ -389,23 +389,6 @@ export class PostgresAdapter implements DatabaseAdapter {
     // escapeRawFragmentPlaceholders).
     const escapedFilter = query.filter ? escapeRawFragmentPlaceholders(query.filter) : undefined;
 
-    // The startup resource probe deliberately calls this with an empty parent ID
-    // list when the inventory table has no rows. Still prepare a read-only query
-    // so PostgreSQL validates the relation table, fields, foreign key, filter,
-    // and orderBy column.
-    if (query.parentIds.length === 0) {
-      let sql = `SELECT ${selectParts.join(', ')} FROM ${qualifiedTable(query.schema, query.table)} WHERE FALSE`;
-      if (escapedFilter) {
-        sql += ` AND (${escapedFilter})`;
-      }
-      if (query.orderBy) {
-        sql += ` ORDER BY ${buildOrderByClause(query.orderBy)}`;
-      }
-      await db.raw(sql);
-      return result;
-    }
-
-    const placeholders = query.parentIds.map(() => '?').join(', ');
     let orderBy: string;
     if (query.orderBy) {
       orderBy = buildOrderByClause(query.orderBy);
@@ -415,15 +398,39 @@ export class PostgresAdapter implements DatabaseAdapter {
         { column: query.foreignKey, direction: 'asc' },
         ...(firstField ? [{ column: firstField, direction: 'asc' } as const] : []),
       ];
-      orderBy = fallbackSorts.map(buildOrderByClause).join(', ');
+      // JSON has no native PostgreSQL ordering operator. The implicit payload
+      // sort uses its text representation; explicitly configured sorts retain
+      // their native type and the same identifier validation.
+      orderBy = fallbackSorts
+        .map((sort, index) => {
+          const clause = buildOrderByClause(sort);
+          return index === 0 ? clause : `(${sort.column})::text ASC NULLS LAST`;
+        })
+        .join(', ');
     }
+
+    // The startup resource probe deliberately calls this with an empty parent ID
+    // list when the inventory table has no rows. Still prepare a read-only query
+    // so PostgreSQL validates the relation table, fields, foreign key, filter,
+    // and orderBy column.
+    if (query.parentIds.length === 0) {
+      let sql = `SELECT ${selectParts.join(', ')} FROM ${qualifiedTable(query.schema, query.table)} WHERE FALSE`;
+      if (escapedFilter) {
+        sql += ` AND (${escapedFilter})`;
+      }
+      sql += ` ORDER BY ${orderBy}`;
+      await db.raw(sql);
+      return result;
+    }
+
+    const placeholders = query.parentIds.map(() => '?').join(', ');
     // Number each parent's rows in the relation's order and keep only the first
     // RELATION_ROWS_PER_PARENT_LIMIT, so one parent with a huge child set cannot
     // return (or buffer) the whole child table.
     const boundedSql = (fkExpression: string): string =>
-      `SELECT ${Object.keys(query.fields)
-        .map((alias) => `"${alias}"`)
-        .join(', ')}, "__fk" FROM (SELECT ${selectParts.join(', ')}, ` +
+      `SELECT ${[...Object.keys(query.fields), '__fk']
+        .map((alias) => `"${alias.replaceAll('"', '""')}"`)
+        .join(', ')} FROM (SELECT ${selectParts.join(', ')}, ` +
       `ROW_NUMBER() OVER (PARTITION BY ${fkExpression} ORDER BY ${orderBy}) as "__rn" ` +
       `FROM ${qualifiedTable(query.schema, query.table)} WHERE ${fkExpression} IN (${placeholders})` +
       `${escapedFilter ? ` AND (${escapedFilter})` : ''}) AS "__bounded" ` +

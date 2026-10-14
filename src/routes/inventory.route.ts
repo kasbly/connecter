@@ -98,8 +98,29 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
   // re-serving rows already handed out (#26344, #26519).
   const backfillCursors = new Map<string, BackfillCursor>();
 
-  const cacheBackfillCursor = (key: string, cursor: BackfillCursor): void => {
+  const cacheBackfillCursor = (
+    cursorKey: string,
+    cursor: BackfillCursor,
+    naiveOffset: number,
+  ): void => {
+    const shapePrefix = `${cursorKey}|`;
+    const key = `${shapePrefix}${cursor.afterPage}`;
+    const previous = backfillCursors.get(key);
+    const needsCursor = cursor.rawOffset !== naiveOffset;
+    if (
+      (previous?.rawOffset ?? naiveOffset) !== cursor.rawOffset ||
+      (previous?.omittedSoFar ?? 0) !== (needsCursor ? cursor.omittedSoFar : 0)
+    ) {
+      // A refreshed boundary changes where every later page begins. Their
+      // offsets and omitted counts belong to the old scan (#32742).
+      for (const [laterKey, laterCursor] of backfillCursors) {
+        if (laterKey.startsWith(shapePrefix) && laterCursor.afterPage > cursor.afterPage) {
+          backfillCursors.delete(laterKey);
+        }
+      }
+    }
     backfillCursors.delete(key);
+    if (!needsCursor) return;
     backfillCursors.set(key, cursor);
     if (backfillCursors.size > MAX_BACKFILL_CURSOR_ENTRIES) {
       const oldestKey = backfillCursors.keys().next().value;
@@ -301,34 +322,22 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
       // no cursor at all, and it would still occupy one of the
       // `MAX_BACKFILL_CURSOR_ENTRIES` slots — letting ordinary search
       // traffic evict the one cursor that actually carries information
-      // (#26696).
-      if (items.length > 0) {
-        const consumedRaw = rawRowsConsumedForTarget(batches, items.length);
-        const rawOffset = startOffset + consumedRaw;
-        if (rawOffset !== pagination.page * pagination.pageSize) {
-          cacheBackfillCursor(boundaryKey(pagination.page), {
-            afterPage: pagination.page,
-            rawOffset,
-            omittedSoFar: cursorOmittedSoFar + (consumedRaw - items.length),
-          });
-        }
-      } else {
-        // Every raw row examined failed validation, or there was nothing
-        // left to examine at all — either way the page comes back empty.
-        // Cache the boundary past the entire scanned run (rowsExamined is 0
-        // once the scan is truly exhausted) so the next page resumes after
-        // it instead of re-deriving the naive offset, re-scanning a bad
-        // batch, or — once truly exhausted — falling back into raw rows an
-        // earlier page already served (#28743).
-        const rawOffset = startOffset + rowsExamined;
-        if (rawOffset !== pagination.page * pagination.pageSize) {
-          cacheBackfillCursor(boundaryKey(pagination.page), {
-            afterPage: pagination.page,
-            rawOffset,
-            omittedSoFar: cursorOmittedSoFar + rowsExamined,
-          });
-        }
-      }
+      // (#26696). A newly clean boundary must also remove any old entry and
+      // invalidate later boundaries computed from that old scan (#32742).
+      // Empty pages consume the entire scanned run, including zero rows once
+      // truly exhausted, so the next page cannot fall back into served rows
+      // or re-scan an invalid batch (#28743).
+      const consumedRaw =
+        items.length > 0 ? rawRowsConsumedForTarget(batches, items.length) : rowsExamined;
+      cacheBackfillCursor(
+        cursorKey,
+        {
+          afterPage: pagination.page,
+          rawOffset: startOffset + consumedRaw,
+          omittedSoFar: cursorOmittedSoFar + (consumedRaw - items.length),
+        },
+        pagination.page * pagination.pageSize,
+      );
 
       // Rows withheld for a wire-contract violation (#24913) are never served,
       // so they must not be advertised either: callers render `total` as the

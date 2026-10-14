@@ -507,6 +507,114 @@ describe('inventory routes', () => {
     await app.close();
   });
 
+  it('GET /inventory clears obsolete backfill boundaries after repaired rows make the first page clean', async () => {
+    const rawRows = Array.from({ length: 12 }, (_, i) => ({
+      id: String(12 - i),
+      name: 'Product',
+      price: i < 2 ? null : 10,
+    }));
+    const query = vi.fn().mockImplementation((_table, _conditions, pagination) => ({
+      rows: rawRows.slice(pagination.rawOffset, pagination.rawOffset + pagination.pageSize),
+      total: rawRows.length,
+    }));
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: createMockDbAdapter({ query }),
+      resourceConfig: testConfig,
+    });
+    const readPage = async (page: number) => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/inventory?page=${page}&pageSize=5`,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      return { ids: body.items.map((item: { externalId: string }) => item.externalId), ...body };
+    };
+
+    try {
+      expect(await readPage(1)).toMatchObject({ ids: ['10', '9', '8', '7', '6'], total: 10 });
+      expect(await readPage(2)).toMatchObject({ ids: ['5', '4', '3', '2', '1'], total: 10 });
+      rawRows[0]!.price = 10;
+      rawRows[1]!.price = 10;
+      for (let refresh = 0; refresh < 2; refresh++) {
+        expect(await readPage(1)).toMatchObject({ ids: ['12', '11', '10', '9', '8'], total: 12 });
+        expect(await readPage(2)).toMatchObject({
+          ids: ['7', '6', '5', '4', '3'],
+          total: 12,
+          totalPages: 3,
+        });
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([1, 2])(
+    'GET /inventory invalidates later boundaries only for the changed shape after repairing %i rows',
+    async (repairedCount) => {
+      const makeRows = () =>
+        Array.from({ length: 30 }, (_, i) => ({
+          id: String(30 - i),
+          name: 'Product',
+          price: i < 2 ? null : 10,
+        }));
+      const primaryRows = makeRows();
+      const otherRows = makeRows();
+      const query = vi
+        .fn()
+        .mockImplementation((_table, conditions: QueryCondition[], pagination) => {
+          const category = conditions.find((condition) => condition.column === 'category')?.value;
+          const rows = category === 'primary' ? primaryRows : otherRows;
+          return {
+            rows: rows.slice(pagination.rawOffset, pagination.rawOffset + pagination.pageSize),
+            total: rows.length,
+          };
+        });
+      const app = Fastify();
+      registerInventoryRoutes(app, {
+        dbAdapter: createMockDbAdapter({ query }),
+        resourceConfig: testConfig,
+      });
+      const readPage = async (shape: string, page: number) => {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/inventory?filter.category=${shape}&page=${page}&pageSize=5`,
+        });
+        expect(response.statusCode).toBe(200);
+        return response.json();
+      };
+
+      try {
+        for (const shape of ['primary', 'other']) {
+          await readPage(shape, 1);
+          await readPage(shape, 2);
+          await readPage(shape, 3);
+        }
+        const unchangedPage3 = await readPage('primary', 3);
+        await readPage('primary', 1);
+        expect(await readPage('primary', 3)).toEqual(unchangedPage3);
+
+        for (const row of primaryRows.slice(0, repairedCount)) row.price = 10;
+        expect((await readPage('primary', 1)).total).toBe(28 + repairedCount);
+        // Page 2 has not been refreshed: page 3 must discard its old scan's
+        // boundary and fall back to its ordinary raw window, not offset 12.
+        const page3 = await readPage('primary', 3);
+        expect(page3.items.map((item: { externalId: string }) => item.externalId)).toEqual([
+          '20',
+          '19',
+          '18',
+          '17',
+          '16',
+        ]);
+        expect(page3.total).toBe(30);
+        expect(await readPage('other', 3)).toEqual(unchangedPage3);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
   it('GET /inventory does not cache a backfill cursor for a page that never backfilled, so unrelated search traffic cannot evict a genuine one (#26696)', async () => {
     // Primary shape: pageSize 20, three invalid raw rows (3, 7, 11) inside
     // page 1's raw window force a genuine backfill that borrows rows 21-23 —
