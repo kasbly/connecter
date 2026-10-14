@@ -16,10 +16,20 @@ export interface RelationSuggestion {
 }
 
 // Standard field mappings — ordered by priority
-const FIELD_PATTERNS: { target: string; patterns: RegExp[]; type: 'field' | 'attribute' }[] = [
+const FIELD_PATTERNS: {
+  target: string;
+  patterns: RegExp[];
+  // Tried only when no column matched `patterns`, so a plain `title` column
+  // still beats a localised one regardless of column order.
+  fallbackPatterns?: RegExp[];
+  type: 'field' | 'attribute';
+}[] = [
   {
     target: 'title',
     patterns: [/^title$/i, /^name$/i, /^product_?name$/i, /^listing_?name$/i],
+    // Bilingual catalogs (title_ar/title_en/name_ar/name_en, ...) have no plain
+    // `title`, which left the required title unmapped on Enter (#32814).
+    fallbackPatterns: [/^(title|name|product_?name|listing_?name)_?(ar|en|arabic|english)$/i],
     type: 'field',
   },
   {
@@ -160,22 +170,24 @@ export function suggestFieldMappings(columns: IntrospectedColumn[]): FieldSugges
   const usedColumns = new Set<string>();
 
   // First pass: match standard fields (high-priority)
-  for (const { target, patterns, type } of FIELD_PATTERNS) {
+  for (const { target, patterns, fallbackPatterns, type } of FIELD_PATTERNS) {
     let matchedTarget = false;
-    for (const col of columns) {
-      if (matchedTarget) break;
-      if (usedColumns.has(col.name)) continue;
-      for (const pattern of patterns) {
-        if (pattern.test(col.name)) {
-          suggestions.push({
-            columnName: col.name,
-            suggestedMapping: target,
-            confidence: 'high',
-            mappingType: type,
-          });
-          usedColumns.add(col.name);
-          matchedTarget = true;
-          break;
+    for (const stage of [patterns, fallbackPatterns ?? []]) {
+      for (const col of columns) {
+        if (matchedTarget) break;
+        if (usedColumns.has(col.name)) continue;
+        for (const pattern of stage) {
+          if (pattern.test(col.name)) {
+            suggestions.push({
+              columnName: col.name,
+              suggestedMapping: target,
+              confidence: 'high',
+              mappingType: type,
+            });
+            usedColumns.add(col.name);
+            matchedTarget = true;
+            break;
+          }
         }
       }
     }

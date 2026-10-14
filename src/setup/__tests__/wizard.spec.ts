@@ -29,6 +29,7 @@ import {
   validateCaCertificatePath,
   writePrivateFile,
 } from '../wizard.js';
+import { suggestFieldMappings } from '../suggest.js';
 import { runWizard } from '../wizard.js';
 import { loadConfig } from '../../config/config.loader.js';
 import { buildQuery } from '../../mapping/query-builder.js';
@@ -167,7 +168,52 @@ describe('getFieldMappingPrompt', () => {
     expect(getFieldMappingPrompt('currency', ['id'], undefined, true).default).toBe(
       FIXED_VALUE_FIELD_VALUE,
     );
-    expect(getFieldMappingPrompt('currency', ['id']).default).toBe(UNMAPPED_FIELD_VALUE);
+    expect(getFieldMappingPrompt('category', ['id']).default).toBe(UNMAPPED_FIELD_VALUE);
+  });
+
+  it('defaults a first-run currency with no matching column to the fixed-value choice', () => {
+    const prompt = getFieldMappingPrompt('currency', ['sku', 'title', 'price']);
+
+    expect(prompt.default).toBe(FIXED_VALUE_FIELD_VALUE);
+    expect(prompt.choices.map((choice) => choice.value)).toContain(FIXED_VALUE_FIELD_VALUE);
+  });
+
+  it('never offers "Do not map" for title, price or currency when a choice exists', () => {
+    const columns = [
+      { name: 'title_ar', type: 'text' },
+      { name: 'amount', type: 'numeric' },
+    ];
+    for (const field of ['title', 'price', 'currency'] as const) {
+      const prompt = getFieldMappingPrompt(field, columns);
+
+      expect(prompt.choices.map((choice) => choice.value)).not.toContain(UNMAPPED_FIELD_VALUE);
+      expect(prompt.choices.map((choice) => choice.value)).toContain(prompt.default);
+    }
+    expect(getFieldMappingPrompt('title', columns).default).toBe('title_ar');
+    expect(getFieldMappingPrompt('category', columns).choices[0]?.value).toBe(UNMAPPED_FIELD_VALUE);
+  });
+
+  it('keeps "Do not map" for a required field with no compatible column at all', () => {
+    const prompt = getFieldMappingPrompt('price', [{ name: 'name', type: 'text' }]);
+
+    expect(prompt.choices).toEqual([
+      { name: 'Do not map this field', value: UNMAPPED_FIELD_VALUE },
+    ]);
+  });
+
+  it('suggests a title for bilingual catalogs but still prefers a plain title column', () => {
+    const bilingual = suggestFieldMappings([
+      { name: 'title_ar', type: 'text', nullable: false, isPrimaryKey: false },
+      { name: 'title_en', type: 'text', nullable: false, isPrimaryKey: false },
+      { name: 'name_ar', type: 'text', nullable: false, isPrimaryKey: false },
+    ]);
+    const plain = suggestFieldMappings([
+      { name: 'name_en', type: 'text', nullable: false, isPrimaryKey: false },
+      { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+    ]);
+
+    expect(bilingual.find((s) => s.suggestedMapping === 'title')?.columnName).toBe('title_ar');
+    expect(plain.find((s) => s.suggestedMapping === 'title')?.columnName).toBe('title');
   });
 
   it('offers every column and preselects the matching suggestion', () => {
@@ -3745,6 +3791,60 @@ describe('runWizard', () => {
     } finally {
       consoleLog.mockRestore();
       consoleError.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('fails setup with an error instead of returning when a required field ends up unmapped', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = { destroy: vi.fn().mockResolvedValue(undefined) };
+
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('inventory');
+      if (message.startsWith('Which column is the unique listing id')) return Promise.resolve('id');
+      if (message.startsWith('Which column contains the price')) return Promise.resolve('price');
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('catalog');
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockResolvedValue(false);
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'inventory',
+            kind: 'table',
+            rowCount: 3,
+            columns: [
+              { name: 'id', type: 'integer', nullable: false, isPrimaryKey: true },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await expect(runWizard()).rejects.toThrow(
+        'Cannot save configuration: map title and currency before continuing.',
+      );
+      expect(db.destroy).toHaveBeenCalledOnce();
+      expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
+    } finally {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
     }

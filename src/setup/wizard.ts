@@ -72,6 +72,8 @@ type FieldMappingTarget = (typeof FIELD_MAPPING_TARGETS)[number];
 export const UNMAPPED_FIELD_VALUE = '\0unmapped';
 export const FIXED_VALUE_FIELD_VALUE = '\0fixed-value';
 const FIXED_VALUE_FIELDS = new Set<FieldMappingTarget>(['currency', 'category', 'status']);
+// The wizard cannot save without these, so their prompt never offers "Do not map".
+const REQUIRED_FIELDS: readonly FieldMappingTarget[] = ['title', 'price', 'currency'];
 
 interface FieldMappingPrompt {
   message: string;
@@ -294,7 +296,11 @@ export function getFieldMappingPrompt(
     )
     .map((column) => (typeof column === 'string' ? column : column.name));
   const choices: FieldMappingPrompt['choices'] = [
-    { name: 'Do not map this field', value: UNMAPPED_FIELD_VALUE },
+    // With no compatible column at all (and no fixed-value choice) the prompt would
+    // have no choices, so skipping stays possible and the save check below fails setup.
+    ...(REQUIRED_FIELDS.includes(field) && (FIXED_VALUE_FIELDS.has(field) || columnNames.length > 0)
+      ? []
+      : [{ name: 'Do not map this field', value: UNMAPPED_FIELD_VALUE }]),
     ...(FIXED_VALUE_FIELDS.has(field)
       ? [{ name: 'Use a fixed value for every row', value: FIXED_VALUE_FIELD_VALUE }]
       : []),
@@ -313,9 +319,11 @@ export function getFieldMappingPrompt(
     default:
       suggestedColumn && columnNames.includes(suggestedColumn)
         ? suggestedColumn
-        : keepFixedValue && FIXED_VALUE_FIELDS.has(field)
+        : (keepFixedValue || field === 'currency') && FIXED_VALUE_FIELDS.has(field)
           ? FIXED_VALUE_FIELD_VALUE
-          : UNMAPPED_FIELD_VALUE,
+          : REQUIRED_FIELDS.includes(field)
+            ? (columnNames[0] ?? UNMAPPED_FIELD_VALUE)
+            : UNMAPPED_FIELD_VALUE,
   };
 }
 
@@ -945,11 +953,11 @@ export async function runWizard(): Promise<void> {
     (field) => !fieldMappings[field as FieldMappingTarget],
   );
   if (missingRequiredMappings.length > 0) {
-    console.error(
+    await db.destroy();
+    // A failed setup must exit non-zero, not look like a finished one with no files.
+    throw new Error(
       `Cannot save configuration: map ${missingRequiredMappings.join(' and ')} before continuing.`,
     );
-    await db.destroy();
-    return;
   }
 
   // Step 3a: Listing URL
