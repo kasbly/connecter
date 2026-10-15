@@ -128,6 +128,25 @@ function isFixedActiveStatus(config: InventoryResourceConfig): boolean {
 }
 
 /**
+ * The filterable columns a request is checked against.
+ *
+ * Kasbly always sends `filter.status=ACTIVE` on customer searches, so a mapped
+ * status column must stay filterable even when `filterableColumns.status` is
+ * absent (the merchant unchecked it in wizard Step 3c, or the YAML predates it).
+ * Otherwise the connector reports `ignoredFilters: ["status"]` and every search
+ * fails (#32903). A literal non-ACTIVE status (`'SOLD'`) is not a column, so it
+ * is left alone.
+ */
+function getEffectiveFilterableColumns(
+  config: InventoryResourceConfig,
+): NonNullable<InventoryResourceConfig['filterableColumns']> {
+  const configured = config.filterableColumns ?? {};
+  const statusField = config.fields.status?.trim();
+  if (configured.status || !statusField || statusField.startsWith("'")) return configured;
+  return { ...configured, status: { column: statusField, type: 'string' } };
+}
+
+/**
  * Adds the resource's unique id column as a final sort key.
  *
  * `LIMIT`/`OFFSET` paging over a non-unique sort column (the wizard-preferred
@@ -180,8 +199,9 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   const statusFilter = getSingleQueryValue(params, 'filter.status');
   const searchableColumns = getSearchableColumns(config);
   const fixedActiveStatus = isFixedActiveStatus(config);
+  const filterableColumns = getEffectiveFilterableColumns(config);
 
-  const configuredFilterKeys = new Set(Object.keys(config.filterableColumns ?? {}));
+  const configuredFilterKeys = new Set(Object.keys(filterableColumns));
   // An unmapped (or literal ACTIVE) status declares that every row is ACTIVE.
   // It therefore enforces ACTIVE without a source column, rather than ignoring
   // the customer-facing filter.
@@ -289,7 +309,7 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
 
   // Dynamic filters from filterableColumns config. Unknown keys are reported
   // in the response instead of making an otherwise valid inventory request fail.
-  for (const [filterKey, filterConfig] of Object.entries(config.filterableColumns ?? {})) {
+  for (const [filterKey, filterConfig] of Object.entries(filterableColumns)) {
     const paramKey = `filter.${filterKey}`;
     const paramValue = getSingleQueryValue(params, paramKey);
     if (paramValue === undefined || paramValue === '') continue;

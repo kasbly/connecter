@@ -288,6 +288,45 @@ describe('buildQuery', () => {
     expect(result.ignoredFilters).not.toContain('status');
   });
 
+  it('keeps a mapped status filterable when the wizard left filterableColumns.status out (#32903)', () => {
+    const result = buildQuery(
+      { 'filter.status': 'ACTIVE' },
+      {
+        ...baseConfig,
+        fields: { ...baseConfig.fields, status: 'availability' },
+        statusValues: { ACTIVE: ['active', 'live'] },
+      },
+    );
+
+    expect(result.conditions).toContainEqual({
+      column: 'availability',
+      operator: 'IN',
+      value: ['active', 'live'],
+    });
+    expect(result.ignoredFilters).not.toContain('status');
+  });
+
+  it('still prefers an explicit filterableColumns.status over the mapped status field', () => {
+    const result = buildQuery(
+      { 'filter.status': 'ACTIVE' },
+      {
+        ...baseConfig,
+        fields: { ...baseConfig.fields, status: 'availability' },
+        filterableColumns: {
+          ...baseConfig.filterableColumns,
+          status: { column: '"stateCode"', type: 'string' },
+        },
+        statusValues: { ACTIVE: ['1'] },
+      },
+    );
+
+    expect(result.conditions).toContainEqual({
+      column: '"stateCode"',
+      operator: 'IN',
+      value: ['1'],
+    });
+  });
+
   it('enforces ACTIVE without ignoring it when every listing is implicitly active', () => {
     const result = buildQuery(
       { 'filter.status': 'ACTIVE' },
