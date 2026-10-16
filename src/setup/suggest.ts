@@ -142,7 +142,7 @@ const IMAGE_COLUMN_PATTERNS = [/url$/i, /^image/i, /^photo/i, /^picture/i, /^thu
 // it discriminates customer-facing gallery/featured photos from thumbnails,
 // icons, and invoices the same table also stores (see the README's
 // `type = 'gallery' OR type = 'featured'` example).
-const IMAGE_TYPE_COLUMN_PATTERNS = [
+export const IMAGE_TYPE_COLUMN_PATTERNS = [
   /^type$/i,
   /^kind$/i,
   /^category$/i,

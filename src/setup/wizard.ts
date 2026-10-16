@@ -35,6 +35,7 @@ import {
   getSearchableColumnDefault,
   isAttributeEligibleColumn,
   isListingUrlColumn,
+  IMAGE_TYPE_COLUMN_PATTERNS,
   type FilterableColumnSuggestion,
   type RelationSuggestion,
 } from './suggest.js';
@@ -480,9 +481,12 @@ type ImageColumnCandidate = { name: string; type: string; udtName?: string | und
  * and `src` names always qualify; the bare `image`/`photo`/`picture`/
  * `thumbnail` names the relation classifier uses to detect a photo table
  * qualify only when the column is text or JSON — a `bytea` `image` is binary
- * and cannot become an `imageUrlField` (#32981).
+ * and cannot become an `imageUrlField` (#32981). The type-discriminator names
+ * (`image_type`, `photo_type`, `type`, ...) share the `image`/`photo` prefix but
+ * hold `gallery`/`thumbnail` labels, never a URL, so they never qualify.
  */
 function isImageUrlColumn(col: ImageColumnCandidate): boolean {
+  if (IMAGE_TYPE_COLUMN_PATTERNS.some((pattern) => pattern.test(col.name))) return false;
   if (/url$/i.test(col.name) || /^src$/i.test(col.name)) return true;
   if (!/^(image|photo|picture|thumbnail)/i.test(col.name) || /_id$/i.test(col.name)) return false;
   const type = col.type.trim().toLowerCase();

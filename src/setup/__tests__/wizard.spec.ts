@@ -2111,6 +2111,117 @@ describe('runWizard', () => {
     }
   });
 
+  it('binds imageUrlField to the URL column, not an `image_type` discriminator listed before it (#33028)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.clearAllMocks();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      raw: vi.fn(() => Promise.resolve({ rows: [] })),
+      withSchema: vi.fn(() => ({
+        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+      })),
+    });
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('cars');
+      if (message.startsWith('Which column is the unique listing id')) return Promise.resolve('id');
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+      if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
+        return Promise.resolve(fieldMatch[1]);
+      }
+      return Promise.resolve('\0unmapped');
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('merchant_data');
+      if (message.startsWith('Public DNS name'))
+        return Promise.resolve('connector.merchant.example');
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(
+        message.startsWith('Which columns should be searchable')
+          ? ['title']
+          : message === 'Select columns from images to expose:'
+            ? ['image_type', 'image']
+            : [],
+      ),
+    );
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'cars',
+            kind: 'table',
+            rowCount: 40,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ],
+          },
+          {
+            name: 'images',
+            kind: 'table',
+            rowCount: 80,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'car_id', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'image_type', type: 'text', nullable: true, isPrimaryKey: false },
+              { name: 'image', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [
+          {
+            constraintName: 'images_car_id_fkey',
+            fromTable: 'images',
+            fromColumn: 'car_id',
+            toTable: 'cars',
+            toColumn: 'id',
+          },
+        ],
+      },
+      retriedWithTls: false,
+    });
+    try {
+      process.chdir(directory);
+      await runWizard();
+      expect(promptMocks.checkbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Select columns from images to expose:',
+          choices: [
+            expect.objectContaining({ name: 'image_type', checked: true }),
+            expect.objectContaining({ name: 'image', checked: true }),
+          ],
+        }),
+      );
+      expect(consoleLog).not.toHaveBeenCalledWith(expect.stringContaining('no eligible columns'));
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(Object.values(config.resources.inventory.relations ?? {})).toEqual([
+        expect.objectContaining({ table: 'images', imageUrlField: 'image' }),
+      ]);
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('lets the operator map an unconstrained child table when no foreign key points at the inventory view (#27935)', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
