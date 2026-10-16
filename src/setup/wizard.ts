@@ -313,7 +313,7 @@ export function getFieldMappingPrompt(
   return {
     message:
       field === 'images'
-        ? 'Which column contains the images? (one URL or path, a PostgreSQL text array, or a JSON array; e.g. ["https://example.com/photo.jpg"]). Absolute http(s) URLs work directly. Site-relative paths such as "/uploads/car-123.jpg" and bare filenames such as "car-123.jpg" work when you enter the public site origin in Step 6a.'
+        ? 'Which column contains the images? (one URL or path, a PostgreSQL text array, or a JSON array of URLs or {"src": "..."} / {"url": "..."} objects; e.g. ["https://example.com/photo.jpg"]). Absolute http(s) URLs work directly. Site-relative paths such as "/uploads/car-123.jpg" and bare filenames such as "car-123.jpg" work when you enter the public site origin in Step 6a.'
         : `Which column contains the ${field}?`,
     choices,
     default:
@@ -473,8 +473,29 @@ function pickPreferredColumn<T extends { name: string }>(
   );
 }
 
-function pickImageUrlColumn<T extends { name: string }>(columns: readonly T[]): T | undefined {
-  return pickPreferredColumn(columns, /url$|^src$/i, /^(url|src)$/i, /thumb|preview|icon/i);
+type ImageColumnCandidate = { name: string; type: string; udtName?: string | undefined };
+
+/**
+ * Whether a child column can hold the image URL / site-relative path. `url`
+ * and `src` names always qualify; the bare `image`/`photo`/`picture`/
+ * `thumbnail` names the relation classifier uses to detect a photo table
+ * qualify only when the column is text or JSON — a `bytea` `image` is binary
+ * and cannot become an `imageUrlField` (#32981).
+ */
+function isImageUrlColumn(col: ImageColumnCandidate): boolean {
+  if (/url$/i.test(col.name) || /^src$/i.test(col.name)) return true;
+  if (!/^(image|photo|picture|thumbnail)/i.test(col.name) || /_id$/i.test(col.name)) return false;
+  const type = col.type.trim().toLowerCase();
+  return isTextColumn(col) || type === 'json' || type === 'jsonb';
+}
+
+function pickImageUrlColumn<T extends ImageColumnCandidate>(columns: readonly T[]): T | undefined {
+  return pickPreferredColumn(
+    columns.filter(isImageUrlColumn),
+    /./,
+    /^(url|src)$/i,
+    /thumb|preview|icon/i,
+  );
 }
 
 function pickFlattenColumn<T extends { name: string }>(columns: readonly T[]): T | undefined {
@@ -529,7 +550,7 @@ async function collectConfiguredRelation(options: {
     // every other column would be queried and then silently discarded,
     // which reads as "expose" without exposing anything (#27231).
     if (suggestion.relationType === 'images') {
-      return /url$/i.test(col.name) || /^src$/i.test(col.name) || col.name === typeColumn;
+      return isImageUrlColumn(col) || col.name === typeColumn;
     }
     // Same text/numeric/enum allowlist as row attributes — bytea/geometry
     // would ship as Buffer JSON inside a generic relation's attributes.
@@ -542,9 +563,17 @@ async function collectConfiguredRelation(options: {
         ? pickFlattenColumn(selectableColumns)
         : undefined;
   if (selectableColumns.length === 0) {
+    const hasBinaryColumn = relTable.columns.some(
+      (col) =>
+        col.name !== suggestion.foreignKeyColumn &&
+        !col.isPrimaryKey &&
+        !isAttributeEligibleColumn(col),
+    );
     console.log(
       `\nNote: ${suggestion.table} has no eligible columns to expose. ` +
-        'A blob/binary column cannot become images[] or a relation attribute.',
+        (hasBinaryColumn
+          ? 'A blob/binary column cannot become images[] or a relation attribute.'
+          : 'No text column there looks like an image URL or path.'),
     );
     return undefined;
   }

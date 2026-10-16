@@ -670,7 +670,7 @@ describe('health route', () => {
         { id: '1', title: 'Test', price: 100, image_urls: [101, 102] },
         { id: '2', title: 'Also test', price: 200, image_urls: '[103,104]' },
       ],
-      total: 2,
+      total: 3,
     });
     registerHealthRoute(
       app,
@@ -733,12 +733,19 @@ describe('health route', () => {
     const dbAdapter = createHealthAdapter(true);
     vi.mocked(dbAdapter.query).mockResolvedValueOnce({
       rows: [
-        { id: '1', title: 'Test', price: 100, image_urls: [{ src: 'https://example.com/a.jpg' }] },
+        { id: '1', title: 'Test', price: 100, image_urls: [{ attachmentId: 7, alt: 'a' }] },
         {
           id: '2',
           title: 'Also test',
           price: 200,
-          image_urls: [{ src: 'https://example.com/b.jpg' }],
+          image_urls: [{ attachmentId: 8, alt: 'b' }],
+        },
+        // `{src}` objects are served, so they are not flagged (#32982).
+        {
+          id: '3',
+          title: 'Served',
+          price: 300,
+          image_urls: [{ src: 'https://example.com/c.jpg', alt: 'c' }],
         },
       ],
       total: 2,
@@ -847,7 +854,8 @@ describe('health route', () => {
 
     expect(warning).toContain('"car-123"');
     expect(warning).toContain('absolute http(s) URLs');
-    expect(warning).toContain('For relative paths or bare filenames');
+    expect(warning).toContain('If the values are relative paths or bare filenames');
+    expect(warning).toContain('A prefix cannot help numeric ids or objects');
     expect(warning).toContain('set resources.inventory.imageUrlPrefix to the public site origin');
     expect(warning).toContain('rerun `npm run setup`');
     expect(warning).not.toContain('Store absolute https URLs');

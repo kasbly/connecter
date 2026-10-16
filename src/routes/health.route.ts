@@ -569,8 +569,10 @@ export function formatUnservableImageWarning(unservableImageIds: readonly string
   return (
     `Inventory sample rows have image values that cannot be resolved to absolute http(s) URLs: ${ids}. ` +
     'These listings are still sold but reach customers without those photos. ' +
-    'For relative paths or bare filenames, set resources.inventory.imageUrlPrefix to the public site origin ' +
-    '(rerun `npm run setup`).'
+    'If the values are relative paths or bare filenames, set resources.inventory.imageUrlPrefix to the public site origin ' +
+    '(rerun `npm run setup`). ' +
+    'A prefix cannot help numeric ids or objects without a src/url/href/path string: ' +
+    'map a column of URL strings (or {"src": "..."} objects) to images instead.'
   );
 }
 

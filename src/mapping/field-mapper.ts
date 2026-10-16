@@ -89,8 +89,8 @@ export interface ImageValueProblems {
    * Values `normalizeImageUrls` already drops while leaving the rest of the
    * listing intact: a well-formed image string that cannot be resolved with
    * its configured public origin (a storage key, #25790), an object
-   * shape such as a jsonb images column storing `[{"src": "...", "alt": "..."}]`
-   * instead of plain strings (#27421), or a non-string scalar such as a
+   * shape with no `src`/`url`/`href`/`path` string (#27421, #32982), or a
+   * non-string scalar such as a
    * leftover numeric id or boolean (#28747). The listing itself is still
    * sellable, just without that photo.
    */
@@ -137,12 +137,22 @@ function collectImageValueProblems(
     });
     return;
   }
+  if (isPlainObject(value)) {
+    // `{src, alt}` / `{url}` entries (Woo/Magento-shaped jsonb) carry the URL
+    // under a well-known key; judge that value like any other string (#32982).
+    const found = findImageObjectUrl(value);
+    if (found) {
+      collectImageValueProblems(found.url, `${path}.${found.key}`, problems, imageUrlPrefix);
+      return;
+    }
+  }
   if (typeof value !== 'string') {
-    // Non-string entries (numeric attachment ids, booleans, jsonb objects)
-    // cannot be served as photos, but `normalizeImageUrls` already returns
-    // `[]` for them. Classifying scalars as malformed withheld otherwise-valid
-    // listings and 503'd catalogues whose images column is a list of ids
-    // (#28747, same advisory split as #27421 / #25790).
+    // Non-string entries (numeric attachment ids, booleans, objects without a
+    // `src`/`url`/`href`/`path` string) cannot be served as photos, but
+    // `normalizeImageUrls` already returns `[]` for them. Classifying scalars
+    // as malformed withheld otherwise-valid listings and 503'd catalogues
+    // whose images column is a list of ids (#28747, same advisory split as
+    // #27421 / #25790).
     problems.unservable.push(`${path}: image values must be URL strings (got ${typeof value})`);
     return;
   }
@@ -363,13 +373,39 @@ export function mapRowToInventoryItem(
   };
 }
 
+/** Keys, in priority order, under which a jsonb image object stores its URL. */
+const IMAGE_OBJECT_URL_KEYS = ['src', 'url', 'href', 'path'] as const;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The first non-blank string under a well-known URL key of an image object. */
+function findImageObjectUrl(
+  value: Record<string, unknown>,
+): { key: string; url: string } | undefined {
+  for (const key of IMAGE_OBJECT_URL_KEYS) {
+    const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim()) return { key, url: candidate };
+  }
+  return undefined;
+}
+
 /**
  * Normalize a configured image field from PostgreSQL (which returns text arrays
  * as JavaScript arrays), a JSON array, or one URL into non-empty string URLs.
+ * Object entries such as `{"src": "...", "alt": "..."}` (a Woo/Magento-shaped
+ * jsonb column) contribute their `src`/`url`/`href`/`path` string, which then
+ * follows the same absolute / `imageUrlPrefix` rules as a plain string (#32982).
  */
 export function normalizeImageUrls(value: unknown, imageUrlPrefix?: string): string[] {
   if (Array.isArray(value)) {
     return value.flatMap((entry) => normalizeImageUrls(entry, imageUrlPrefix));
+  }
+
+  if (isPlainObject(value)) {
+    const found = findImageObjectUrl(value);
+    return found ? normalizeImageUrls(found.url, imageUrlPrefix) : [];
   }
 
   if (typeof value !== 'string') return [];

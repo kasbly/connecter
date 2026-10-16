@@ -435,6 +435,33 @@ describe('mapRowToInventoryItem', () => {
     ]);
   });
 
+  it('extracts the URL from jsonb image objects ({src, alt}) and applies the prefix rules (#27421, #32982)', () => {
+    const prefix = 'https://shop.example.com';
+    expect(normalizeImageUrls([{ src: 'https://cdn.example/coffee.jpg', alt: 'Coffee' }])).toEqual([
+      'https://cdn.example/coffee.jpg',
+    ]);
+    expect(
+      normalizeImageUrls([{ src: '/media/catalog/product/c/o/coffee.jpg', alt: 'Coffee' }]),
+    ).toEqual([]);
+    expect(
+      normalizeImageUrls([{ src: '/media/catalog/product/c/o/coffee.jpg', alt: 'Coffee' }], prefix),
+    ).toEqual(['https://shop.example.com/media/catalog/product/c/o/coffee.jpg']);
+    expect(
+      normalizeImageUrls(
+        '[{"url": "a.jpg"}, {"href": "https://cdn.example/b.jpg"}, {"path": "/c.jpg"}]',
+        prefix,
+      ),
+    ).toEqual([
+      'https://shop.example.com/a.jpg',
+      'https://cdn.example/b.jpg',
+      'https://shop.example.com/c.jpg',
+    ]);
+    expect(normalizeImageUrls({ src: '  ', url: 'https://cdn.example/d.jpg' })).toEqual([
+      'https://cdn.example/d.jpg',
+    ]);
+    expect(normalizeImageUrls([{ alt: 'no url' }, { src: 42 }, 7, true])).toEqual([]);
+  });
+
   it('resolves site-relative paths and bare filenames against imageUrlPrefix', () => {
     const prefix = 'https://shop.example.com';
     expect(normalizeImageUrls('/wp-content/uploads/2026/03/car-123.jpg', prefix)).toEqual([
@@ -732,6 +759,30 @@ describe('validateInventoryItemWireContract', () => {
         [{ src: 'https://example.com/coffee.jpg', alt: 'Coffee' }],
       ]),
     ).not.toThrow();
+    // An object with no usable URL key stays an advisory, never a 503.
+    expect(() => validateInventoryItemWireContract(item, [[{ alt: 'Coffee' }]])).not.toThrow();
+  });
+
+  it('maps jsonb {src, alt} image objects to photos, resolving relative src against imageUrlPrefix (#32982)', () => {
+    const config: InventoryResourceConfig = {
+      ...baseConfig,
+      fields: { ...baseConfig.fields, images: 'images' },
+    };
+    const mapImages = (images: unknown, cfg = config) =>
+      mapRowToInventoryItem({ id: '1', title: 'Coffee', price: 5, images }, cfg, new Map()).images;
+
+    expect(mapImages([{ src: 'https://cdn.example/coffee.jpg', alt: 'Coffee' }])).toEqual([
+      'https://cdn.example/coffee.jpg',
+    ]);
+    expect(mapImages([{ src: '/media/catalog/product/c/o/coffee.jpg', alt: 'Coffee' }])).toEqual(
+      [],
+    );
+    expect(
+      mapImages([{ src: '/media/catalog/product/c/o/coffee.jpg', alt: 'Coffee' }], {
+        ...config,
+        imageUrlPrefix: 'https://shop.example.com',
+      }),
+    ).toEqual(['https://shop.example.com/media/catalog/product/c/o/coffee.jpg']);
   });
 
   it('serves a listing whose images mix a valid URL with leftover numeric ids (#28747)', () => {
@@ -784,20 +835,34 @@ describe('getImageValueProblems', () => {
     expect(getImageValueProblems(['{"a":1}']).malformed).toEqual([]);
   });
 
-  it('reports an object-shaped image value as unservable, not malformed (#27421)', () => {
-    // A jsonb images column storing objects instead of plain strings, e.g.
-    // `[{"src": "https://example.com/a.jpg", "alt": "Car"}]`. The mapper
-    // already can't interpret it as a URL (`normalizeImageUrls` drops it), so
-    // it belongs in the same advisory tier as a relative path (#25790), not
-    // the tier that withholds the whole listing.
-    expect(getImageValueProblems([[{ src: 'https://example.com/a.jpg', alt: 'Car' }]])).toEqual({
+  it('reports an object-shaped image value with no URL key as unservable, not malformed (#27421)', () => {
+    // A jsonb images column storing objects the mapper cannot read a URL from,
+    // e.g. `[{"id": 7, "alt": "Car"}]`. `normalizeImageUrls` drops it, so it
+    // belongs in the same advisory tier as a relative path (#25790), not the
+    // tier that withholds the whole listing.
+    expect(getImageValueProblems([[{ id: 7, alt: 'Car' }]])).toEqual({
       malformed: [],
       unservable: ['images[0]: image values must be URL strings (got object)'],
     });
 
-    expect(getImageValueProblems([{ url: 'https://example.com/a.jpg' }])).toEqual({
+    expect(getImageValueProblems([{ src: 42 }])).toEqual({
       malformed: [],
       unservable: ['images: image values must be URL strings (got object)'],
+    });
+  });
+
+  it('judges the URL inside an image object like a plain string (#32982)', () => {
+    expect(getImageValueProblems([[{ src: 'https://example.com/a.jpg', alt: 'Car' }]])).toEqual({
+      malformed: [],
+      unservable: [],
+    });
+    expect(getImageValueProblems([{ url: '/media/a.jpg' }])).toEqual({
+      malformed: [],
+      unservable: ['images.url: image values must be absolute http(s) URLs (got "/media/a.jpg")'],
+    });
+    expect(getImageValueProblems([{ url: '/media/a.jpg' }], 'https://shop.example.com')).toEqual({
+      malformed: [],
+      unservable: [],
     });
   });
 
