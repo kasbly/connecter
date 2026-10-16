@@ -558,7 +558,7 @@ export function formatWireContractViolationWarning(
 
 /**
  * One operator-facing line naming the sampled listings whose image values the
- * connector cannot serve, or `null` when every image is an absolute URL. These
+ * connector cannot serve, or `null` when every image resolves to an absolute URL. These
  * listings are still sold - they just reach customers with fewer photos - so
  * this must never read like the withheld-listing warning above (#25790).
  */
@@ -567,10 +567,10 @@ export function formatUnservableImageWarning(unservableImageIds: readonly string
 
   const ids = unservableImageIds.map((id) => JSON.stringify(id)).join(', ');
   return (
-    `Inventory sample rows have image values that are not absolute http(s) URLs: ${ids}. ` +
-    'Those values (e.g. "/wp-content/uploads/car-123.jpg" or "car-123.jpg") are dropped, so ' +
-    'these listings are still sold but reach customers without those photos. ' +
-    'Store absolute https URLs in the mapped image column.'
+    `Inventory sample rows have image values that cannot be resolved to absolute http(s) URLs: ${ids}. ` +
+    'These listings are still sold but reach customers without those photos. ' +
+    'For relative paths or bare filenames, set resources.inventory.imageUrlPrefix to the public site origin ' +
+    '(rerun `npm run setup`).'
   );
 }
 

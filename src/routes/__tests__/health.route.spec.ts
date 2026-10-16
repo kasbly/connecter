@@ -847,6 +847,10 @@ describe('health route', () => {
 
     expect(warning).toContain('"car-123"');
     expect(warning).toContain('absolute http(s) URLs');
+    expect(warning).toContain('For relative paths or bare filenames');
+    expect(warning).toContain('set resources.inventory.imageUrlPrefix to the public site origin');
+    expect(warning).toContain('rerun `npm run setup`');
+    expect(warning).not.toContain('Store absolute https URLs');
     expect(formatUnservableImageWarning([])).toBeNull();
   });
 

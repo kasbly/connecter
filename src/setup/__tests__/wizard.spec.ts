@@ -329,6 +329,10 @@ describe('getFieldMappingPrompt', () => {
 
     expect(prompt.message).toContain('PostgreSQL text array');
     expect(prompt.message).toContain('https://example.com/photo.jpg');
+    expect(prompt.message).toContain('Site-relative paths such as "/uploads/car-123.jpg"');
+    expect(prompt.message).toContain('bare filenames such as "car-123.jpg" work');
+    expect(prompt.message).toContain('public site origin in Step 6a');
+    expect(prompt.message).not.toContain('are dropped');
   });
 });
 

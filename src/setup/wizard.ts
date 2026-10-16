@@ -313,7 +313,7 @@ export function getFieldMappingPrompt(
   return {
     message:
       field === 'images'
-        ? 'Which column contains the images? (one URL, a PostgreSQL text array, or a JSON array; e.g. ["https://example.com/photo.jpg"]). Values must be absolute http(s) URLs \u2014 site-relative paths and bare filenames such as "/uploads/car-123.jpg" are dropped, and those listings reach customers without photos.'
+        ? 'Which column contains the images? (one URL or path, a PostgreSQL text array, or a JSON array; e.g. ["https://example.com/photo.jpg"]). Absolute http(s) URLs work directly. Site-relative paths such as "/uploads/car-123.jpg" and bare filenames such as "car-123.jpg" work when you enter the public site origin in Step 6a.'
         : `Which column contains the ${field}?`,
     choices,
     default:
