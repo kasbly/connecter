@@ -129,6 +129,37 @@ describe('buildQuery', () => {
     });
   });
 
+  it('searches flattened relations with quoted schema and table names', () => {
+    const result = buildQuery(
+      { search: 'leather' },
+      {
+        ...baseConfig,
+        schema: 'merchant-data',
+        table: 'Inventory Items',
+        relations: {
+          features: {
+            schema: 'المنتجات',
+            table: 'prodüct"features',
+            foreignKey: 'carId',
+            referenceKey: 'id',
+            fields: { name: 'name' },
+            flatten: 'name',
+          },
+        },
+      },
+    );
+    expect(result.conditions).toContainEqual(
+      expect.objectContaining({
+        column: expect.stringContaining(
+          'FROM "المنتجات"."prodüct""features" AS __kasbly_search_relation ' +
+            'WHERE __kasbly_search_relation.carId = "merchant-data"."Inventory Items".id',
+        ),
+        operator: 'ILIKE',
+        value: 'leather',
+      }),
+    );
+  });
+
   it('lets an operator opt a flattened relation out of search', () => {
     const result = buildQuery(
       { search: 'leather' },

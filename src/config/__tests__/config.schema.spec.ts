@@ -123,17 +123,46 @@ describe('connectorConfigSchema inventory fields', () => {
     );
   });
 
-  it.each(['catalog.products', 'catalog-products', '1catalog'])(
-    'rejects an unsafe PostgreSQL schema identifier: %s',
-    (schema) => {
+  it.each(['car-listings', 'Inventory Items', 'prodüct', 'المنتجات', 'a"b', '1catalog'])(
+    'accepts quoted PostgreSQL schema and table names: %s',
+    (name) => {
+      const config = connectorConfigSchema.parse({
+        ...createConfigInput(),
+        resources: {
+          inventory: {
+            ...createConfigInput().resources.inventory,
+            schema: name,
+            table: name,
+            relations: {
+              features: {
+                schema: name,
+                table: name,
+                foreignKey: 'product_id',
+                referenceKey: 'id',
+                fields: { name: 'name' },
+              },
+            },
+          },
+        },
+      });
+      expect(config.resources.inventory).toMatchObject({
+        schema: name,
+        table: name,
+        relations: { features: { schema: name, table: name } },
+      });
+    },
+  );
+
+  it.each(['', 'invalid\0name'])('rejects an invalid PostgreSQL identifier: %j', (name) => {
+    for (const field of ['schema', 'table']) {
       expect(() =>
         connectorConfigSchema.parse({
           ...createConfigInput(),
-          resources: { inventory: { ...createConfigInput().resources.inventory, schema } },
+          resources: { inventory: { ...createConfigInput().resources.inventory, [field]: name } },
         }),
       ).toThrow();
-    },
-  );
+    }
+  });
 
   it.each(['title', 'price', 'currency'])('requires a %s mapping', (field) => {
     const config = createConfigInput();

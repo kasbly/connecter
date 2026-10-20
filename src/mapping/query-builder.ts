@@ -44,12 +44,6 @@ export function getSearchableColumns(config: InventoryResourceConfig): string[] 
 
     const relationSchema = relation.schema ?? config.schema ?? 'public';
     const inventorySchema = config.schema ?? 'public';
-    if (
-      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(relationSchema) ||
-      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(relation.table)
-    ) {
-      continue;
-    }
 
     const relationFilter = relation.filter
       ? ` AND (${relation.filter.replaceAll('?', '\\?')})`

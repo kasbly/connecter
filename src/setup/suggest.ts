@@ -224,10 +224,18 @@ export function suggestFieldMappings(columns: IntrospectedColumn[]): FieldSugges
   return suggestions;
 }
 
-export function suggestPublishedColumn(columns: IntrospectedColumn[]): string | null {
+export function suggestPublishedColumn(
+  columns: IntrospectedColumn[],
+): { column: string; expression: string } | null {
   for (const col of columns) {
-    for (const pattern of PUBLISHED_PATTERNS) {
-      if (pattern.test(col.name)) return col.name;
+    if (!PUBLISHED_PATTERNS.some((pattern) => pattern.test(col.name))) continue;
+
+    const type = col.type.trim().toLowerCase();
+    if (type === 'boolean' || type === 'bool') {
+      return { column: col.name, expression: `${col.name} = true` };
+    }
+    if (NUMERIC_TYPES.has(type)) {
+      return { column: col.name, expression: `${col.name} <> 0` };
     }
   }
   return null;

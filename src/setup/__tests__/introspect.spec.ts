@@ -159,6 +159,15 @@ describe('introspectDatabase', () => {
       expect.stringContaining('WHERE table_name = ? AND table_schema = ?'),
       ['products', 'catalog'],
     );
+    const pkSql = db.raw.mock.calls[3]![0] as string;
+    expect(pkSql).toContain('FROM pg_constraint c');
+    expect(pkSql).toContain("c.contype = 'p'");
+    expect(pkSql).toContain('unnest(c.conkey) WITH ORDINALITY');
+    expect(pkSql).toContain('a.attrelid = c.conrelid AND a.attnum = key.attnum');
+    expect(pkSql).toContain('cl.relname = ?');
+    expect(pkSql).toContain('n.nspname = ?');
+    expect(pkSql).not.toContain('information_schema.table_constraints');
+    expect(db.raw).toHaveBeenNthCalledWith(4, pkSql, ['products', 'catalog']);
     expect(db.raw).toHaveBeenNthCalledWith(6, expect.stringContaining('FROM pg_constraint c'), [
       'catalog',
     ]);
@@ -355,5 +364,26 @@ describe('introspectDatabase', () => {
     for (const column of result.result.tables[0]!.columns) {
       expect(column.type).not.toMatch(/\(/);
     }
+  });
+
+  it('excludes child partitions and cloned foreign keys from relation discovery', async () => {
+    const db = {
+      raw: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] }),
+    };
+    knexMock.mockReturnValueOnce(db);
+
+    await introspectDatabase({ ...connection, schema: 'catalog' });
+
+    const tableSql = db.raw.mock.calls[1]![0] as string;
+    expect(tableSql).toMatch(/AND NOT EXISTS \([\s\S]*AND c\.relispartition/);
+    expect(tableSql).toContain('c.relname = tables.table_name');
+    expect(tableSql).toContain('n.nspname = tables.table_schema');
+    expect(db.raw).toHaveBeenNthCalledWith(3, expect.stringContaining('AND c.conparentid = 0'), [
+      'catalog',
+    ]);
   });
 });

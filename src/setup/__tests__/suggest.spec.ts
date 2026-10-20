@@ -249,9 +249,32 @@ describe('suggestUpdatedAtColumn', () => {
 });
 
 describe('suggestPublishedColumn', () => {
-  it('finds published column', () => {
-    expect(suggestPublishedColumn([col('published', 'boolean')])).toBe('published');
-    expect(suggestPublishedColumn([col('is_active', 'boolean')])).toBe('is_active');
+  it.each(['published', 'is_active', 'active', 'is_published', 'visible'])(
+    'uses a boolean predicate for %s',
+    (column) => {
+      expect(suggestPublishedColumn([col(column, 'boolean')])).toEqual({
+        column,
+        expression: `${column} = true`,
+      });
+    },
+  );
+
+  it.each(['smallint', 'integer', 'bigint', 'numeric'])(
+    'uses a nonzero predicate for a %s published flag',
+    (type) => {
+      expect(suggestPublishedColumn([col('is_active', type)])).toEqual({
+        column: 'is_active',
+        expression: 'is_active <> 0',
+      });
+    },
+  );
+
+  it('skips text flags without guessing their active values', () => {
+    expect(suggestPublishedColumn([col('is_active', 'text')])).toBeNull();
+    expect(suggestPublishedColumn([col('published', 'text'), col('active', 'boolean')])).toEqual({
+      column: 'active',
+      expression: 'active = true',
+    });
   });
 
   it('returns null when none found', () => {
@@ -589,6 +612,16 @@ describe('suggestJoinColumn', () => {
     expect(
       suggestJoinColumn('products', 'id', [col('id', 'uuid', true), col('url', 'text')]),
     ).toBeNull();
+  });
+
+  it('joins FK-less photos to vehicles by listing_id instead of the photo primary key', () => {
+    expect(
+      suggestJoinColumn('vehicles', 'id', [
+        col('id', 'integer', true),
+        col('listing_id', 'integer'),
+        col('url', 'text'),
+      ]),
+    ).toBe('listing_id');
   });
 
   it('does not guess when two *_id columns are equally plausible', () => {

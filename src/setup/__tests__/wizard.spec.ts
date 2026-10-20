@@ -77,7 +77,7 @@ vi.mock('../../routes/health.route.js', async (importOriginal) => {
   };
 });
 
-function mockWizardProbeFailureSetup() {
+function mockWizardProbeFailureSetup(tableName = 'available_products', port = '5432') {
   const db = Object.assign(vi.fn(), {
     destroy: vi.fn().mockResolvedValue(undefined),
     withSchema: vi.fn(() => ({
@@ -86,7 +86,7 @@ function mockWizardProbeFailureSetup() {
   });
   vi.clearAllMocks();
   promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
-  promptMocks.select.mockImplementationOnce(() => Promise.resolve('available_products'));
+  promptMocks.select.mockImplementationOnce(() => Promise.resolve(tableName));
   promptMocks.select.mockImplementationOnce(() => Promise.resolve('sku'));
   promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
   for (const answer of [
@@ -104,7 +104,7 @@ function mockWizardProbeFailureSetup() {
   promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
   for (const answer of [
     'database.example.com',
-    '5432',
+    port,
     'catalog',
     'reader',
     'merchant_data',
@@ -126,7 +126,7 @@ function mockWizardProbeFailureSetup() {
     result: {
       tables: [
         {
-          name: 'available_products',
+          name: tableName,
           kind: 'view',
           rowCount: 40,
           columns: [
@@ -422,6 +422,16 @@ describe('derivePublishedRelationName', () => {
     expect(derivePublishedRelationName('CarFeatures', 'Car')).toBe('features');
   });
 
+  it.each([
+    ['CarSpecs', 'Car', 'specs'],
+    ['CarSeats', 'Car', 'seats'],
+    ['ProductSizes', 'Product', 'sizes'],
+    ['ListingSpecs', 'Listing', 'specs'],
+    ['carspecs', 'car', 'specs'],
+  ])('preserves a noun starting with s in %s', (table, mainTable, expected) => {
+    expect(derivePublishedRelationName(table, mainTable)).toBe(expected);
+  });
+
   it('strips a plural main-table prefix when the main table is itself plural', () => {
     expect(derivePublishedRelationName('cars_features', 'cars')).toBe('features');
   });
@@ -433,6 +443,7 @@ describe('derivePublishedRelationName', () => {
 
   it('strips a pluralized prefix off a singular main table (#27422)', () => {
     expect(derivePublishedRelationName('cars_features', 'car')).toBe('features');
+    expect(derivePublishedRelationName('cars-features', 'car')).toBe('features');
   });
 
   it('strips a pluralized prefix off a singular main table for another noun (#27422)', () => {
@@ -2972,7 +2983,7 @@ describe('runWizard', () => {
     }
   });
 
-  it('pre-checks SKU search and defaults in-stock to Yes when the existing YAML predates them (#31602)', async () => {
+  it('restores a numeric published filter while adding SKU search and stock defaults (#31602, #33273)', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
     const db = Object.assign(vi.fn(), {
@@ -3011,7 +3022,7 @@ describe('runWizard', () => {
         '      currency: currency',
         '    searchableColumns:',
         '      - \'"title"\'',
-        '    baseFilter: \'"published" = true AND "deletedAt" IS NULL\'',
+        '    baseFilter: \'"is_active" <> 0 AND "deletedAt" IS NULL\'',
         '',
       ].join('\n'),
     );
@@ -3076,7 +3087,7 @@ describe('runWizard', () => {
               { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
               { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
               { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
-              { name: 'published', type: 'boolean', nullable: false, isPrimaryKey: false },
+              { name: 'is_active', type: 'smallint', nullable: false, isPrimaryKey: false },
               { name: 'qty', type: 'integer', nullable: false, isPrimaryKey: false },
               { name: 'deletedAt', type: 'timestamp', nullable: true, isPrimaryKey: false },
             ],
@@ -3113,6 +3124,13 @@ describe('runWizard', () => {
       );
       expect(config.resources.inventory.searchableColumns).toContain('"sku"');
       expect(config.resources.inventory.baseFilter).toContain('"qty" > 0');
+      expect(promptMocks.confirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Only expose published items? (detected column: is_active)',
+          default: true,
+        }),
+      );
+      expect(config.resources.inventory.baseFilter).toContain('"is_active" <> 0');
     } finally {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
@@ -3938,6 +3956,56 @@ describe('runWizard', () => {
     }
   });
 
+  it('saves a quoted table name and rejects blank database connection prompts', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = mockWizardProbeFailureSetup('Inventory Items');
+    try {
+      process.chdir(directory);
+      await runWizard();
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(config.resources.inventory.table).toBe('Inventory Items');
+      expect(db.destroy).toHaveBeenCalledOnce();
+      for (const message of ['Database name:', 'Username:']) {
+        const prompt = promptMocks.input.mock.calls.find(
+          ([options]) => options.message === message,
+        )![0];
+        expect(prompt.validate('')).not.toBe(true);
+        expect(prompt.validate('   ')).not.toBe(true);
+        expect(prompt.validate('catalog')).toBe(true);
+      }
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when the generated configuration is invalid after a passing probe', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = mockWizardProbeFailureSetup('available_products', '0');
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      process.chdir(directory);
+      await expect(runWizard()).rejects.toThrow();
+      expect(resourceProbeMocks.probeInventoryResource).toHaveBeenCalledOnce();
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining('Cannot save configuration: generated config is invalid:'),
+      );
+      expect(existsSync(join(directory, '.env'))).toBe(false);
+      expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
+      expect(resourceProbeMocks.adapter.disconnect).toHaveBeenCalledOnce();
+      expect(db.destroy).toHaveBeenCalledOnce();
+    } finally {
+      consoleError.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('reports a systematic sample-row contract failure and exits unsuccessfully', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
@@ -4071,7 +4139,13 @@ describe('runWizard', () => {
     }
   });
 
-  it('refuses a materialized view with no readable columns before field mapping', async () => {
+  it.each([
+    { columns: [], error: 'has no readable columns' },
+    {
+      columns: [{ name: 'id', type: 'text', nullable: false, isPrimaryKey: true }],
+      error: 'unique listing id "missing" is not a column',
+    },
+  ])('fails setup before field mapping when $error', async ({ columns, error }) => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
     const db = { destroy: vi.fn().mockResolvedValue(undefined) };
@@ -4081,6 +4155,8 @@ describe('runWizard', () => {
     promptMocks.select.mockImplementation(({ message }: { message: string }) => {
       if (message.startsWith('Database type')) return Promise.resolve('postgres');
       if (message.startsWith('Which table contains')) return Promise.resolve('inventory');
+      if (message.startsWith('Which column is the unique listing id'))
+        return Promise.resolve('missing');
       throw new Error(`Unexpected select prompt: ${message}`);
     });
     promptMocks.input.mockImplementation(({ message }: { message: string }) => {
@@ -4095,7 +4171,7 @@ describe('runWizard', () => {
     vi.mocked(introspectDatabase).mockResolvedValueOnce({
       db: db as never,
       result: {
-        tables: [{ name: 'inventory', kind: 'materialized view', rowCount: 12000, columns: [] }],
+        tables: [{ name: 'inventory', kind: 'materialized view', rowCount: 12000, columns }],
         foreignKeys: [],
       },
       retriedWithTls: false,
@@ -4103,11 +4179,9 @@ describe('runWizard', () => {
 
     try {
       process.chdir(directory);
-      await runWizard();
+      await expect(runWizard()).rejects.toThrow(error);
 
-      expect(consoleError).toHaveBeenCalledWith(
-        'Cannot save configuration: this materialized view has no readable columns — grant SELECT or pick another object.',
-      );
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining(error));
       expect(db.destroy).toHaveBeenCalledOnce();
       expect(promptMocks.select).not.toHaveBeenCalledWith(
         expect.objectContaining({ message: expect.stringContaining('Which column contains') }),

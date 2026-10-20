@@ -154,6 +154,13 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
             END AS kind
      FROM information_schema.tables
      WHERE table_schema = ? AND table_type IN ('BASE TABLE', 'VIEW')
+       AND NOT EXISTS (
+         SELECT 1
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relname = tables.table_name AND n.nspname = tables.table_schema
+           AND c.relispartition
+       )
      UNION ALL
      SELECT matviewname AS name, 'materialized view' AS kind
      FROM pg_matviews
@@ -252,14 +259,19 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
             [tableName, schema],
           )
         : await db.raw<{ rows: { column_name: string }[] }>(
-            `SELECT kcu.column_name
-       FROM information_schema.table_constraints tc
-       JOIN information_schema.key_column_usage kcu
-         ON tc.constraint_name = kcu.constraint_name
-         AND tc.table_schema = kcu.table_schema
-       WHERE tc.constraint_type = 'PRIMARY KEY'
-         AND tc.table_name = ?
-       AND tc.table_schema = ?`,
+            // information_schema.table_constraints hides keys from SELECT-only
+            // roles. Catalogs retain them without requiring write privileges.
+            `SELECT a.attname AS column_name
+             FROM pg_constraint c
+             JOIN pg_class cl ON cl.oid = c.conrelid
+             JOIN pg_namespace n ON n.oid = cl.relnamespace
+             JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS key(attnum, ordinal_position)
+               ON TRUE
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = key.attnum
+             WHERE c.contype = 'p'
+               AND cl.relname = ?
+               AND n.nspname = ?
+             ORDER BY key.ordinal_position`,
             [tableName, schema],
           );
     const pkColumns = new Set(pkRows.rows.map((r) => r.column_name));
@@ -318,6 +330,7 @@ async function introspectForeignKeys(db: Knex, schema: string): Promise<ForeignK
      JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.att
      JOIN pg_attribute fa ON fa.attrelid = c.confrelid AND fa.attnum = k.fatt
      WHERE c.contype = 'f'
+       AND c.conparentid = 0
        AND n.nspname = ?
      ORDER BY cl.relname, c.conname, k.ord`,
     [schema],

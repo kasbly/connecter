@@ -269,11 +269,12 @@ export function derivePublishedRelationName(table: string, mainTable: string): s
   const lowerMain = mainTable.toLowerCase();
 
   let noun = table;
-  if (lowerTable.startsWith(`${lowerMain}s`) && lowerTable.length > lowerMain.length + 1) {
+  if (lowerTable.startsWith(`${lowerMain}s`) && /^[_-]/.test(table.slice(mainTable.length + 1))) {
     // Plural main-table prefix, e.g. `cars_features` off a `car`/`cars` table.
     // Tested before the singular-prefix branch below since `lowerMain + 's'`
     // starting is a strict subset of `lowerMain` starting — the singular
     // branch would otherwise always win and this one would never run.
+    // Require a separator so `CarSpecs` keeps the noun's leading `s`.
     noun = table.slice(mainTable.length + 1);
   } else if (lowerTable.startsWith(lowerMain) && lowerTable.length > lowerMain.length) {
     noun = table.slice(mainTable.length);
@@ -779,8 +780,13 @@ export async function runWizard(): Promise<void> {
   const dbName = await input({
     message: 'Database name:',
     default: existingConfig?.database.database,
+    validate: (value) => value.trim() !== '' || 'Database name is required',
   });
-  const dbUser = await input({ message: 'Username:', default: existingConfig?.database.user });
+  const dbUser = await input({
+    message: 'Username:',
+    default: existingConfig?.database.user,
+    validate: (value) => value.trim() !== '' || 'Username is required',
+  });
   // Password prompts deliberately have no default. Reuse the validated existing
   // value on edits so a mapping-only change does not require re-entering it.
   const dbPassword =
@@ -863,11 +869,10 @@ export async function runWizard(): Promise<void> {
   const selectedTable = result.tables.find((t) => t.name === selectedTableName)!;
 
   if (selectedTable.columns.length === 0) {
-    console.error(
-      `Cannot save configuration: this ${selectedTable.kind} has no readable columns — grant SELECT or pick another object.`,
-    );
+    const message = `Cannot save configuration: this ${selectedTable.kind} has no readable columns — grant SELECT or pick another object.`;
+    console.error(message);
     await db.destroy();
-    return;
+    throw new Error(message);
   }
 
   // Step 3: Field Mapping
@@ -887,11 +892,10 @@ export async function runWizard(): Promise<void> {
   const idPrompt = getIdColumnPrompt(selectedTable.columns, suggestedId);
   const idColumn = await select(idPrompt);
   if (!selectedTable.columns.some((column) => column.name === idColumn)) {
-    console.error(
-      `Cannot save configuration: unique listing id "${idColumn}" is not a column on this ${selectedTable.kind}.`,
-    );
+    const message = `Cannot save configuration: unique listing id "${idColumn}" is not a column on this ${selectedTable.kind}.`;
+    console.error(message);
     await db.destroy();
-    return;
+    throw new Error(message);
   }
   const suggestedUpdatedAt =
     getExistingMappingSelection(
@@ -1180,22 +1184,24 @@ export async function runWizard(): Promise<void> {
 
   // Step 4: Filters
   console.log('\nStep 4: Filters');
-  const publishedColumn = suggestPublishedColumn(selectedTable.columns);
+  const publishedFilter = suggestPublishedColumn(selectedTable.columns);
   const inStockFilter = suggestInStockFilter(selectedTable.columns);
   const softDeleteColumn = suggestSoftDeleteColumn(selectedTable.columns);
 
   let baseFilterParts: string[] = [];
 
-  if (publishedColumn) {
+  if (publishedFilter) {
+    const publishedFilterExpression = publishedFilter.expression.replace(
+      publishedFilter.column,
+      quoteIfNeeded(publishedFilter.column),
+    );
     const usePublished = await confirm({
-      message: `Only expose published items? (detected column: ${publishedColumn})`,
+      message: `Only expose published items? (detected column: ${publishedFilter.column})`,
       default:
-        existingConfig?.resources.inventory.baseFilter?.includes(
-          `${quoteIfNeeded(publishedColumn)} = true`,
-        ) ?? true,
+        existingConfig?.resources.inventory.baseFilter?.includes(publishedFilterExpression) ?? true,
     });
     if (usePublished) {
-      baseFilterParts.push(`${quoteIfNeeded(publishedColumn)} = true`);
+      baseFilterParts.push(publishedFilterExpression);
     }
   }
 
@@ -1766,7 +1772,7 @@ export async function runWizard(): Promise<void> {
       }`,
     );
     await db.destroy();
-    return;
+    throw error;
   }
   if (hasExistingConfig) backupPrivateFile(configPath);
   if (hasExistingEnv) backupPrivateFile(envPath);

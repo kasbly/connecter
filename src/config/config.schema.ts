@@ -77,7 +77,8 @@ const filterableColumnSchema = z.object({
 // one table identifier (for example, `catalog.products`).
 const postgresIdentifierSchema = z
   .string()
-  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'must be a PostgreSQL identifier');
+  .min(1)
+  .refine((name) => !name.includes('\0'), 'must not contain a NUL byte');
 
 const relationSchema = z.object({
   schema: postgresIdentifierSchema.optional(),
