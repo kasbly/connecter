@@ -38,6 +38,8 @@
   },
   "overrides": {
     "nanoid": ">=3.3.17",
-    "fast-uri": ">=4.1.3"
+    "fast-uri": ">=4.1.3",
+    "source-map-js": ">=1.2.2 <2",
+    "vite": ">=8.3.3 <8.4"
   }
 }
