@@ -1245,10 +1245,45 @@ describe('runWizard', () => {
     }
   });
 
-  it('writes an images filter from a detected type column and publishes a flatten relation under its semantic name, not the internal map key (#27231)', async () => {
+  it.each([
+    {
+      scenario: 'selected photo types',
+      answers: [['gallery', 'featured', "Men's"]],
+      expectedFilter: `"type" = 'gallery' OR "type" = 'featured' OR "type" = 'Men''s'`,
+      firstRunUnchecked: false,
+    },
+    {
+      scenario: 'accepting all unchecked types on first setup',
+      answers: [[]],
+      expectedFilter: 'FALSE',
+      firstRunUnchecked: true,
+    },
+    {
+      scenario: 'clearing a saved gallery-only filter',
+      answers: [['gallery'], []],
+      expectedFilter: 'FALSE',
+      firstRunUnchecked: false,
+    },
+    {
+      scenario: 'keeping every type unchecked on a rerun',
+      answers: [[], []],
+      expectedFilter: 'FALSE',
+      firstRunUnchecked: false,
+    },
+    {
+      scenario: 'explicitly including every type',
+      answers: [['\0all-image-types']],
+      expectedFilter: undefined,
+      firstRunUnchecked: false,
+    },
+  ])('saves $scenario in image relations', async (testCase) => {
+    const { answers, expectedFilter, firstRunUnchecked } = testCase;
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
-    const distinctImageTypes = ["Men's", 'featured', 'gallery', 'icon', 'invoice', 'thumbnail'];
+    const distinctImageTypes = firstRunUnchecked
+      ? ['مصغرة', 'thumb', 'swatch', 'document']
+      : ["Men's", 'featured', 'gallery', 'icon', 'invoice', 'thumbnail'];
+    let includedTypes = answers[0]!;
     const db = Object.assign(vi.fn(), {
       destroy: vi.fn().mockResolvedValue(undefined),
       withSchema: vi.fn(() => ({
@@ -1298,11 +1333,11 @@ describe('runWizard', () => {
       if (message.startsWith('Select columns from Image')) return Promise.resolve(['url']);
       if (message.startsWith('Select columns from CarFeatures')) return Promise.resolve(['name']);
       if (message.startsWith('Which "type" values on Image')) {
-        return Promise.resolve(['gallery', 'featured', "Men's"]);
+        return Promise.resolve(includedTypes);
       }
       return Promise.resolve([]);
     });
-    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+    vi.mocked(introspectDatabase).mockResolvedValue({
       db: db as never,
       result: {
         tables: [
@@ -1365,7 +1400,10 @@ describe('runWizard', () => {
 
     try {
       process.chdir(directory);
-      await runWizard();
+      for (const answer of answers) {
+        includedTypes = answer;
+        await runWizard();
+      }
 
       const config = loadExistingSetupConfig(
         join(directory, 'connector.config.yml'),
@@ -1375,15 +1413,28 @@ describe('runWizard', () => {
 
       expect(config.resources.inventory.imageUrlPrefix).toBe('https://shop.example.com');
 
-      // The images relation's map key is still the disambiguated
-      // `table__foreignKey` key (unchanged from #26144), and it now also
-      // carries a `filter` built from the operator's gallery/featured picks —
-      // the README's documented shape, gated on a real detected type column.
+      // Keep the disambiguated relation key while persisting the merchant's
+      // type selection, including an empty selection across reruns.
       expect(relations['Image__carId']).toMatchObject({
         table: 'Image',
         imageUrlField: 'url',
-        filter: `"type" = 'gallery' OR "type" = 'featured' OR "type" = 'Men''s'`,
       });
+      expect(relations['Image__carId']?.filter).toBe(expectedFilter);
+      const imageTypePrompts = promptMocks.checkbox.mock.calls.filter(([arg]) =>
+        arg.message.startsWith('Which "type" values on Image'),
+      );
+      const choices = imageTypePrompts.at(-1)?.[0].choices;
+      expect(choices).toContainEqual({
+        name: expect.stringContaining('Include every type'),
+        value: '\0all-image-types',
+        checked: false,
+      });
+      if (firstRunUnchecked || answers.length > 1) {
+        const checkedTypes = choices
+          .filter((choice: { checked: boolean }) => choice.checked)
+          .map((choice: { value: string }) => choice.value);
+        expect(checkedTypes).toEqual(answers.length > 1 ? answers[0] : []);
+      }
 
       // The features relation's map key is still the disambiguated internal
       // key, matching the existing product_images__product_sku convention —
@@ -2850,7 +2901,8 @@ describe('runWizard', () => {
         (arg as { message: string }).message.startsWith('Which "type" values on Image'),
       );
       const choices = call?.[0].choices as Array<{ value: string }>;
-      expect(choices).toHaveLength(25);
+      expect(choices).toHaveLength(26);
+      expect(choices).toContainEqual(expect.objectContaining({ value: '\0all-image-types' }));
       expect(choices.map((c) => c.value)).not.toContain('t25');
       expect(consoleLog).toHaveBeenCalledWith(
         expect.stringContaining('more than 25 distinct values'),

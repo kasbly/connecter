@@ -658,18 +658,30 @@ async function collectConfiguredRelation(options: {
         }
         const includedValues = await checkbox({
           message: `Which "${typeColumn}" values on ${suggestion.table} are customer-facing photos? (unchecked values — e.g. thumbnails, icons, invoices — are left out of images[])`,
-          choices: presentedValues.map((value) => ({
-            name: value,
-            value,
-            checked: existingRelation?.filter
-              ? existingRelation.filter.includes(toConfigLiteral(value))
-              : /gallery|featured|photo|primary|main|hero/i.test(value),
-          })),
+          choices: [
+            ...presentedValues.map((value) => ({
+              name: value,
+              value,
+              checked: existingRelation?.filter
+                ? existingRelation.filter.includes(toConfigLiteral(value))
+                : /gallery|featured|photo|primary|main|hero/i.test(value),
+            })),
+            {
+              name: 'Include every type (including thumbnails, icons, invoices, and values not shown)',
+              value: '\0all-image-types',
+              checked: false,
+            },
+          ],
         });
-        if (includedValues.length > 0) {
-          relation['filter'] = includedValues
-            .map((value) => `${quoteIfNeeded(typeColumn)} = ${toConfigLiteral(value)}`)
-            .join(' OR ');
+        // No checked types means no photos, including when clearing a saved
+        // filter. Only the explicit all-types choice may remove the predicate.
+        if (!includedValues.includes('\0all-image-types')) {
+          relation['filter'] =
+            includedValues.length > 0
+              ? includedValues
+                  .map((value) => `${quoteIfNeeded(typeColumn)} = ${toConfigLiteral(value)}`)
+                  .join(' OR ')
+              : 'FALSE';
         }
       }
     }
