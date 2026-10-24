@@ -120,6 +120,47 @@ describe('mapRowToInventoryItem', () => {
     expect(result.updatedAt).toBe('2026-03-01T12:00:00.000Z');
   });
 
+  it.each([
+    [1710000000, '2024-03-09T16:00:00.000Z'],
+    ['1710000000', '2024-03-09T16:00:00.000Z'],
+    [1710000000000, '2024-03-09T16:00:00.000Z'],
+    ['1710000000000', '2024-03-09T16:00:00.000Z'],
+    [0, '1970-01-01T00:00:00.000Z'],
+    ['0', '1970-01-01T00:00:00.000Z'],
+    [-1, '1969-12-31T23:59:59.000Z'],
+    ['2026-01-15T10:00:00Z', '2026-01-15T10:00:00Z'],
+    [null, null],
+  ])('emits a wire-valid updatedAt for %j', (updatedAt, expected) => {
+    const item = mapRowToInventoryItem(
+      { id: '1', title: 'Test', price: 100, updatedAt },
+      baseConfig,
+      new Map(),
+    );
+    expect(item.updatedAt).toBe(expected);
+    expect(() => validateInventoryItemWireContract(item)).not.toThrow();
+  });
+
+  it('uses configured epoch units even for early millisecond timestamps', () => {
+    const item = mapRowToInventoryItem(
+      { id: '1', title: 'Test', price: 100, updatedAt: '1000' },
+      { ...baseConfig, updatedAtEpoch: 'ms' },
+      new Map(),
+    );
+    expect(item.updatedAt).toBe('1970-01-01T00:00:01.000Z');
+  });
+
+  it.each([Infinity, '999999999999999999999', 'not-a-date'])(
+    'keeps invalid updatedAt %j subject to wire validation',
+    (updatedAt) => {
+      const item = mapRowToInventoryItem(
+        { id: '1', title: 'Test', price: 100, updatedAt },
+        baseConfig,
+        new Map(),
+      );
+      expect(() => validateInventoryItemWireContract(item)).toThrow('Invalid updatedAt date');
+    },
+  );
+
   it('handles missing updatedAt', () => {
     const configNoUpdate = { ...baseConfig, updatedAtColumn: undefined };
     const row = { id: '1', title: 'Test', price: 100 };

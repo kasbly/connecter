@@ -471,6 +471,21 @@ describe('buildQuery', () => {
     });
   });
 
+  it.each([
+    ['s', 1710000001],
+    ['ms', 1710000000123],
+  ] as const)('binds an integer %s epoch for updatedSince', (updatedAtEpoch, expected) => {
+    const result = buildQuery(
+      { updatedSince: '2024-03-09T16:00:00.123Z' },
+      { ...baseConfig, updatedAtEpoch },
+    );
+    expect(result.conditions).toContainEqual({
+      column: 'updatedAt',
+      operator: '>=',
+      value: expected,
+    });
+  });
+
   it('rejects an invalid updatedSince value before it reaches the database', () => {
     expect(() => buildQuery({ updatedSince: 'not-a-date' }, baseConfig)).toThrow(
       expect.objectContaining({

@@ -348,7 +348,7 @@ export function getIdColumnPrompt(
   };
 }
 
-/** Build the optional last-updated prompt; epoch/bigint columns can be left unmapped. */
+/** Build the optional last-updated prompt; numeric columns get a separate epoch-units prompt. */
 export function getUpdatedAtColumnPrompt(
   columns: Array<{ name: string }>,
   suggestedColumn?: string | null,
@@ -919,6 +919,22 @@ export async function runWizard(): Promise<void> {
   );
   const updatedAtColumn =
     selectedUpdatedAt === UNMAPPED_FIELD_VALUE ? undefined : selectedUpdatedAt;
+  const updatedAtType = selectedTable.columns
+    .find((column) => column.name === updatedAtColumn)
+    ?.type.trim()
+    .toLowerCase();
+  const updatedAtEpoch: 's' | 'ms' | undefined =
+    updatedAtType &&
+    /^(smallint|integer|bigint|decimal|numeric|real|double precision|float)/.test(updatedAtType)
+      ? await select({
+          message: 'Which Unix timestamp units does the last-updated column use?',
+          choices: [
+            { name: 'Seconds (for example, 1710000000)', value: 's' as const },
+            { name: 'Milliseconds (for example, 1710000000000)', value: 'ms' as const },
+          ],
+          default: existingInventory?.updatedAtEpoch ?? 's',
+        })
+      : undefined;
   const allColumnNames = selectedTable.columns.map((c) => c.name);
 
   const fieldMappings: Partial<Record<FieldMappingTarget, string>> = {};
@@ -984,9 +1000,9 @@ export async function runWizard(): Promise<void> {
         updatedAtColumn,
         existingInventory?.statusValues,
       );
-      // Every value left unmapped means there is nothing to write; omitting the key
-      // keeps the generated config free of an empty block that reads as a mapping.
-      statusValues = Object.keys(collected).length > 0 ? collected : undefined;
+      // A present empty block records the choice to leave every value unmapped.
+      // Omitting it restores the English defaults when the config is loaded.
+      statusValues = collected;
       unknownStatusPolicy = await select<UnknownStatusPolicy>({
         message: 'How should newly observed source statuses be exposed until you map them?',
         choices: ['DRAFT', 'RESERVED', 'SOLD', 'EXPIRED'].map((status) => ({
@@ -1653,6 +1669,7 @@ export async function runWizard(): Promise<void> {
         ...(baseFilterParts.length > 0 ? { baseFilter: baseFilterParts.join(' AND ') } : {}),
         idColumn: quoteIfNeeded(idColumn),
         ...(updatedAtColumn ? { updatedAtColumn: quoteIfNeeded(updatedAtColumn) } : {}),
+        ...(updatedAtEpoch ? { updatedAtEpoch } : {}),
         ...(imageUrlPrefix ? { imageUrlPrefix } : {}),
         fields,
         ...(statusValues ? { statusValues } : {}),

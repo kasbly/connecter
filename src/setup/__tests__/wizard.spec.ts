@@ -77,7 +77,11 @@ vi.mock('../../routes/health.route.js', async (importOriginal) => {
   };
 });
 
-function mockWizardProbeFailureSetup(tableName = 'available_products', port = '5432') {
+function mockWizardProbeFailureSetup(
+  tableName = 'available_products',
+  port = '5432',
+  epoch?: 's' | 'ms',
+) {
   const db = Object.assign(vi.fn(), {
     destroy: vi.fn().mockResolvedValue(undefined),
     withSchema: vi.fn(() => ({
@@ -88,7 +92,10 @@ function mockWizardProbeFailureSetup(tableName = 'available_products', port = '5
   promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
   promptMocks.select.mockImplementationOnce(() => Promise.resolve(tableName));
   promptMocks.select.mockImplementationOnce(() => Promise.resolve('sku'));
-  promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
+  promptMocks.select.mockImplementationOnce(() =>
+    Promise.resolve(epoch ? 'updated_at' : '\0unmapped'),
+  );
+  if (epoch) promptMocks.select.mockResolvedValueOnce(epoch);
   for (const answer of [
     'title',
     'price',
@@ -134,6 +141,9 @@ function mockWizardProbeFailureSetup(tableName = 'available_products', port = '5
             { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
             { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
             { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ...(epoch
+              ? [{ name: 'updated_at', type: 'bigint', nullable: true, isPrimaryKey: false }]
+              : []),
           ],
         },
       ],
@@ -4035,6 +4045,39 @@ describe('runWizard', () => {
     }
   });
 
+  it.each(['s', 'ms'] as const)(
+    'saves numeric last-updated units %s through YAML reload',
+    async (epoch) => {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      mockWizardProbeFailureSetup('available_products', '5432', epoch);
+      try {
+        process.chdir(directory);
+        await runWizard();
+        const { inventory } = loadExistingSetupConfig(
+          join(directory, 'connector.config.yml'),
+          join(directory, '.env'),
+        ).resources;
+        expect(inventory.updatedAtColumn).toBe('"updated_at"');
+        expect(inventory.updatedAtEpoch).toBe(epoch);
+        const raw = epoch === 's' ? '1710000000' : '1710000000000';
+        expect(
+          mapRowToInventoryItem(
+            { sku: '1', title: 'Test', price: 100, currency: 'SAR', updated_at: raw },
+            inventory,
+            new Map(),
+          ).updatedAt,
+        ).toBe('2024-03-09T16:00:00.000Z');
+        expect(
+          buildQuery({ updatedSince: '2024-03-09T16:00:00Z' }, inventory).conditions,
+        ).toContainEqual({ column: '"updated_at"', operator: '>=', value: Number(raw) });
+      } finally {
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('throws when the generated configuration is invalid after a passing probe', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
@@ -4829,6 +4872,91 @@ describe('runWizard', () => {
             '("id" DESC NULLS LAST);',
         ),
       );
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps every explicitly unmapped English status out of ACTIVE after saving and loading', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const sourceStatuses = ['active', 'sold', 'draft', 'reserved', 'expired'];
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('products');
+      if (message.startsWith('Which column is the unique listing id')) return Promise.resolve('id');
+      if (message.startsWith('How should newly observed')) return Promise.resolve('DRAFT');
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('none');
+      const field = /^Which column contains the (\w+)\?$/.exec(message)?.[1];
+      return Promise.resolve(
+        field && ['title', 'price', 'currency', 'status'].includes(field)
+          ? field
+          : UNMAPPED_FIELD_VALUE,
+      );
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('password');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockResolvedValue([]);
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: Object.assign(vi.fn(), {
+        destroy: vi.fn().mockResolvedValue(undefined),
+        raw: vi.fn().mockResolvedValue({ rows: sourceStatuses.map((value) => ({ value })) }),
+      }) as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 5,
+            columns: ['id', 'title', 'price', 'currency', 'status'].map((name) => ({
+              name,
+              type: name === 'price' ? 'numeric' : 'text',
+              nullable: false,
+              isPrimaryKey: name === 'id',
+            })),
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+
+      const configPath = join(directory, 'connector.config.yml');
+      expect(readFileSync(configPath, 'utf-8')).toContain('statusValues: {}');
+      // Uses loadConfig with the generated .env, just as the next startup does.
+      const inventory = loadExistingSetupConfig(configPath, join(directory, '.env')).resources
+        .inventory;
+      expect(inventory.statusValues).toEqual({});
+      expect(inventory.unknownStatusPolicy).toBe('DRAFT');
+      for (const status of sourceStatuses) {
+        expect(
+          mapRowToInventoryItem(
+            { id: status, title: 'Listing', price: 100, currency: 'SAR', status },
+            inventory,
+            new Map(),
+          ).status,
+        ).toBe('DRAFT');
+      }
+      expect(buildQuery({ 'filter.status': 'ACTIVE' }, inventory).conditions).toEqual([
+        { column: '1', operator: '=', value: 0 },
+      ]);
     } finally {
       consoleLog.mockRestore();
       process.chdir(previousDirectory);

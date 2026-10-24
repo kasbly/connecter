@@ -105,6 +105,7 @@ const inventoryResourceSchema = z.object({
   baseFilter: z.string().optional(),
   idColumn: z.string().min(1),
   updatedAtColumn: z.string().optional(),
+  updatedAtEpoch: z.enum(['s', 'ms']).optional(),
   imageUrlPrefix: z
     .string()
     .trim()

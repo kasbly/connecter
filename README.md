@@ -135,6 +135,13 @@ fails; use it yourself when troubleshooting a merchant's mapping.
 
 Paginated inventory search with filters.
 
+Numeric Unix last-updated values are emitted as ISO timestamps (seconds below
+`1e12` in absolute value, otherwise milliseconds). For an integer epoch column,
+set `resources.inventory.updatedAtEpoch` to `s` or `ms` alongside
+`updatedAtColumn`; setup asks for these units when a numeric column is selected.
+This also converts `updatedSince` into an integer bound in the source units.
+Omit `updatedAtEpoch` for PostgreSQL timestamp/date columns.
+
 | Parameter       | Type            | Description                                  |
 | --------------- | --------------- | -------------------------------------------- |
 | `pageSize`      | number          | Items per page (1-100, default 20)           |

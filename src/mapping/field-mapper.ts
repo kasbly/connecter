@@ -346,8 +346,20 @@ export function mapRowToInventoryItem(
   let updatedAt: string | null = null;
   if (config.updatedAtColumn) {
     const rawDate = resolveColumnValue(row, config.updatedAtColumn);
-    if (rawDate) {
-      updatedAt = rawDate instanceof Date ? rawDate.toISOString() : String(rawDate);
+    if (rawDate !== null && rawDate !== undefined && rawDate !== '') {
+      const numericDate =
+        typeof rawDate === 'number' ||
+        (typeof rawDate === 'string' && /^[+-]?\d+(?:\.\d+)?$/.test(rawDate.trim()))
+          ? Number(rawDate)
+          : NaN;
+      if (Number.isFinite(numericDate)) {
+        const units = config.updatedAtEpoch ?? (Math.abs(numericDate) < 1e12 ? 's' : 'ms');
+        const date = new Date(numericDate * (units === 's' ? 1000 : 1));
+        // Keep invalid/out-of-range source values visible to wire validation.
+        updatedAt = Number.isFinite(date.getTime()) ? date.toISOString() : String(rawDate);
+      } else {
+        updatedAt = rawDate instanceof Date ? rawDate.toISOString() : String(rawDate);
+      }
     }
   }
 

@@ -289,7 +289,11 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     conditions.push({
       column: config.updatedAtColumn,
       operator: '>=',
-      value: new Date(updatedSince).toISOString(),
+      // Round up for integer epochs so a fractional cutoff never returns an
+      // older row or sends a decimal parameter to a PostgreSQL bigint column.
+      value: config.updatedAtEpoch
+        ? Math.ceil(Date.parse(updatedSince) / (config.updatedAtEpoch === 's' ? 1000 : 1))
+        : new Date(updatedSince).toISOString(),
     });
   }
 

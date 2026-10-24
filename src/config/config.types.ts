@@ -102,6 +102,8 @@ export interface InventoryResourceConfig {
   baseFilter?: string;
   idColumn: string;
   updatedAtColumn?: string;
+  /** Units for a numeric Unix timestamp column; omitted for SQL timestamps. */
+  updatedAtEpoch?: 's' | 'ms';
   /** Public http(s) origin used to resolve site-relative image paths. */
   imageUrlPrefix?: string;
   fields: Record<string, string>;

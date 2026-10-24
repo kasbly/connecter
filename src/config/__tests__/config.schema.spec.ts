@@ -218,6 +218,13 @@ describe('connectorConfigSchema inventory fields', () => {
       ACTIVE: ['for_sale'],
       SOLD: ['sold_out'],
     });
+    const unmapped = connectorConfigSchema.parse({
+      ...createConfigInput(),
+      resources: {
+        inventory: { ...createConfigInput().resources.inventory, statusValues: {} },
+      },
+    });
+    expect(unmapped.resources.inventory.statusValues).toEqual({});
   });
 
   it.each(['ACTIVE', 'unknown'])('rejects an unsafe unknown-status policy: %s', (policy) => {
