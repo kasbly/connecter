@@ -24,6 +24,13 @@ export interface ConnectorInventoryItem {
 export const LISTING_URL_ATTRIBUTE_KEYS = ['url', 'listingUrl', 'listing_url', 'link', 'handle'];
 
 /**
+ * Clock skew and a listing stamped a few hours ahead are fine. A 1000× seconds
+ * vs milliseconds mistake is a finite year-+056157 date, which `Date.parse`
+ * alone will not reject.
+ */
+const UPDATED_AT_FUTURE_HORIZON_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Keep the standalone producer on the same strict inventory wire contract its
  * consumers enforce. Validation happens after JSON serialization so values
  * such as NaN cannot become a silent `null` on the wire.
@@ -42,6 +49,10 @@ const connectorInventoryItemWireSchema = z
     updatedAt: z
       .string()
       .refine((value) => Number.isFinite(Date.parse(value)), 'Invalid updatedAt date')
+      .refine((value) => {
+        const parsed = Date.parse(value);
+        return !Number.isFinite(parsed) || parsed <= Date.now() + UPDATED_AT_FUTURE_HORIZON_MS;
+      }, 'updatedAt is more than 1 day in the future')
       .nullable(),
   })
   .strict();
@@ -211,6 +222,20 @@ function toMappedString(value: unknown): string {
   return String(value);
 }
 
+/**
+ * Flattened feature search matches `column::text`. node-pg returns int/real
+ * and boolean as JS values (bigint/numeric already arrive as strings), so
+ * publish those scalars as the same text. Null, non-finite numbers, objects,
+ * and arrays stay dropped.
+ */
+function flattenRelationValue(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
+    return String(value);
+  }
+  return undefined;
+}
+
 const DEFAULT_STATUS_VALUES: Required<StatusValuesConfig> = {
   ACTIVE: ['ACTIVE', 'active'],
   DRAFT: ['DRAFT', 'draft'],
@@ -334,8 +359,8 @@ export function mapRowToInventoryItem(
         // disambiguated `table__foreignKey` key so two FKs onto the same
         // child table can't collide (#26144).
         attributes[relationConfig.publishAs ?? relationName] = relRows
-          .map((r) => r[relationConfig.flatten!])
-          .filter((v): v is string => typeof v === 'string');
+          .map((r) => flattenRelationValue(r[relationConfig.flatten!]))
+          .filter((v): v is string => v !== undefined);
       } else {
         attributes[relationConfig.publishAs ?? relationName] = relRows;
       }

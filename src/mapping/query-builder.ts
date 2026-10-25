@@ -1,4 +1,4 @@
-import type { InventoryResourceConfig } from '../config/config.types.js';
+import type { InventoryResourceConfig, RelationOrderByConfig } from '../config/config.types.js';
 import type { QueryCondition, PaginationOptions, SortOptions } from '../db/adapter.interface.js';
 import { isSafeOrderByColumn, RELATION_ROWS_PER_PARENT_LIMIT } from '../db/postgres.adapter.js';
 import { getRequiredColumns, getSourceStatusValues } from './field-mapper.js';
@@ -19,6 +19,26 @@ function quoteIdentifier(identifier: string): string {
 
 function isSafeColumnExpression(expression: string): boolean {
   return SAFE_COLUMN_EXPRESSION.test(expression);
+}
+
+/**
+ * `LIMIT` without `ORDER BY` keeps an arbitrary subset that can change after
+ * `VACUUM` (#34301). Use the relation's `orderBy` when that column is safe,
+ * otherwise the foreign key then the flattened column as text.
+ */
+function flattenedRelationSearchOrderBy(
+  foreignKey: string,
+  flattenedColumn: string,
+  orderBy: RelationOrderByConfig | undefined,
+): string {
+  if (orderBy && isSafeOrderByColumn(orderBy.column)) {
+    const direction = orderBy.direction === 'asc' ? 'ASC' : 'DESC';
+    return `${RELATION_SEARCH_ALIAS}.${orderBy.column} ${direction} NULLS LAST`;
+  }
+  return (
+    `${RELATION_SEARCH_ALIAS}.${foreignKey} ASC NULLS LAST, ` +
+    `(${RELATION_SEARCH_ALIAS}.${flattenedColumn})::text ASC NULLS LAST`
+  );
 }
 
 /**
@@ -48,11 +68,17 @@ export function getSearchableColumns(config: InventoryResourceConfig): string[] 
     const relationFilter = relation.filter
       ? ` AND (${relation.filter.replaceAll('?', '\\?')})`
       : '';
+    const orderByClause = flattenedRelationSearchOrderBy(
+      relation.foreignKey,
+      flattenedColumn,
+      relation.orderBy,
+    );
     columns.push(
       `COALESCE((SELECT string_agg(${RELATION_SEARCH_ALIAS}_bounded.value, ' ') FROM (` +
         `SELECT ${RELATION_SEARCH_ALIAS}.${flattenedColumn}::text AS value ` +
         `FROM ${quoteIdentifier(relationSchema)}.${quoteIdentifier(relation.table)} AS ${RELATION_SEARCH_ALIAS} ` +
         `WHERE ${RELATION_SEARCH_ALIAS}.${relation.foreignKey} = ${quoteIdentifier(inventorySchema)}.${quoteIdentifier(config.table)}.${relation.referenceKey}${relationFilter} ` +
+        `ORDER BY ${orderByClause} ` +
         `LIMIT ${RELATION_ROWS_PER_PARENT_LIMIT}) AS ${RELATION_SEARCH_ALIAS}_bounded), '')`,
     );
   }

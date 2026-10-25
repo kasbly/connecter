@@ -122,11 +122,102 @@ describe('buildQuery', () => {
 
     expect(result.conditions).toContainEqual({
       column:
-        'COALESCE((SELECT string_agg(__kasbly_search_relation_bounded.value, \' \') FROM (SELECT __kasbly_search_relation.name::text AS value FROM "catalog"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = "public"."Car".id LIMIT 100) AS __kasbly_search_relation_bounded), \'\')',
+        'COALESCE((SELECT string_agg(__kasbly_search_relation_bounded.value, \' \') FROM (SELECT __kasbly_search_relation.name::text AS value FROM "catalog"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = "public"."Car".id ORDER BY __kasbly_search_relation.carId ASC NULLS LAST, (__kasbly_search_relation.name)::text ASC NULLS LAST LIMIT 100) AS __kasbly_search_relation_bounded), \'\')',
       operator: 'ILIKE',
       value: 'leather',
       _group: 'leather',
     });
+  });
+
+  it('orders flattened feature search by the foreign key then the flatten column before the row cap (#34301)', () => {
+    const result = buildQuery(
+      { search: 'leather' },
+      {
+        ...baseConfig,
+        relations: {
+          features: {
+            table: 'CarFeature',
+            foreignKey: '"carId"',
+            referenceKey: 'id',
+            fields: { id: 'id', name: '"featureName"' },
+            flatten: 'name',
+          },
+        },
+      },
+    );
+    const column = result.conditions.find((condition) =>
+      condition.column.includes('CarFeature'),
+    )?.column;
+
+    expect(column).toBeDefined();
+    expect(column!.indexOf('ORDER BY')).toBeGreaterThan(-1);
+    expect(column!.indexOf('ORDER BY')).toBeLessThan(column!.indexOf('LIMIT 100'));
+    expect(column).toContain(
+      'ORDER BY __kasbly_search_relation."carId" ASC NULLS LAST, (__kasbly_search_relation."featureName")::text ASC NULLS LAST LIMIT 100',
+    );
+  });
+
+  it.each([
+    ['asc', 'ASC'],
+    ['desc', 'DESC'],
+  ] as const)(
+    'orders flattened feature search by configured orderBy %s before the row cap (#34301)',
+    (direction, sqlDirection) => {
+      const result = buildQuery(
+        { search: 'leather' },
+        {
+          ...baseConfig,
+          relations: {
+            features: {
+              table: 'CarFeature',
+              foreignKey: 'carId',
+              referenceKey: 'id',
+              fields: { name: 'name' },
+              flatten: 'name',
+              orderBy: { column: '"position"', direction },
+            },
+          },
+        },
+      );
+      const column = result.conditions.find((condition) =>
+        condition.column.includes('CarFeature'),
+      )?.column;
+
+      expect(column).toBeDefined();
+      expect(column!.indexOf('ORDER BY')).toBeGreaterThan(-1);
+      expect(column!.indexOf('ORDER BY')).toBeLessThan(column!.indexOf('LIMIT 100'));
+      expect(column).toContain(
+        `ORDER BY __kasbly_search_relation."position" ${sqlDirection} NULLS LAST LIMIT 100`,
+      );
+      expect(column).not.toContain('NULLS LAST,');
+    },
+  );
+
+  it('does not interpolate an unsafe relation orderBy into flattened feature search (#34301)', () => {
+    const result = buildQuery(
+      { search: 'leather' },
+      {
+        ...baseConfig,
+        relations: {
+          features: {
+            table: 'CarFeature',
+            foreignKey: 'carId',
+            referenceKey: 'id',
+            fields: { name: 'name' },
+            flatten: 'name',
+            orderBy: { column: 'position; DROP TABLE "Car"', direction: 'asc' },
+          },
+        },
+      },
+    );
+    const column = result.conditions.find((condition) =>
+      condition.column.includes('CarFeature'),
+    )?.column;
+
+    expect(column).toContain(
+      'ORDER BY __kasbly_search_relation.carId ASC NULLS LAST, (__kasbly_search_relation.name)::text ASC NULLS LAST LIMIT 100',
+    );
+    expect(column).not.toContain('DROP');
   });
 
   it('searches flattened relations with quoted schema and table names', () => {

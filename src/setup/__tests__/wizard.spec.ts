@@ -30,6 +30,7 @@ import {
   writePrivateFile,
 } from '../wizard.js';
 import { suggestFieldMappings } from '../suggest.js';
+import { getUpdatedAtEpochPrompt } from '../updated-at-epoch.js';
 import { runWizard } from '../wizard.js';
 import { loadConfig } from '../../config/config.loader.js';
 import { buildQuery } from '../../mapping/query-builder.js';
@@ -84,6 +85,9 @@ function mockWizardProbeFailureSetup(
 ) {
   const db = Object.assign(vi.fn(), {
     destroy: vi.fn().mockResolvedValue(undefined),
+    raw: vi.fn().mockResolvedValue({
+      rows: epoch ? [{ value: epoch === 'ms' ? '1710000000000' : '1710000000' }] : [],
+    }),
     withSchema: vi.fn(() => ({
       table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
     })),
@@ -95,7 +99,11 @@ function mockWizardProbeFailureSetup(
   promptMocks.select.mockImplementationOnce(() =>
     Promise.resolve(epoch ? 'updated_at' : '\0unmapped'),
   );
-  if (epoch) promptMocks.select.mockResolvedValueOnce(epoch);
+  if (epoch) {
+    promptMocks.select.mockImplementationOnce((prompt: { default: 's' | 'ms' }) =>
+      Promise.resolve(prompt.default),
+    );
+  }
   for (const answer of [
     'title',
     'price',
@@ -424,6 +432,35 @@ describe('getUpdatedAtColumnPrompt', () => {
 
     expect(prompt.default).toBe('\0unmapped');
     expect(prompt.choices.map((choice) => choice.value)).not.toContain('updated_at');
+  });
+});
+
+describe('getUpdatedAtEpochPrompt', () => {
+  it.each([
+    [1710000000, 's'],
+    [20261024, 's'],
+    [0, 's'],
+    [-1, 's'],
+    [1e12 - 1, 's'],
+    [1e12, 'ms'],
+    [1710000000000, 'ms'],
+    [-1710000000000, 'ms'],
+  ] as const)('defaults %s to %s and shows the sample', (sample, units) => {
+    const prompt = getUpdatedAtEpochPrompt(sample, units === 'ms' ? 's' : 'ms');
+
+    expect(prompt.default).toBe(units);
+    expect(prompt.message).toContain(`Sampled value: ${sample}.`);
+    expect(prompt.choices.map((choice) => choice.value)).toEqual(['s', 'ms']);
+  });
+
+  it('keeps the previous fallback when there is no numeric sample', () => {
+    expect(getUpdatedAtEpochPrompt(undefined, 'ms')).toMatchObject({
+      default: 'ms',
+      message: 'Which Unix timestamp units does the last-updated column use?',
+    });
+    expect(getUpdatedAtEpochPrompt(undefined).default).toBe('s');
+    expect(getUpdatedAtEpochPrompt(Number.NaN, 'ms').default).toBe('ms');
+    expect(getUpdatedAtEpochPrompt(Number.POSITIVE_INFINITY).default).toBe('s');
   });
 });
 
@@ -4050,7 +4087,7 @@ describe('runWizard', () => {
     async (epoch) => {
       const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
       const previousDirectory = process.cwd();
-      mockWizardProbeFailureSetup('available_products', '5432', epoch);
+      const db = mockWizardProbeFailureSetup('available_products', '5432', epoch);
       try {
         process.chdir(directory);
         await runWizard();
@@ -4061,6 +4098,15 @@ describe('runWizard', () => {
         expect(inventory.updatedAtColumn).toBe('"updated_at"');
         expect(inventory.updatedAtEpoch).toBe(epoch);
         const raw = epoch === 's' ? '1710000000' : '1710000000000';
+        const epochPrompt = promptMocks.select.mock.calls
+          .map((call) => call[0] as { message: string; default: string })
+          .find((prompt) => prompt.message.startsWith('Which Unix timestamp units'));
+        expect(epochPrompt?.default).toBe(epoch);
+        expect(epochPrompt?.message).toContain(`Sampled value: ${Number(raw)}.`);
+        expect(db.raw).toHaveBeenCalledWith(
+          'SELECT ?? AS "value" FROM ??.?? WHERE ?? IS NOT NULL LIMIT 1',
+          ['updated_at', 'merchant_data', 'available_products', 'updated_at'],
+        );
         expect(
           mapRowToInventoryItem(
             { sku: '1', title: 'Test', price: 100, currency: 'SAR', updated_at: raw },
@@ -4077,6 +4123,34 @@ describe('runWizard', () => {
       }
     },
   );
+
+  it('falls back to seconds when a numeric last-updated column cannot be sampled', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = mockWizardProbeFailureSetup('available_products', '5432', 'ms');
+    db.raw.mockReset();
+    db.raw.mockRejectedValue(new Error('permission denied'));
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      process.chdir(directory);
+      await runWizard();
+      const { inventory } = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      ).resources;
+      expect(inventory.updatedAtEpoch).toBe('s');
+      const epochPrompt = promptMocks.select.mock.calls
+        .map((call) => call[0] as { message: string; default: string })
+        .find((prompt) => prompt.message.startsWith('Which Unix timestamp units'));
+      expect(epochPrompt?.default).toBe('s');
+      expect(epochPrompt?.message).not.toContain('Sampled');
+      expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('"updated_at"'));
+    } finally {
+      consoleWarn.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 
   it('throws when the generated configuration is invalid after a passing probe', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));

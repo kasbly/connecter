@@ -1093,7 +1093,7 @@ describe('PostgresAdapter list count (#17420)', () => {
 
     const { countQuery, dataQuery } = await runListQuery({ count: 1, conditions });
     const featureSearch =
-      'COALESCE((SELECT string_agg(__kasbly_search_relation_bounded.value, \' \') FROM (SELECT __kasbly_search_relation.name::text AS value FROM "public"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = "public"."Car".id LIMIT 100) AS __kasbly_search_relation_bounded), \'\') ILIKE ? ESCAPE \'\\\'';
+      'COALESCE((SELECT string_agg(__kasbly_search_relation_bounded.value, \' \') FROM (SELECT __kasbly_search_relation.name::text AS value FROM "public"."CarFeature" AS __kasbly_search_relation WHERE __kasbly_search_relation.carId = "public"."Car".id ORDER BY __kasbly_search_relation.carId ASC NULLS LAST, (__kasbly_search_relation.name)::text ASC NULLS LAST LIMIT 100) AS __kasbly_search_relation_bounded), \'\') ILIKE ? ESCAPE \'\\\'';
 
     expect(dataQuery.sql).toContain(featureSearch);
     expect(countQuery.sql).toContain(featureSearch);

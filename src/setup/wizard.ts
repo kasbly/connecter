@@ -51,6 +51,7 @@ import {
 } from '../routes/health.route.js';
 import { buildOrderByClause } from '../db/postgres.adapter.js';
 import { getDefaultSort } from '../mapping/query-builder.js';
+import { getUpdatedAtEpochPrompt, sampleUpdatedAtValue } from './updated-at-epoch.js';
 
 interface DatabaseTlsSettings {
   enabled: boolean;
@@ -923,18 +924,22 @@ export async function runWizard(): Promise<void> {
     .find((column) => column.name === updatedAtColumn)
     ?.type.trim()
     .toLowerCase();
-  const updatedAtEpoch: 's' | 'ms' | undefined =
+  let updatedAtEpoch: 's' | 'ms' | undefined;
+  if (
+    updatedAtColumn &&
     updatedAtType &&
     /^(smallint|integer|bigint|decimal|numeric|real|double precision|float)/.test(updatedAtType)
-      ? await select({
-          message: 'Which Unix timestamp units does the last-updated column use?',
-          choices: [
-            { name: 'Seconds (for example, 1710000000)', value: 's' as const },
-            { name: 'Milliseconds (for example, 1710000000000)', value: 'ms' as const },
-          ],
-          default: existingInventory?.updatedAtEpoch ?? 's',
-        })
-      : undefined;
+  ) {
+    const sample = await sampleUpdatedAtValue(
+      db,
+      selectedSchema,
+      selectedTableName,
+      updatedAtColumn,
+    );
+    updatedAtEpoch = await select(
+      getUpdatedAtEpochPrompt(sample, existingInventory?.updatedAtEpoch),
+    );
+  }
   const allColumnNames = selectedTable.columns.map((c) => c.name);
 
   const fieldMappings: Partial<Record<FieldMappingTarget, string>> = {};

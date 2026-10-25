@@ -149,6 +149,18 @@ describe('mapRowToInventoryItem', () => {
     expect(item.updatedAt).toBe('1970-01-01T00:00:01.000Z');
   });
 
+  it('rejects a millisecond timestamp read as seconds (year +056157)', () => {
+    const item = mapRowToInventoryItem(
+      { id: '1', title: 'Test', price: 100, updatedAt: 1710000000000 },
+      { ...baseConfig, updatedAtEpoch: 's' },
+      new Map(),
+    );
+    expect(item.updatedAt).toBe('+056157-09-28T16:00:00.000Z');
+    expect(() => validateInventoryItemWireContract(item)).toThrow(
+      /updatedAt is more than 1 day in the future/,
+    );
+  });
+
   it.each([Infinity, '999999999999999999999', 'not-a-date'])(
     'keeps invalid updatedAt %j subject to wire validation',
     (updatedAt) => {
@@ -624,6 +636,45 @@ describe('mapRowToInventoryItem', () => {
     expect(result.attributes.features).toEqual(['ABS', 'Airbag']);
   });
 
+  it('publishes integer, real, and boolean flattened feature values as text (#34299)', () => {
+    const configWithRelations: InventoryResourceConfig = {
+      ...baseConfig,
+      relations: {
+        features: {
+          table: 'feature_values',
+          foreignKey: '"product_id"',
+          referenceKey: 'id',
+          fields: { value: 'value' },
+          flatten: 'value',
+        },
+      },
+    };
+
+    const featureData = new Map<string, Record<string, unknown>[]>();
+    featureData.set('123', [
+      { value: 12 },
+      { value: 0 },
+      { value: -3 },
+      { value: 1.5 },
+      { value: true },
+      { value: false },
+      { value: 'kept' },
+      { value: null },
+      { value: undefined },
+      { value: Number.NaN },
+      { value: Number.POSITIVE_INFINITY },
+      { value: Number.NEGATIVE_INFINITY },
+      { value: { code: 1 } },
+      { value: ['nested'] },
+    ]);
+    const relationData = new Map<string, Map<string, Record<string, unknown>[]>>();
+    relationData.set('features', featureData);
+
+    const row = { id: '123', title: 'Test', price: 100 };
+    const result = mapRowToInventoryItem(row, configWithRelations, relationData);
+    expect(result.attributes.features).toEqual(['12', '0', '-3', '1.5', 'true', 'false', 'kept']);
+  });
+
   it('publishes a flattened wizard-generated relation under publishAs, not the disambiguated table__fk map key (#27613)', () => {
     const configWithRelations: InventoryResourceConfig = {
       ...baseConfig,
@@ -719,6 +770,41 @@ describe('validateInventoryItemWireContract', () => {
         updatedAt: null,
       }),
     ).toThrow(/price/);
+  });
+
+  it('rejects updatedAt more than a day ahead and keeps epoch 0, the past, and near-future dates', () => {
+    const item = (updatedAt: string | null) => ({
+      externalId: 'sku-1',
+      title: 'Coffee',
+      description: null,
+      price: 1,
+      currency: 'SAR',
+      category: '',
+      status: 'ACTIVE',
+      images: [],
+      attributes: {},
+      updatedAt,
+    });
+    const day = 24 * 60 * 60 * 1000;
+
+    expect(() =>
+      validateInventoryItemWireContract(item(new Date(Date.now() + day + 1000).toISOString())),
+    ).toThrow(/updatedAt is more than 1 day in the future/);
+    expect(() => validateInventoryItemWireContract(item('+056157-09-28T16:00:00.000Z'))).toThrow(
+      /updatedAt is more than 1 day in the future/,
+    );
+
+    for (const updatedAt of [
+      new Date(Date.now() + day).toISOString(),
+      new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+      new Date().toISOString(),
+      '1970-01-01T00:00:00.000Z',
+      '1969-12-31T23:59:59.000Z',
+      '2024-03-09T16:00:00.000Z',
+      null,
+    ]) {
+      expect(() => validateInventoryItemWireContract(item(updatedAt))).not.toThrow();
+    }
   });
 
   it('reports missing identifiers, titles, currencies, and invalid dates by field', () => {
