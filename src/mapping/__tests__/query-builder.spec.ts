@@ -449,6 +449,24 @@ describe('buildQuery', () => {
     });
   });
 
+  it('keeps a mapped blank status in the ACTIVE filter', () => {
+    const result = buildQuery(
+      { 'filter.status': 'ACTIVE' },
+      {
+        ...baseConfig,
+        fields: { ...baseConfig.fields, status: 'availability' },
+        statusValues: { ACTIVE: ['', 'for_sale'] },
+      },
+    );
+
+    expect(result.conditions).toContainEqual({
+      column: 'availability',
+      operator: 'IN',
+      value: ['', 'for_sale'],
+    });
+    expect(result.conditions).not.toContainEqual({ column: '1', operator: '=', value: 0 });
+  });
+
   it('enforces ACTIVE without ignoring it when every listing is implicitly active', () => {
     const result = buildQuery(
       { 'filter.status': 'ACTIVE' },

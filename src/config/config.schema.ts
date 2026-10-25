@@ -137,14 +137,15 @@ const inventoryResourceSchema = z.object({
   // is their declaration of which source values exist. Per-key defaults used to
   // invent 'RESERVED'/'EXPIRED' for keys the setup wizard left out, and those
   // words then reached the merchant's status column as literal comparison
-  // values (#25114).
+  // values (#25114). An empty string inside a list is the blank token
+  // (SQL NULL or an empty cell) and must stay storable.
   statusValues: z
     .object({
-      ACTIVE: z.array(z.string().min(1)).min(1).optional(),
-      DRAFT: z.array(z.string().min(1)).min(1).optional(),
-      RESERVED: z.array(z.string().min(1)).min(1).optional(),
-      SOLD: z.array(z.string().min(1)).min(1).optional(),
-      EXPIRED: z.array(z.string().min(1)).min(1).optional(),
+      ACTIVE: z.array(z.string()).min(1).optional(),
+      DRAFT: z.array(z.string()).min(1).optional(),
+      RESERVED: z.array(z.string()).min(1).optional(),
+      SOLD: z.array(z.string()).min(1).optional(),
+      EXPIRED: z.array(z.string()).min(1).optional(),
     })
     .default(defaultStatusValues),
   // New source-system values must never become sellable without an explicit

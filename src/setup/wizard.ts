@@ -10,7 +10,12 @@ import type {
   RelationConfig,
   UnknownStatusPolicy,
 } from '../config/config.types.js';
-import { introspectDatabase, type IntrospectedTable } from './introspect.js';
+import {
+  compareSetupTablesByRowCount,
+  formatSetupTableChoice,
+  introspectDatabase,
+  type IntrospectedTable,
+} from './introspect.js';
 import {
   INVENTORY_STATUSES,
   type InventoryStatus,
@@ -39,7 +44,7 @@ import {
   type FilterableColumnSuggestion,
   type RelationSuggestion,
 } from './suggest.js';
-import { UNMAPPED_STATUS_FALLBACK } from '../mapping/field-mapper.js';
+import { toStatusValueToken, UNMAPPED_STATUS_FALLBACK } from '../mapping/field-mapper.js';
 import { createDatabaseAdapter } from '../db/adapter.factory.js';
 import {
   formatUnknownStatusWarning,
@@ -178,12 +183,14 @@ async function collectStatusValues(
   // inspect the complete merchant table before returning any values. Fetch one value
   // more than the wizard will prompt for: that extra row is the only evidence that
   // the column overflows the cap, and without it the warning below can never fire.
+  // NULL and empty cells stay in the sample so an all-blank column is still offered.
   const result = await db.raw<{ rows: Array<{ value: unknown }> }>(
-    `SELECT DISTINCT "value" FROM (SELECT ?? AS "value" FROM ??.?? WHERE ?? IS NOT NULL ORDER BY ${orderByClause} LIMIT ?) AS "sampled_rows" LIMIT ?`,
-    [column, schema, table, column, STATUS_VALUE_SCAN_LIMIT, STATUS_VALUE_PROMPT_LIMIT + 1],
+    `SELECT DISTINCT "value" FROM (SELECT ?? AS "value" FROM ??.?? ORDER BY ${orderByClause} LIMIT ?) AS "sampled_rows" LIMIT ?`,
+    [column, schema, table, STATUS_VALUE_SCAN_LIMIT, STATUS_VALUE_PROMPT_LIMIT + 1],
   );
-  const values = result.rows.map((row) => row.value);
-  const distinctValues = Array.from(new Set(values.map((value) => String(value)))).sort();
+  const distinctValues = Array.from(
+    new Set(result.rows.map((row) => toStatusValueToken(row.value))),
+  ).sort();
   const presentedValues = distinctValues.slice(0, STATUS_VALUE_PROMPT_LIMIT);
   // The query stops one past the cap, so the true distinct count is unknown here —
   // report the overflow as a lower bound rather than inventing a total.
@@ -196,7 +203,7 @@ async function collectStatusValues(
 
   for (const value of presentedValues) {
     const status = await select<InventoryStatus | typeof UNMAPPED_FIELD_VALUE>({
-      message: `Which Kasbly status matches "${value}"?`,
+      message: `Which Kasbly status matches ${value === '' ? 'blank' : `"${value}"`}?`,
       default: getStatusValueDefault(value, existingStatusValues),
       choices: [
         ...INVENTORY_STATUSES.map((inventoryStatus) => ({
@@ -862,12 +869,10 @@ export async function runWizard(): Promise<void> {
 
   // Step 2: Select Inventory Table
   console.log('Step 2: Select Your Inventory Table');
-  const tableChoices = result.tables
-    .sort((a, b) => b.rowCount - a.rowCount)
-    .map((t) => ({
-      name: `${t.name} (${t.kind}, ${t.rowCount.toLocaleString()} rows)`,
-      value: t.name,
-    }));
+  const tableChoices = result.tables.sort(compareSetupTablesByRowCount).map((t) => ({
+    name: formatSetupTableChoice(t),
+    value: t.name,
+  }));
 
   const selectedTableName = await select({
     message: 'Which table contains your products/inventory?',
@@ -1360,9 +1365,9 @@ export async function runWizard(): Promise<void> {
         { name: 'None — continue without a related table', value: SKIP_MANUAL_RELATION },
         ...remainingTables
           .slice()
-          .sort((a, b) => b.rowCount - a.rowCount)
+          .sort(compareSetupTablesByRowCount)
           .map((table) => ({
-            name: `${table.name} (${table.kind}, ${table.rowCount.toLocaleString()} rows)`,
+            name: formatSetupTableChoice(table),
             value: table.name,
           })),
       ],

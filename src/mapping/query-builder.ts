@@ -349,6 +349,8 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
           // fixed-ACTIVE branch uses above — comparing the Kasbly token itself
           // against an enum or integer status column aborts the query with
           // SQLSTATE 22P02 instead (#25114).
+          // `''` in `sourceValues` is the blank token. The adapter turns that
+          // entry into `IS NULL` OR an empty string — `IN ('')` never matches NULL.
           conditions.push(
             sourceValues
               ? { column: filterConfig.column, operator: 'IN', value: sourceValues }

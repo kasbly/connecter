@@ -245,6 +245,20 @@ const DEFAULT_STATUS_VALUES: Required<StatusValuesConfig> = {
 };
 
 /**
+ * Wire form of a blank source status (SQL NULL or a trim-empty cell).
+ * Setup stores it in `statusValues`; `/diagnostics` reports the same token.
+ * The English defaults do not include it, so an unmapped blank stays unknown.
+ */
+export const BLANK_STATUS_VALUE = '';
+
+/** Collapse NULL and trim-empty cells to the blank token; keep every other spelling. */
+export function toStatusValueToken(value: unknown): string {
+  if (value === null || value === undefined) return BLANK_STATUS_VALUE;
+  const text = String(value);
+  return text.trim() === '' ? BLANK_STATUS_VALUE : text;
+}
+
+/**
  * Status reported when `fields.status` is not mapped at all. An absent mapping is
  * the merchant asserting "every listing is active" — that is what the README and
  * the example config promise — whereas an unrecognized value from a mapped column
@@ -257,10 +271,10 @@ export function resolveInventoryStatus(
   value: unknown,
   statusValues: StatusValuesConfig | undefined,
 ): InventoryStatus | undefined {
-  if (value === null || value === undefined) return undefined;
-
-  const normalizedValue = String(value).trim().toLowerCase();
-  if (!normalizedValue) return undefined;
+  // Blank is a real token (`''`). It matches only when a list contains it —
+  // `IN ('')` cannot see SQL NULL, and the defaults do not list blank, so an
+  // unmapped NULL stays unknown instead of becoming ACTIVE.
+  const normalizedValue = toStatusValueToken(value).trim().toLowerCase();
 
   // A `statusValues` block that is present is read literally, matching the
   // filter direction below and the README: a key the merchant left out of the
@@ -274,7 +288,7 @@ export function resolveInventoryStatus(
   const mappings = statusValues ?? DEFAULT_STATUS_VALUES;
   return INVENTORY_STATUSES.find((status) =>
     (mappings[status] ?? []).some(
-      (sourceValue) => sourceValue.trim().toLowerCase() === normalizedValue,
+      (sourceValue) => toStatusValueToken(sourceValue).trim().toLowerCase() === normalizedValue,
     ),
   );
 }

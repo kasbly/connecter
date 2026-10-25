@@ -66,7 +66,10 @@ const resourceProbeMocks = vi.hoisted(() => {
 });
 
 vi.mock('@inquirer/prompts', () => promptMocks);
-vi.mock('../introspect.js', () => introspectionMocks);
+vi.mock('../introspect.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../introspect.js')>();
+  return { ...actual, introspectDatabase: introspectionMocks.introspectDatabase };
+});
 vi.mock('../../db/adapter.factory.js', () => ({
   createDatabaseAdapter: resourceProbeMocks.createDatabaseAdapter,
 }));
@@ -171,6 +174,8 @@ describe('getStatusValueDefault', () => {
     expect(getStatusValueDefault('true')).toBe('ACTIVE');
     expect(getStatusValueDefault('false')).toBe('SOLD');
     expect(getStatusValueDefault('mystery')).toBe(UNMAPPED_FIELD_VALUE);
+    expect(getStatusValueDefault('')).toBe(UNMAPPED_FIELD_VALUE);
+    expect(getStatusValueDefault('', { ACTIVE: [''] })).toBe('ACTIVE');
   });
 });
 
@@ -844,7 +849,7 @@ describe('runWizard', () => {
           {
             name: 'products',
             kind: 'materialized view',
-            rowCount: 100,
+            rowCount: null,
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
               { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
@@ -953,9 +958,11 @@ describe('runWizard', () => {
       expect(promptMocks.select).toHaveBeenCalledWith(
         expect.objectContaining({
           message: 'Which table contains your products/inventory?',
-          choices: expect.arrayContaining([
-            { name: 'products (materialized view, 100 rows)', value: 'products' },
-          ]),
+          choices: [
+            { name: 'products (materialized view, row count unavailable)', value: 'products' },
+            { name: 'product_images (table, 200 rows)', value: 'product_images' },
+            { name: 'variant_images (table, 200 rows)', value: 'variant_images' },
+          ],
         }),
       );
       expect(promptMocks.checkbox).toHaveBeenCalledWith(
@@ -2413,6 +2420,24 @@ describe('runWizard', () => {
               { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
             ],
           },
+          {
+            name: 'currencies',
+            kind: 'table',
+            rowCount: 2,
+            columns: [
+              { name: 'id', type: 'integer', nullable: false, isPrimaryKey: true },
+              { name: 'code', type: 'text', nullable: false, isPrimaryKey: false },
+            ],
+          },
+          {
+            name: 'catalog_view',
+            kind: 'view',
+            rowCount: null,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: false },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+            ],
+          },
         ],
         foreignKeys: [],
       },
@@ -2428,6 +2453,12 @@ describe('runWizard', () => {
         expect.objectContaining({
           message: 'Which table or view holds related rows (for example photos)?',
           default: 'product_images',
+          choices: [
+            { name: 'None — continue without a related table', value: '\0none' },
+            { name: 'catalog_view (view, row count unavailable)', value: 'catalog_view' },
+            { name: 'product_images (table, 200 rows)', value: 'product_images' },
+            { name: 'currencies (table, 2 rows)', value: 'currencies' },
+          ],
         }),
       );
       expect(promptMocks.select).toHaveBeenCalledWith(
@@ -4899,12 +4930,15 @@ describe('runWizard', () => {
           'status',
           'catalog',
           'products',
-          'status',
           STATUS_VALUE_SCAN_LIMIT,
           // One past the prompt cap, so an overflowing column is detectable.
           STATUS_VALUE_PROMPT_LIMIT + 1,
         ],
       );
+      const statusSample = db.raw.mock.calls.find((call: unknown[]) =>
+        String(call[0]).includes('SELECT DISTINCT "value"'),
+      );
+      expect(String(statusSample?.[0])).not.toContain('IS NOT NULL');
 
       // Setup completes: the config is written, not lost to a thrown error.
       const generated = yaml.load(
@@ -5064,7 +5098,12 @@ describe('runWizard', () => {
         const isSortedByRecency = /ORDER BY "updated_at" DESC NULLS LAST, "id" DESC LIMIT/.test(
           sql,
         );
-        const values = isSortedByRecency ? ['UNDER_OFFER', 'AVAILABLE'] : ['AVAILABLE'];
+        const includesBlank = !sql.includes('IS NOT NULL');
+        const values = isSortedByRecency
+          ? includesBlank
+            ? [null, '', '   ', 'UNDER_OFFER', 'AVAILABLE']
+            : ['UNDER_OFFER', 'AVAILABLE']
+          : ['AVAILABLE'];
         return Promise.resolve({ rows: values.map((value) => ({ value })) });
       }),
     });
@@ -5080,6 +5119,7 @@ describe('runWizard', () => {
       }
       if (message.startsWith('How should newly observed')) return Promise.resolve('DRAFT');
       if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+      if (message === 'Which Kasbly status matches blank?') return Promise.resolve('ACTIVE');
       if (message === 'Which Kasbly status matches "UNDER_OFFER"?') {
         return Promise.resolve('RESERVED');
       }
@@ -5145,7 +5185,7 @@ describe('runWizard', () => {
         string[]
       >;
       expect(statusValues['RESERVED']).toEqual(['UNDER_OFFER']);
-      expect(statusValues['ACTIVE']).toEqual(['AVAILABLE']);
+      expect(statusValues['ACTIVE']).toEqual(['', 'AVAILABLE']);
     } finally {
       consoleLog.mockRestore();
       process.chdir(previousDirectory);

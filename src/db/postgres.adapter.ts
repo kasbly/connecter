@@ -241,9 +241,16 @@ export class PostgresAdapter implements DatabaseAdapter {
         // read-side `.trim()` too: without it, a stored 'active ' (a stray
         // trailing space from CSV/Excel/legacy-ERP imports) reads back as
         // ACTIVE everywhere else but is silently excluded here (#28392).
+        const normalizedValues = sourceValues.map((value) => value.trim().toLowerCase());
+        // `''` is the blank status token. `IN ('')` matches an empty string but
+        // never SQL NULL (`btrim(NULL)` is NULL), so a blank mapped to ACTIVE
+        // would stay invisible to customer search and Test connection.
+        const matchesBlank = normalizedValues.some((value) => value === '');
+        const placeholders = normalizedValues.map(() => '?').join(', ');
+        const comparison = `lower(btrim(${condition.column}::text)) IN (${placeholders})`;
         queryBuilder = queryBuilder.whereRaw(
-          `lower(btrim(${condition.column}::text)) IN (${sourceValues.map(() => '?').join(', ')})`,
-          sourceValues.map((value) => value.trim().toLowerCase()),
+          matchesBlank ? `(${comparison} OR ${condition.column} IS NULL)` : comparison,
+          normalizedValues,
         );
         continue;
       }

@@ -10,6 +10,7 @@ import {
   normalizeListingUrl,
   resolveColumnValue,
   resolveInventoryStatus,
+  toStatusValueToken,
   validateInventoryItemWireContract,
 } from '../field-mapper.js';
 import type { InventoryResourceConfig, StatusValuesConfig } from '../../config/config.types.js';
@@ -401,6 +402,38 @@ describe('mapRowToInventoryItem', () => {
     // Keys the block does provide still resolve normally.
     expect(resolveInventoryStatus('sold', partialStatusValues)).toBe('SOLD');
     expect(getSourceStatusValues('SOLD', partialStatusValues)).toEqual(['sold']);
+  });
+
+  it('maps a blank cell to the status the merchant assigned to blank', () => {
+    expect(toStatusValueToken(null)).toBe('');
+    expect(toStatusValueToken(undefined)).toBe('');
+    expect(toStatusValueToken('   ')).toBe('');
+    expect(toStatusValueToken('for_sale')).toBe('for_sale');
+
+    const blankMapped: StatusValuesConfig = { ACTIVE: [''] };
+    expect(resolveInventoryStatus(null, blankMapped)).toBe('ACTIVE');
+    expect(resolveInventoryStatus(undefined, blankMapped)).toBe('ACTIVE');
+    expect(resolveInventoryStatus('', blankMapped)).toBe('ACTIVE');
+    expect(resolveInventoryStatus('   ', blankMapped)).toBe('ACTIVE');
+    expect(getSourceStatusValues('ACTIVE', blankMapped)).toEqual(['']);
+
+    // Unmapped blank stays unknown so the unknown-status policy still applies.
+    expect(resolveInventoryStatus(null, { ACTIVE: ['for_sale'] })).toBeUndefined();
+    expect(resolveInventoryStatus('', undefined)).toBeUndefined();
+
+    const config: InventoryResourceConfig = {
+      ...baseConfig,
+      fields: { ...baseConfig.fields, status: 'availability' },
+      statusValues: { ACTIVE: [''] },
+      unknownStatusPolicy: 'DRAFT',
+    };
+    expect(
+      mapRowToInventoryItem(
+        { id: '1', title: 'Test', price: 100, availability: null },
+        config,
+        new Map(),
+      ).status,
+    ).toBe('ACTIVE');
   });
 
   it('processes image relations', () => {

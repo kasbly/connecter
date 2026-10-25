@@ -386,6 +386,13 @@ is treated as drift rather than a declaration. Those rows are reported as `unkno
 (default `DRAFT`) and stay out of customer-facing search until you add the value to `statusValues`.
 `/diagnostics` names any such values under `unknownStatusValues`.
 
+A blank cell is one of those values. SQL `NULL` and a value that is empty after trimming are both
+the empty string `""` in `statusValues` and in `unknownStatusValues`. Setup asks about that value
+as **blank**, and the unknown-status warning names it `blank`. Map `""` under `statusValues.ACTIVE`
+when an empty status means the listing is still for sale: inventory reads and `filter.status=ACTIVE`
+(including Test connection) then match both `NULL` and an empty string. Until you map it, every
+blank row is reported as `unknownStatusPolicy`, so an all-blank column is not an empty catalog.
+
 Status filters use the same mapping: `filter.status=SOLD` queries every source value configured
 under `statusValues.SOLD`. A token with no configured source values returns an empty page rather
 than comparing the Kasbly token against your status column.

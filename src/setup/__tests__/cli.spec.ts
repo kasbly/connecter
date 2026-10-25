@@ -104,6 +104,17 @@ describe('validate reporting', () => {
     expect(dbAdapter.disconnect).toHaveBeenCalled();
   }, 15_000);
 
+  it('names an unmapped blank status instead of an empty catalog', async () => {
+    mockConnector([null, '   '], [{ id: '1', title: 'Test', price: 100, availability: null }]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const result = await validateConnectorConfig(packageJsonPath);
+
+    expect(result.unknownStatusValues).toEqual(['']);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('blank'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('RESERVED'));
+  });
+
   it('stays quiet when every source status value is mapped', async () => {
     mockConnector(['for_sale']);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);

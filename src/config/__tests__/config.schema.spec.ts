@@ -225,6 +225,17 @@ describe('connectorConfigSchema inventory fields', () => {
       },
     });
     expect(unmapped.resources.inventory.statusValues).toEqual({});
+
+    const blankMapped = connectorConfigSchema.parse({
+      ...createConfigInput(),
+      resources: {
+        inventory: {
+          ...createConfigInput().resources.inventory,
+          statusValues: { ACTIVE: [''] },
+        },
+      },
+    });
+    expect(blankMapped.resources.inventory.statusValues).toEqual({ ACTIVE: [''] });
   });
 
   it.each(['ACTIVE', 'unknown'])('rejects an unsafe unknown-status policy: %s', (policy) => {

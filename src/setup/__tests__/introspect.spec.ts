@@ -5,11 +5,15 @@ const { knexMock } = vi.hoisted(() => ({ knexMock: vi.fn() }));
 vi.mock('knex', () => ({ default: knexMock }));
 
 import {
+  compareSetupTablesByRowCount,
   createDatabaseConnectionOptions,
+  formatSetupTableChoice,
   introspectDatabase,
   isTlsRequiredError,
+  resolveIntrospectedRowCount,
   SETUP_STATEMENT_TIMEOUT_MS,
   type DbConnectOptions,
+  type IntrospectedTable,
 } from '../introspect.js';
 
 const connection: DbConnectOptions = {
@@ -44,6 +48,98 @@ describe('isTlsRequiredError', () => {
     'connection is insecure (try using sslmode=require)',
   ])('recognizes a PostgreSQL TLS requirement: %s', (message) => {
     expect(isTlsRequiredError(new Error(message))).toBe(true);
+  });
+});
+
+describe('resolveIntrospectedRowCount', () => {
+  it('keeps an analyzed empty table at 0 and treats -1 as unknown', () => {
+    expect(resolveIntrospectedRowCount('table', { estimate: '0' })).toBe(0);
+    expect(resolveIntrospectedRowCount('table', { estimate: '-1' })).toBeNull();
+    expect(resolveIntrospectedRowCount('table', undefined)).toBeNull();
+    expect(resolveIntrospectedRowCount('materialized view', { estimate: '12000' })).toBe(12000);
+    expect(resolveIntrospectedRowCount('materialized view', { estimate: '-1' })).toBeNull();
+  });
+
+  it('ignores reltuples on a view', () => {
+    expect(resolveIntrospectedRowCount('view', { estimate: '0' })).toBeNull();
+    expect(resolveIntrospectedRowCount('view', { estimate: '12' })).toBeNull();
+    expect(resolveIntrospectedRowCount('view', { estimate: '-1' })).toBeNull();
+  });
+
+  it('sums known partition leaves and does not turn an unknown leaf into 0', () => {
+    expect(
+      resolveIntrospectedRowCount('table', {
+        estimate: '0',
+        partitioned: true,
+        child_count: 2,
+        child_unknown: false,
+        child_estimate: '15000',
+      }),
+    ).toBe(15000);
+    expect(
+      resolveIntrospectedRowCount('table', {
+        estimate: '0',
+        partitioned: true,
+        child_count: 2,
+        child_unknown: false,
+        child_estimate: '0',
+      }),
+    ).toBe(0);
+    expect(
+      resolveIntrospectedRowCount('table', {
+        estimate: '0',
+        partitioned: true,
+        child_count: 2,
+        child_unknown: true,
+        child_estimate: '10',
+      }),
+    ).toBeNull();
+    expect(
+      resolveIntrospectedRowCount('table', {
+        estimate: '-1',
+        partitioned: true,
+        child_count: 0,
+        child_unknown: false,
+        child_estimate: '0',
+      }),
+    ).toBeNull();
+    expect(
+      resolveIntrospectedRowCount('table', {
+        estimate: '8000',
+        partitioned: true,
+        child_count: 1,
+        child_unknown: true,
+        child_estimate: '0',
+      }),
+    ).toBe(8000);
+  });
+});
+
+describe('setup table choice order', () => {
+  function table(
+    name: string,
+    kind: IntrospectedTable['kind'],
+    rowCount: number | null,
+  ): IntrospectedTable {
+    return { name, kind, rowCount, columns: [] };
+  }
+
+  it('labels unknown counts and sorts them above a known small table', () => {
+    const lookup = table('lookup', 'table', 3);
+    const products = table('products', 'table', null);
+    const empty = table('empty_bins', 'table', 0);
+    const photos = table('product_photos', 'view', null);
+    const catalog = table('catalog', 'table', 50);
+
+    expect(formatSetupTableChoice(products)).toBe('products (table, row count unavailable)');
+    expect(formatSetupTableChoice(photos)).toBe('product_photos (view, row count unavailable)');
+    expect(formatSetupTableChoice(empty)).toBe('empty_bins (table, 0 rows)');
+    expect(formatSetupTableChoice(lookup)).toBe('lookup (table, 3 rows)');
+    expect(
+      [lookup, empty, photos, catalog, products]
+        .sort(compareSetupTablesByRowCount)
+        .map((entry) => entry.name),
+    ).toEqual(['product_photos', 'products', 'catalog', 'lookup', 'empty_bins']);
   });
 });
 
@@ -168,6 +264,12 @@ describe('introspectDatabase', () => {
     expect(pkSql).toContain('n.nspname = ?');
     expect(pkSql).not.toContain('information_schema.table_constraints');
     expect(db.raw).toHaveBeenNthCalledWith(4, pkSql, ['products', 'catalog']);
+    const estimateSql = db.raw.mock.calls[4]![0] as string;
+    expect(estimateSql).toContain('c.reltuples::bigint AS estimate');
+    expect(estimateSql).toContain('pg_inherits');
+    expect(estimateSql).toContain('partition_tree');
+    expect(estimateSql).toContain("relkind <> 'p'");
+    expect(estimateSql).not.toMatch(/count\s*\(\s*\*\s*\)\s+from/i);
     expect(db.raw).toHaveBeenNthCalledWith(6, expect.stringContaining('FROM pg_constraint c'), [
       'catalog',
     ]);
@@ -230,7 +332,7 @@ describe('introspectDatabase', () => {
         {
           name: 'published_products',
           kind: 'view',
-          rowCount: 12,
+          rowCount: null,
           columns: [
             { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: false },
             { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },

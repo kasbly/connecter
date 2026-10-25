@@ -1240,6 +1240,24 @@ describe('PostgresAdapter list count (#17420)', () => {
     expect(result.rows).toEqual([{ id: '1', price: 10, status: ' active ' }]);
   });
 
+  it('matches a blank status token with IS NULL as well as an empty string', async () => {
+    const conditions: QueryCondition[] = [
+      { column: 'status', operator: 'IN', value: ['', 'for_sale'] },
+    ];
+
+    const { countQuery, dataQuery } = await runListQuery({
+      count: 1,
+      conditions,
+      dataRows: [{ id: '1', price: 10, status: null }],
+    });
+
+    const blankPredicate = '(lower(btrim(status::text)) IN (?, ?) OR status IS NULL)';
+    expect(dataQuery.sql).toContain(blankPredicate);
+    expect(countQuery.sql).toContain(blankPredicate);
+    expect(dataQuery.bindings.slice(0, 2)).toEqual(['', 'for_sale']);
+    expect(countQuery.bindings.slice(0, 2)).toEqual(['', 'for_sale']);
+  });
+
   it('escapes LIKE metacharacters in search values for data and count queries', async () => {
     const conditions: QueryCondition[] = [
       { column: 'title', operator: 'ILIKE', value: String.raw`50%_off\sale`, _group: 'term' },

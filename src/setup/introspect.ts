@@ -5,8 +5,81 @@ export const SETUP_STATEMENT_TIMEOUT_MS = 10_000;
 export interface IntrospectedTable {
   name: string;
   kind: 'table' | 'view' | 'materialized view';
-  rowCount: number;
+  /**
+   * Planner estimate of live rows (`pg_class.reltuples`, or the sum of
+   * partition-leaf estimates). Null when that estimate is unknown: the
+   * relation was never analyzed (`reltuples` is -1), it is a view (ANALYZE
+   * does not record one), or it is a partitioned parent whose leaves are not
+   * a known estimate. 0 means analyzed and empty — not a stand-in for unknown.
+   */
+  rowCount: number | null;
   columns: IntrospectedColumn[];
+}
+
+interface RelationEstimateRow {
+  estimate: string | number | null;
+  partitioned: boolean | null;
+  child_count: number | string | null;
+  child_unknown: boolean | null;
+  child_estimate: string | number | null;
+}
+
+/** `reltuples` of -1 (and any non-finite value) means the planner has no estimate. */
+function readRelEstimate(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
+function readChildCount(value: unknown): number {
+  if (value === null || value === undefined || value === '') return 0;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return parsed;
+}
+
+/**
+ * Views have no `reltuples` estimate. Partitioned parents often stay at 0
+ * until ANALYZE even when the leaves hold the catalog; prefer the sum of
+ * leaf estimates, and never turn an unknown leaf (`-1`) into 0.
+ */
+export function resolveIntrospectedRowCount(
+  kind: IntrospectedTable['kind'],
+  row: Partial<RelationEstimateRow> | undefined,
+): number | null {
+  if (kind === 'view') return null;
+
+  const own = readRelEstimate(row?.estimate);
+  if (!row || row.partitioned !== true) return own;
+
+  const childCount = readChildCount(row.child_count);
+  if (childCount > 0 && row.child_unknown !== true) {
+    return readRelEstimate(row.child_estimate);
+  }
+
+  // A positive parent estimate was written by ANALYZE. 0/-1 was not.
+  return own !== null && own > 0 ? own : null;
+}
+
+/** Choice label for the inventory picker and the no-FK relation picker. */
+export function formatSetupTableChoice(table: IntrospectedTable): string {
+  const count =
+    table.rowCount === null ? 'row count unavailable' : `${table.rowCount.toLocaleString()} rows`;
+  return `${table.name} (${table.kind}, ${count})`;
+}
+
+/**
+ * Descending known estimates. Unknown counts sort first so the highlighted
+ * default (the first choice) is not a tiny analyzed lookup sitting above an
+ * unanalyzed catalog or a view.
+ */
+export function compareSetupTablesByRowCount(a: IntrospectedTable, b: IntrospectedTable): number {
+  if (a.rowCount === null || b.rowCount === null) {
+    if (a.rowCount === b.rowCount) return 0;
+    return a.rowCount === null ? -1 : 1;
+  }
+  return b.rowCount - a.rowCount;
 }
 
 export interface IntrospectedColumn {
@@ -284,14 +357,42 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
       isPrimaryKey: pkColumns.has(col.column_name),
     }));
 
-    // Get row count (approximate for large tables)
-    const countResult = await db.raw<{ rows: { estimate: string }[] }>(
-      `SELECT reltuples::bigint AS estimate
-       FROM pg_class
-       WHERE relname = ? AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = ?)`,
+    // Planner estimate only — never COUNT(*) a merchant table. -1 is unknown.
+    // Partition parents keep reltuples at 0 until ANALYZE; sum leaf estimates.
+    const countResult = await db.raw<{ rows: RelationEstimateRow[] }>(
+      `SELECT c.reltuples::bigint AS estimate,
+              (c.relkind = 'p') AS partitioned,
+              parts.child_count,
+              parts.child_unknown,
+              parts.child_estimate
+       FROM pg_class c
+       LEFT JOIN LATERAL (
+         WITH RECURSIVE partition_tree AS (
+           SELECT child.oid, child.reltuples, child.relkind
+           FROM pg_inherits AS inherited
+           JOIN pg_class AS child ON child.oid = inherited.inhrelid
+           WHERE inherited.inhparent = c.oid
+           UNION ALL
+           SELECT child.oid, child.reltuples, child.relkind
+           FROM partition_tree AS parent
+           JOIN pg_inherits AS inherited ON inherited.inhparent = parent.oid
+           JOIN pg_class AS child ON child.oid = inherited.inhrelid
+         )
+         SELECT (COUNT(*) FILTER (WHERE relkind <> 'p'))::int AS child_count,
+                COALESCE(
+                  BOOL_OR(reltuples < 0) FILTER (WHERE relkind <> 'p'),
+                  FALSE
+                ) AS child_unknown,
+                COALESCE(
+                  SUM(reltuples) FILTER (WHERE relkind <> 'p' AND reltuples >= 0),
+                  0
+                )::bigint AS child_estimate
+         FROM partition_tree
+       ) AS parts ON TRUE
+       WHERE c.relname = ? AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = ?)`,
       [tableName, schema],
     );
-    const rowCount = Math.max(0, Number(countResult.rows[0]?.estimate ?? 0));
+    const rowCount = resolveIntrospectedRowCount(tableRow.kind, countResult.rows[0]);
 
     tables.push({ name: tableName, kind: tableRow.kind, rowCount, columns });
   }

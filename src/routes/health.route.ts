@@ -14,6 +14,7 @@ import {
   mapRowToInventoryItem,
   resolveColumnValue,
   resolveInventoryStatus,
+  toStatusValueToken,
   validateInventoryItemWireContract,
 } from '../mapping/field-mapper.js';
 import {
@@ -455,10 +456,10 @@ export async function probeInventoryResource(
   const unknownStatusValues = Array.from(
     new Set(
       observedStatuses.flatMap((value) => {
-        const normalizedValue = value === null || value === undefined ? '' : String(value).trim();
-        return normalizedValue && !resolveInventoryStatus(value, resourceConfig.statusValues)
-          ? [normalizedValue]
-          : [];
+        if (resolveInventoryStatus(value, resourceConfig.statusValues)) return [];
+        // NULL and trim-empty cells are the blank token. Dropping `''` hid an
+        // all-blank column from `/diagnostics`, so it looked like an empty catalog.
+        return [toStatusValueToken(value).trim()];
       }),
     ),
   )
@@ -528,7 +529,9 @@ export function formatUnknownStatusWarning(
 ): string | null {
   if (unknownStatusValues.length === 0) return null;
 
-  const values = unknownStatusValues.map((value) => JSON.stringify(value)).join(', ');
+  const values = unknownStatusValues
+    .map((value) => (value === '' ? 'blank' : JSON.stringify(value)))
+    .join(', ');
   return (
     `Unmapped inventory status values found in the source: ${values}. ` +
     `Every listing carrying one of them is reported as ${unknownStatusPolicy ?? 'DRAFT'} ` +

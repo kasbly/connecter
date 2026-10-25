@@ -368,7 +368,7 @@ describe('health route', () => {
     expect(response.json()).toMatchObject({
       status: 'ok',
       resources: 'ok',
-      unknownStatusValues: ['under_offer'],
+      unknownStatusValues: ['', 'under_offer'],
     });
     await app.close();
   });
@@ -895,6 +895,54 @@ describe('health route', () => {
     expect(formatUnknownStatusWarning(['under_offer'], 'RESERVED')).toContain('RESERVED');
     expect(formatUnknownStatusWarning(['under_offer'], undefined)).toContain('DRAFT');
     expect(formatUnknownStatusWarning([], 'DRAFT')).toBeNull();
+    expect(formatUnknownStatusWarning([''], 'DRAFT')).toContain('blank');
+    expect(formatUnknownStatusWarning([''], 'DRAFT')).toContain('DRAFT');
+    expect(formatUnknownStatusWarning(['', 'under_offer'], 'DRAFT')).toContain('"under_offer"');
+  });
+
+  it('names blank rows on /diagnostics instead of looking like an empty catalog', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [{ id: '1', title: 'Test', price: 100, availability: null }],
+      total: 4,
+    });
+    dbAdapter.distinctValues = vi.fn().mockResolvedValue([null, '', '   ']);
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, {
+        ...inventoryResource,
+        fields: { ...inventoryResource.fields, status: 'availability' },
+        statusValues: { ACTIVE: ['for_sale'] },
+      }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'ok',
+      unknownStatusValues: [''],
+    });
+    await app.close();
+  });
+
+  it('omits blank from unknown statuses once the merchant mapped it to ACTIVE', async () => {
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [{ id: '1', title: 'Test', price: 100, availability: null }],
+      total: 4,
+    });
+    dbAdapter.distinctValues = vi.fn().mockResolvedValue([null, '   ']);
+
+    await expect(
+      probeInventoryResource(dbAdapter, {
+        ...inventoryResource,
+        fields: { ...inventoryResource.fields, status: 'availability' },
+        statusValues: { ACTIVE: [''] },
+      }),
+    ).resolves.toMatchObject({ unknownStatusValues: [] });
   });
 
   it('names the withheld listings for a wire-contract-violation warning', () => {
