@@ -697,7 +697,9 @@ async function collectConfiguredRelation(options: {
     const nameCol = pickFlattenColumn(
       relTable.columns.filter((c) => selectedColumnNames.has(c.name)),
     );
-    if (nameCol) {
+    // Flattening publishes only one field. Keep multiple selected columns as
+    // relation objects so every column offered as "expose" reaches the item.
+    if (nameCol && Object.keys(fieldsMap).length === 1) {
       relation['flatten'] = nameCol.name;
       // Keep this explicit in generated config. Runtime also treats omitted
       // legacy values as enabled so upgraded connectors gain the behavior.
@@ -1274,6 +1276,52 @@ export async function runWizard(): Promise<void> {
     }
   }
 
+  // Reserve the final row-attribute keys before naming relations. Include
+  // canonical targets and preserved custom mappings so no child table can
+  // overwrite an attribute selected (or retained) by this setup run.
+  const attributes: Record<string, string> = {};
+  if (listingUrlColumn) {
+    attributes['url'] = quoteIfNeeded(listingUrlColumn);
+  }
+  for (const attrName of additionalAttributes) {
+    // suggestedAttributes only has one entry per target: suggestFieldMappings
+    // stops at the first matching column, so a second URL-shaped column
+    // manually checked here (e.g. `permalink` alongside an already-suggested
+    // `url`) has no entry there and would otherwise publish under its own raw
+    // column name instead of the canonical `attributes.url` key that
+    // `resolvePublicListingUrl` reads (#28246).
+    const target =
+      suggestedAttributes.get(attrName) ?? (isListingUrlColumn(attrName) ? 'url' : attrName);
+    attributes[target] = quoteIfNeeded(attrName);
+  }
+
+  // Carry forward an existing attributes key only when no column in this
+  // run's schema even offers it as a checkbox candidate. `additionalAttributes`
+  // already lets the merchant deselect any suggested attribute (including a
+  // pattern-matched make/year/model column, or an unsuggested column checked
+  // under its own name, e.g. `legacy_attribute`) and have that removal
+  // honoured — that's a deliberate, tested rerun behaviour, not a bug. The
+  // actual gap (#28985) is narrower: a hand-edited `attributes.year` pointed
+  // at a column whose name doesn't itself look year-shaped is never a
+  // suggestion for *any* column this run (that column would instead publish
+  // under its own name if checked), so `year` never appears in the checkbox
+  // as an achievable outcome and had no way to be reselected — that's the
+  // only case worth preserving. `url` is excluded: Step 3a always asks
+  // explicitly, so an unpicked url this run is deliberate too.
+  const reachableAttributeTargets = new Set(
+    unmappedColumns.map(
+      (column) =>
+        suggestedAttributes.get(column.name) ??
+        (isListingUrlColumn(column.name) ? 'url' : column.name),
+    ),
+  );
+  for (const [key, column] of Object.entries(
+    existingConfig?.resources.inventory.attributes ?? {},
+  )) {
+    if (key === 'url' || key in attributes || reachableAttributeTargets.has(key)) continue;
+    attributes[key] = column;
+  }
+
   // Step 5: Relations
   console.log('\nStep 5: Related Tables');
   const relationSuggestions = suggestRelations(
@@ -1282,11 +1330,9 @@ export async function runWizard(): Promise<void> {
     result.foreignKeys,
   );
   const relations: Record<string, RelationConfig> = {};
-  // Tracks published (customer-facing) attribute names already used this run,
-  // so a second flatten/generic relation that derives the same semantic name
-  // (e.g. two child tables both nicknamed "features") gets a `_2` suffix
-  // instead of silently overwriting the first relation's attribute.
-  const usedPublishedNames = new Set<string>();
+  // Share the attribute namespace with row mappings and earlier relations.
+  // A collision gets a `_2` suffix instead of replacing an existing value.
+  const usedPublishedNames = new Set(Object.keys(attributes));
   const suggestedRelationTables = new Set(
     relationSuggestions.map((suggestion) => suggestion.table),
   );
@@ -1516,52 +1562,9 @@ export async function runWizard(): Promise<void> {
   // overlaying selections onto the previous inventory mapping. This makes an
   // explicit "No" or an empty checkbox selection remove stale configuration.
   const fields: Record<string, string> = {};
-  const attributes: Record<string, string> = {};
 
   fields['externalId'] = quoteIfNeeded(idColumn);
   Object.assign(fields, fieldMappings);
-  if (listingUrlColumn) {
-    attributes['url'] = quoteIfNeeded(listingUrlColumn);
-  }
-  for (const attrName of additionalAttributes) {
-    // suggestedAttributes only has one entry per target: suggestFieldMappings
-    // stops at the first matching column, so a second URL-shaped column
-    // manually checked here (e.g. `permalink` alongside an already-suggested
-    // `url`) has no entry there and would otherwise publish under its own raw
-    // column name instead of the canonical `attributes.url` key that
-    // `resolvePublicListingUrl` reads (#28246).
-    const target =
-      suggestedAttributes.get(attrName) ?? (isListingUrlColumn(attrName) ? 'url' : attrName);
-    attributes[target] = quoteIfNeeded(attrName);
-  }
-
-  // Carry forward an existing attributes key only when no column in this
-  // run's schema even offers it as a checkbox candidate. `additionalAttributes`
-  // already lets the merchant deselect any suggested attribute (including a
-  // pattern-matched make/year/model column, or an unsuggested column checked
-  // under its own name, e.g. `legacy_attribute`) and have that removal
-  // honoured — that's a deliberate, tested rerun behaviour, not a bug. The
-  // actual gap (#28985) is narrower: a hand-edited `attributes.year` pointed
-  // at a column whose name doesn't itself look year-shaped is never a
-  // suggestion for *any* column this run (that column would instead publish
-  // under its own name if checked), so `year` never appears in the checkbox
-  // as an achievable outcome and had no way to be reselected — that's the
-  // only case worth preserving. `url` is excluded: Step 3a always asks
-  // explicitly, so an unpicked url this run is deliberate too.
-  const reachableAttributeTargets = new Set(
-    unmappedColumns.map(
-      (column) =>
-        suggestedAttributes.get(column.name) ??
-        (isListingUrlColumn(column.name) ? 'url' : column.name),
-    ),
-  );
-  for (const [key, column] of Object.entries(
-    existingConfig?.resources.inventory.attributes ?? {},
-  )) {
-    if (key === 'url' || key in attributes || reachableAttributeTargets.has(key)) continue;
-    attributes[key] = column;
-  }
-
   // A rerun rebuilds filterableColumns purely from this run's suggestions —
   // right for anything the merchant was actually asked about this run (an
   // explicit uncheck/skip should indeed remove it, per the "Build config

@@ -1532,7 +1532,12 @@ describe('runWizard', () => {
     }
   });
 
-  it('binds imageUrlField and flatten to the selected url/name column, not the first lookalike (thumbnail_url, filename) (#32460)', async () => {
+  it.each([
+    { selectedFeatureColumns: ['name'], flattened: true },
+    { selectedFeatureColumns: ['name', 'description'], flattened: false },
+    { selectedFeatureColumns: ['description'], flattened: false },
+  ])('exposes feature columns ($selectedFeatureColumns)', async (testCase) => {
+    const { selectedFeatureColumns, flattened } = testCase;
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
     const distinctImageTypes = ['gallery'];
@@ -1583,7 +1588,9 @@ describe('runWizard', () => {
       }
       if (message.startsWith('Which filters should be available')) return Promise.resolve([]);
       if (message.startsWith('Select columns from Image')) return Promise.resolve(['url']);
-      if (message.startsWith('Select columns from CarFeatures')) return Promise.resolve(['name']);
+      if (message.startsWith('Select columns from CarFeatures')) {
+        return Promise.resolve(selectedFeatureColumns);
+      }
       if (message.startsWith('Which "type" values on Image')) return Promise.resolve([]);
       return Promise.resolve([]);
     });
@@ -1626,6 +1633,7 @@ describe('runWizard', () => {
               { name: 'carId', type: 'uuid', nullable: false, isPrimaryKey: false },
               { name: 'filename', type: 'text', nullable: false, isPrimaryKey: false },
               { name: 'name', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
             ],
           },
         ],
@@ -1665,16 +1673,83 @@ describe('runWizard', () => {
       });
       expect(relations['CarFeatures__carId']).toMatchObject({
         table: 'CarFeatures',
-        flatten: 'name',
-        searchable: true,
+        publishAs: 'features',
+        fields: Object.fromEntries(
+          selectedFeatureColumns.map((column) => [column, quoteIfNeeded(column)]),
+        ),
       });
+      expect(relations['CarFeatures__carId']?.flatten).toBe(flattened ? 'name' : undefined);
+      expect(relations['CarFeatures__carId']?.searchable).toBe(flattened ? true : undefined);
+
+      const featureRow = Object.fromEntries(
+        selectedFeatureColumns.map((column) => [
+          column,
+          column === 'name' ? 'ABS' : 'Anti-lock braking system',
+        ]),
+      );
+      const mapped = mapRowToInventoryItem(
+        { id: 'car-1', title: 'Car', price: 100, currency: 'SAR' },
+        config.resources.inventory,
+        new Map([['CarFeatures__carId', new Map([['car-1', [featureRow]]])]]),
+      );
+      expect(mapped.attributes['features']).toEqual(flattened ? ['ABS'] : [featureRow]);
     } finally {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
     }
   });
 
-  it("suffixes a second flatten relation's published name when two FKs onto the same child table derive the same semantic name (#27231)", async () => {
+  it.each([
+    {
+      main: 'Car',
+      child: 'CarFeatures',
+      target: 'features',
+      column: undefined,
+      selected: false,
+      retained: false,
+    },
+    {
+      main: 'Car',
+      child: 'CarColor',
+      target: 'color',
+      column: 'colour',
+      selected: true,
+      retained: false,
+    },
+    {
+      main: 'product',
+      child: 'product_model',
+      target: 'model',
+      column: 'model',
+      selected: true,
+      retained: false,
+    },
+    {
+      main: 'product',
+      child: 'product_make',
+      target: 'make',
+      column: 'manufacturer',
+      selected: true,
+      retained: false,
+    },
+    {
+      main: 'Car',
+      child: 'CarColor',
+      target: 'color',
+      column: 'colour',
+      selected: false,
+      retained: false,
+    },
+    {
+      main: 'Car',
+      child: 'CarColor',
+      target: 'color',
+      column: 'custom_paint',
+      selected: false,
+      retained: true,
+    },
+  ])('reserves row keys for $child ($selected/$retained)', async (testCase) => {
+    const { main, child, target, column, selected, retained } = testCase;
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
     const db = Object.assign(vi.fn(), {
@@ -1686,7 +1761,7 @@ describe('runWizard', () => {
 
     promptMocks.select.mockImplementation(({ message }: { message: string }) => {
       if (message.startsWith('Database type')) return Promise.resolve('postgres');
-      if (message.startsWith('Which table contains')) return Promise.resolve('Car');
+      if (message.startsWith('Which table contains')) return Promise.resolve(main);
       if (message.startsWith('Which column is the unique listing id')) {
         return Promise.resolve('id');
       }
@@ -1715,20 +1790,21 @@ describe('runWizard', () => {
       Promise.resolve(!message.startsWith('Does this database require TLS')),
     );
     promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
-      if (message.startsWith('Select additional')) return Promise.resolve([]);
+      if (message.startsWith('Select additional'))
+        return Promise.resolve(selected ? [column!] : []);
       if (message.startsWith('Which columns should be searchable')) {
         return Promise.resolve(['title']);
       }
       if (message.startsWith('Which filters should be available')) return Promise.resolve([]);
-      if (message.startsWith('Select columns from CarFeatures')) return Promise.resolve(['name']);
+      if (message.startsWith(`Select columns from ${child}`)) return Promise.resolve(['name']);
       return Promise.resolve([]);
     });
-    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+    vi.mocked(introspectDatabase).mockResolvedValue({
       db: db as never,
       result: {
         tables: [
           {
-            name: 'Car',
+            name: main,
             kind: 'table',
             rowCount: 50,
             columns: [
@@ -1737,13 +1813,16 @@ describe('runWizard', () => {
               { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
               { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
               { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+              ...(column
+                ? [{ name: column, type: 'text', nullable: true, isPrimaryKey: false }]
+                : []),
             ],
           },
           {
             // One child table reached through two separate FKs (mirrors the
             // #26144 dual-FK-onto-one-table shape), so both relations derive
             // the same semantic published name from the same table name.
-            name: 'CarFeatures',
+            name: child,
             kind: 'table',
             rowCount: 120,
             columns: [
@@ -1757,16 +1836,16 @@ describe('runWizard', () => {
         foreignKeys: [
           {
             constraintName: 'CarFeatures_carId_fkey',
-            fromTable: 'CarFeatures',
+            fromTable: child,
             fromColumn: 'carId',
-            toTable: 'Car',
+            toTable: main,
             toColumn: 'id',
           },
           {
             constraintName: 'CarFeatures_altCarId_fkey',
-            fromTable: 'CarFeatures',
+            fromTable: child,
             fromColumn: 'altCarId',
-            toTable: 'Car',
+            toTable: main,
             toColumn: 'id',
           },
         ],
@@ -1778,18 +1857,47 @@ describe('runWizard', () => {
       process.chdir(directory);
       await runWizard();
 
-      const config = loadExistingSetupConfig(
-        join(directory, 'connector.config.yml'),
-        join(directory, '.env'),
+      const configPath = join(directory, 'connector.config.yml');
+      const envPath = join(directory, '.env');
+      if (retained) {
+        // A custom mapping with no matching heuristic is retained on rerun.
+        // Its key must also be reserved, including against a saved publishAs.
+        const previous = loadExistingSetupConfig(configPath, envPath);
+        previous.resources.inventory.attributes = { [target]: quoteIfNeeded(column!) };
+        writeFileSync(configPath, yaml.dump(previous));
+      }
+      await runWizard();
+      const inventory = loadExistingSetupConfig(configPath, envPath).resources.inventory;
+      const relations = inventory.relations ?? {};
+      const hasAttribute = selected || retained;
+      expect(inventory.attributes?.[target]).toBe(
+        hasAttribute ? quoteIfNeeded(column!) : undefined,
       );
-      const relations = config.resources.inventory.relations ?? {};
-
-      // Both FKs still survive under distinct internal keys (#26144) ...
+      // Both FK keys survive, while each output name avoids every saved key.
       expect(Object.keys(relations)).toHaveLength(2);
-      // ... but the second relation's published name is suffixed rather than
-      // silently overwriting the first's `features` attribute.
-      expect(relations['CarFeatures__carId']?.publishAs).toBe('features');
-      expect(relations['CarFeatures__altCarId']?.publishAs).toBe('features_2');
+      expect(relations[`${child}__carId`]?.publishAs).toBe(hasAttribute ? `${target}_2` : target);
+      expect(relations[`${child}__altCarId`]?.publishAs).toBe(
+        retained ? `${target}_2_2` : `${target}_${hasAttribute ? 3 : 2}`,
+      );
+      for (const rows of [[], [{ name: 'Red' }]]) {
+        const item = mapRowToInventoryItem(
+          {
+            id: 'car-1',
+            title: 'Car',
+            price: 100,
+            currency: 'SAR',
+            ...(column ? { [column]: 'Original' } : {}),
+          },
+          inventory,
+          new Map([[`${child}__carId`, new Map([['car-1', rows]])]]),
+        );
+        expect(item.attributes[target]).toEqual(
+          hasAttribute ? 'Original' : rows.map((row) => row.name),
+        );
+        expect(item.attributes[hasAttribute ? `${target}_2` : target]).toEqual(
+          rows.map((row) => row.name),
+        );
+      }
     } finally {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
