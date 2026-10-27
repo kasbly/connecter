@@ -48,6 +48,33 @@ describe('health route', () => {
     await app.close();
   });
 
+  it('rejects sampled duplicate IDs instead of certifying ambiguous listing URLs', async () => {
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValue({
+      rows: [
+        { tenant_id: 7, sku: 'A', title: 'Chair', price: 50 },
+        { tenant_id: 7, sku: 'B', title: 'Desk', price: 100 },
+      ],
+      total: 2,
+    });
+    const compositeResource = { ...inventoryResource, idColumn: 'tenant_id' };
+    await expect(probeInventoryResource(dbAdapter, compositeResource)).rejects.toThrow(
+      'duplicate unique listing id',
+    );
+    await expect(
+      probeInventoryResource(dbAdapter, { ...compositeResource, idColumn: 'sku' }),
+    ).resolves.toMatchObject({ wireContractViolationIds: [] });
+    const app = Fastify();
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, compositeResource));
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      resources: 'misconfigured',
+      resourceError: expect.stringContaining('stable unique ID through a view'),
+    });
+    await app.close();
+  });
+
   it('returns 503 when the database is disconnected', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(false);

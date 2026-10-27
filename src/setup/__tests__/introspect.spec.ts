@@ -273,6 +273,7 @@ describe('introspectDatabase', () => {
     expect(db.raw).toHaveBeenNthCalledWith(6, expect.stringContaining('FROM pg_constraint c'), [
       'catalog',
     ]);
+    expect(db.raw.mock.calls[5]![0]).toContain('AND fcl.relnamespace = cl.relnamespace');
     expect(result.result).toEqual({
       tables: [
         {

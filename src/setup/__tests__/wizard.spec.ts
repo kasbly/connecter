@@ -28,6 +28,7 @@ import {
   toConfigLiteral,
   validateCaCertificatePath,
   writePrivateFile,
+  verifyUniqueListingIdColumn,
 } from '../wizard.js';
 import { suggestFieldMappings } from '../suggest.js';
 import { getUpdatedAtEpochPrompt } from '../updated-at-epoch.js';
@@ -85,6 +86,7 @@ function mockWizardProbeFailureSetup(
   tableName = 'available_products',
   port = '5432',
   epoch?: 's' | 'ms',
+  compositeKey = false,
 ) {
   const db = Object.assign(vi.fn(), {
     destroy: vi.fn().mockResolvedValue(undefined),
@@ -148,7 +150,10 @@ function mockWizardProbeFailureSetup(
           kind: 'view',
           rowCount: 40,
           columns: [
-            { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false },
+            { name: 'sku', type: 'text', nullable: false, isPrimaryKey: compositeKey },
+            ...(compositeKey
+              ? [{ name: 'tenant_id', type: 'integer', nullable: false, isPrimaryKey: true }]
+              : []),
             { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
             { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
             { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
@@ -373,6 +378,23 @@ describe('getIdColumnPrompt', () => {
     expect(prompt.choices.map((choice) => choice.name)).not.toContain('Do not map this field');
   });
 
+  it('does not label a saved composite-key component as suggested and explains the remedy', () => {
+    const prompt = getIdColumnPrompt(
+      [
+        { name: 'tenant_id', isPrimaryKey: true },
+        { name: 'sku', isPrimaryKey: true },
+      ],
+      'tenant_id',
+    );
+    expect(prompt.default).toBeUndefined();
+    expect(prompt.choices).toEqual([
+      { name: 'tenant_id', value: 'tenant_id' },
+      { name: 'sku', value: 'sku' },
+    ]);
+    expect(prompt.message).toContain('composite key');
+    expect(prompt.message).toContain('stable unique ID through a view');
+  });
+
   it('omits a default when there is no suggested column', () => {
     const prompt = getIdColumnPrompt(
       [{ name: 'sku' }, { name: 'title' }, { name: 'price' }, { name: 'currency' }],
@@ -397,6 +419,41 @@ describe('getIdColumnPrompt', () => {
       { name: 'sku', value: 'sku' },
       { name: 'title', value: 'title' },
     ]);
+  });
+});
+
+describe('verifyUniqueListingIdColumn', () => {
+  it.each([7, null, ''])(
+    'rejects a duplicate or blank ID found by the database (%j)',
+    async (value) => {
+      const db = { raw: vi.fn().mockResolvedValue({ rows: [{ value }] }) };
+      await expect(
+        verifyUniqueListingIdColumn(db as never, 'catalog', 'products', 'tenant_id'),
+      ).rejects.toThrow('duplicate or blank values');
+      expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('HAVING COUNT(*) > 1'), [
+        'tenant_id',
+        'catalog',
+        'products',
+        'tenant_id',
+        'tenant_id',
+        'tenant_id',
+      ]);
+    },
+  );
+
+  it('accepts a verified unique alternative and propagates a verification timeout', async () => {
+    const db = {
+      raw: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockRejectedValueOnce(new Error('statement timeout')),
+    };
+    await expect(
+      verifyUniqueListingIdColumn(db as never, 'catalog', 'products', 'sku'),
+    ).resolves.toBeUndefined();
+    await expect(
+      verifyUniqueListingIdColumn(db as never, 'catalog', 'products', 'sku'),
+    ).rejects.toThrow('statement timeout');
   });
 });
 
@@ -4291,6 +4348,35 @@ describe('runWizard', () => {
     }
   });
 
+  it('refuses a non-unique composite-key component before saving configuration', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = mockWizardProbeFailureSetup('products', '5432', undefined, true);
+    db.raw.mockResolvedValueOnce({ rows: [{ value: 'A' }] });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      process.chdir(directory);
+      await expect(runWizard()).rejects.toThrow('duplicate or blank values');
+      expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('HAVING COUNT(*) > 1'), [
+        'sku',
+        'merchant_data',
+        'products',
+        'sku',
+        'sku',
+        'sku',
+      ]);
+      expect(resourceProbeMocks.probeInventoryResource).not.toHaveBeenCalled();
+      expect(existsSync(join(directory, '.env'))).toBe(false);
+      expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
+      expect(db.destroy).toHaveBeenCalledOnce();
+    } finally {
+      for (const prompt of Object.values(promptMocks)) prompt.mockReset();
+      consoleError.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('throws when the generated configuration is invalid after a passing probe', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
@@ -4314,26 +4400,22 @@ describe('runWizard', () => {
     }
   });
 
-  it('reports a systematic sample-row contract failure and exits unsuccessfully', async () => {
+  it.each([
+    'Inventory resource probe failed for sample row: Invalid updatedAt date',
+    'Inventory resource probe failed: duplicate unique listing id',
+  ])('refuses to save a failed inventory probe: %s', async (probeError) => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
     const db = mockWizardProbeFailureSetup();
-    resourceProbeMocks.probeInventoryResource.mockRejectedValueOnce(
-      new Error('Inventory resource probe failed for sample row: Invalid updatedAt date'),
-    );
+    resourceProbeMocks.probeInventoryResource.mockRejectedValueOnce(new Error(probeError));
     const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     try {
       process.chdir(directory);
-      await expect(runWizard()).rejects.toThrow('Invalid updatedAt date');
+      await expect(runWizard()).rejects.toThrow(probeError);
 
-      expect(consoleError).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'Cannot save configuration: inventory sample violates the wire contract: ' +
-            'Inventory resource probe failed for sample row: Invalid updatedAt date',
-        ),
-      );
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining(probeError));
       expect(consoleLog).not.toHaveBeenCalledWith(expect.stringContaining('✓ API key:'));
       expect(consoleLog).not.toHaveBeenCalledWith(expect.stringContaining('✓ New staged API key:'));
       expect(existsSync(join(directory, '.env'))).toBe(false);

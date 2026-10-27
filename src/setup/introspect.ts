@@ -408,6 +408,8 @@ async function introspectForeignKeys(db: Knex, schema: string): Promise<ForeignK
   // for composite keys (every local column pairs with every referenced column) and is
   // outright wrong when two unrelated tables share a hand-written constraint name
   // (PostgreSQL only enforces FK constraint-name uniqueness per table, not per schema).
+  // Setup only offers tables in the selected schema. A same-named parent in
+  // another schema is a different relation and must not join this inventory.
   const fkRows = await db.raw<{
     rows: {
       constraint_name: string;
@@ -433,6 +435,7 @@ async function introspectForeignKeys(db: Knex, schema: string): Promise<ForeignK
      WHERE c.contype = 'f'
        AND c.conparentid = 0
        AND n.nspname = ?
+       AND fcl.relnamespace = cl.relnamespace
      ORDER BY cl.relname, c.conname, k.ord`,
     [schema],
   );

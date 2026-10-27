@@ -357,6 +357,23 @@ export async function probeInventoryResource(
     return new Map(relationEntries);
   };
 
+  // An individually valid row can still identify another listing when the
+  // configured ID is only one component of a composite key. Reject that mapping
+  // rather than certifying it as ready and publishing ambiguous detail URLs.
+  const assertUniqueSampleIds = (sampleRows: Record<string, unknown>[]) => {
+    const ids = new Set<string>();
+    for (const row of sampleRows) {
+      const id = String(resolveColumnValue(row, resourceConfig.idColumn) ?? '');
+      if (ids.has(id)) {
+        throw new Error(
+          `Inventory resource probe failed: duplicate unique listing id in column ${resourceConfig.idColumn}. Choose a unique column or expose a stable unique ID through a view.`,
+        );
+      }
+      ids.add(id);
+    }
+  };
+  assertUniqueSampleIds(rows);
+
   const relationData = await loadRelationData(rows);
 
   // An empty catalog is valid. A sampled page where every row fails the exact
@@ -429,6 +446,7 @@ export async function probeInventoryResource(
             `(columns: ${selectColumns.join(', ')}): ${errorMessage(error)}`,
         );
       }
+      assertUniqueSampleIds(nextRows);
       const nextViolations =
         nextRows.length > 0 ? evaluateRows(nextRows, await loadRelationData(nextRows)) : [];
 

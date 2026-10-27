@@ -1,4 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+const { knexMock } = vi.hoisted(() => ({ knexMock: vi.fn() }));
+vi.mock('knex', () => ({ default: knexMock }));
+
+import { introspectDatabase } from '../introspect.js';
 import {
   suggestFieldMappings,
   suggestIdColumn,
@@ -220,9 +225,18 @@ describe('suggestIdColumn', () => {
     expect(suggestIdColumn(columns)).toBe('uuid');
   });
 
-  it('falls back to id column', () => {
+  it('does not infer uniqueness from an id column name', () => {
     const columns = [col('id', 'integer'), col('name', 'text')];
-    expect(suggestIdColumn(columns)).toBe('id');
+    expect(suggestIdColumn(columns)).toBeNull();
+  });
+
+  it('does not suggest one member of a composite key, even when named id', () => {
+    expect(
+      suggestIdColumn([col('tenant_id', 'integer', true), col('sku', 'text', true)]),
+    ).toBeNull();
+    expect(
+      suggestIdColumn([col('tenant_id', 'integer', true), col('id', 'text', true)]),
+    ).toBeNull();
   });
 
   it('returns null when no id-like column', () => {
@@ -350,6 +364,68 @@ describe('suggestSoftDeleteColumn', () => {
 });
 
 describe('suggestRelations', () => {
+  it.each(['catalog', 'archive'])(
+    'only suggests photos when their products FK targets the selected catalog schema (%s)',
+    async (targetSchema) => {
+      const photoKey = {
+        constraint_name: 'photos_product_id_fkey',
+        from_table: 'photos',
+        from_column: 'product_id',
+        to_table: 'products',
+        to_column: 'id',
+      };
+      const db = {
+        raw: vi
+          .fn()
+          .mockResolvedValueOnce(undefined)
+          .mockResolvedValueOnce({ rows: [] })
+          .mockImplementationOnce(async (sql: string) => ({
+            // Model the namespace predicate over catalog.photos -> {schema}.products.
+            rows:
+              /fcl\.relnamespace\s*=\s*cl\.relnamespace/.test(sql) && targetSchema !== 'catalog'
+                ? []
+                : [photoKey],
+          })),
+      };
+      knexMock.mockReturnValueOnce(db);
+      const { result } = await introspectDatabase({
+        type: 'postgres',
+        host: 'database.example.com',
+        port: 5432,
+        database: 'inventory',
+        user: 'connector',
+        password: 'secret',
+        ssl: false,
+        schema: 'catalog',
+      });
+      const tables: IntrospectedTable[] = [
+        { name: 'products', kind: 'table', rowCount: 1, columns: [col('id', 'integer', true)] },
+        {
+          name: 'photos',
+          kind: 'table',
+          rowCount: 1,
+          columns: [col('product_id', 'integer'), col('url')],
+        },
+      ];
+
+      const suggestions = suggestRelations('products', tables, result.foreignKeys);
+
+      expect(suggestions).toEqual(
+        targetSchema === 'catalog'
+          ? [
+              {
+                table: 'photos',
+                foreignKeyColumn: 'product_id',
+                toColumn: 'id',
+                relationType: 'images',
+                confidence: 'high',
+              },
+            ]
+          : [],
+      );
+    },
+  );
+
   it('identifies image tables', () => {
     const tables: IntrospectedTable[] = [
       { name: 'Car', kind: 'table', rowCount: 100, columns: [col('id', 'integer', true)] },

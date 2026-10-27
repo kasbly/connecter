@@ -725,13 +725,10 @@ export function suggestFilterableColumns(
 }
 
 export function suggestIdColumn(columns: IntrospectedColumn[]): string | null {
-  // Prefer primary key
-  const pk = columns.find((c) => c.isPrimaryKey);
-  if (pk) return pk.name;
-
-  // Fall back to 'id'
-  const idCol = columns.find((c) => c.name === 'id');
-  return idCol?.name ?? null;
+  // Membership in a composite key does not make an individual column unique.
+  // The same metadata represents the selected unique index on a materialized view.
+  const primaryKeyColumns = columns.filter((column) => column.isPrimaryKey);
+  return primaryKeyColumns.length === 1 ? primaryKeyColumns[0]!.name : null;
 }
 
 export function suggestUpdatedAtColumn(columns: IntrospectedColumn[]): string | null {

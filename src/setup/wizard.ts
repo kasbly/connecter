@@ -339,21 +339,52 @@ export function getFieldMappingPrompt(
 
 /** Build the required unique-listing-id prompt; never invent a column that is not on the table. */
 export function getIdColumnPrompt(
-  columns: Array<{ name: string }>,
+  columns: Array<{ name: string; isPrimaryKey?: boolean }>,
   suggestedColumn?: string | null,
 ): { message: string; choices: Array<{ name: string; value: string }>; default?: string } {
   const columnNames = columns.map((column) => column.name);
+  const compositeKey = columns.filter((column) => column.isPrimaryKey).length > 1;
   const defaultColumn =
-    suggestedColumn && columnNames.includes(suggestedColumn) ? suggestedColumn : undefined;
+    suggestedColumn &&
+    columnNames.includes(suggestedColumn) &&
+    !(
+      compositeKey &&
+      columns.some((column) => column.name === suggestedColumn && column.isPrimaryKey)
+    )
+      ? suggestedColumn
+      : undefined;
 
   return {
-    message: 'Which column is the unique listing id?',
+    message: compositeKey
+      ? 'Which column is the unique listing id? This table has a composite key; one key column is not necessarily unique. Choose a verified unique alternative, or expose a stable unique ID through a view.'
+      : 'Which column is the unique listing id?',
     choices: columnNames.map((columnName) => ({
       name: columnName === defaultColumn ? `${columnName} (suggested)` : columnName,
       value: columnName,
     })),
     ...(defaultColumn ? { default: defaultColumn } : {}),
   };
+}
+
+/** Verify a manually selected alternative to a composite key before saving it. */
+export async function verifyUniqueListingIdColumn(
+  db: Awaited<ReturnType<typeof introspectDatabase>>['db'],
+  schema: string,
+  table: string,
+  column: string,
+): Promise<void> {
+  // The setup pool enforces its existing statement timeout. Fail closed if the
+  // merchant cannot prove uniqueness within it; sampling alone cannot prove it.
+  const result = await db.raw<{ rows: Array<{ value: unknown }> }>(
+    `SELECT ?? AS value FROM ??.?? GROUP BY ??
+     HAVING COUNT(*) > 1 OR ?? IS NULL OR BTRIM(??::text) = '' LIMIT 1`,
+    [column, schema, table, column, column, column],
+  );
+  if (result.rows.length > 0) {
+    throw new Error(
+      `Unique listing id "${column}" contains duplicate or blank values. Choose a unique alternative or expose a stable unique ID through a view.`,
+    );
+  }
 }
 
 /** Build the optional last-updated prompt; numeric columns get a separate epoch-units prompt. */
@@ -916,6 +947,17 @@ export async function runWizard(): Promise<void> {
     console.error(message);
     await db.destroy();
     throw new Error(message);
+  }
+  if (selectedTable.columns.filter((column) => column.isPrimaryKey).length > 1) {
+    try {
+      await verifyUniqueListingIdColumn(db, selectedSchema, selectedTableName, idColumn);
+    } catch (error) {
+      console.error(
+        `Cannot save configuration: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      await db.destroy();
+      throw error;
+    }
   }
   const suggestedUpdatedAt =
     getExistingMappingSelection(
