@@ -85,8 +85,10 @@ export function compareSetupTablesByRowCount(a: IntrospectedTable, b: Introspect
 export interface IntrospectedColumn {
   name: string;
   type: string;
-  /** PostgreSQL's underlying type name, which identifies user-defined enums. */
+  /** PostgreSQL's underlying type name (also present for non-enum extension types). */
   udtName?: string;
+  /** True only when PostgreSQL's type catalog identifies a scalar enum. */
+  isEnum?: boolean;
   nullable: boolean;
   isPrimaryKey: boolean;
 }
@@ -255,6 +257,7 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
         column_name: string;
         data_type: string;
         udt_name: string;
+        is_enum?: boolean;
         is_nullable: string;
       }[];
     } =
@@ -264,6 +267,7 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
               column_name: string;
               data_type: string;
               udt_name: string;
+              is_enum: boolean;
               is_nullable: string;
             }[];
           }>(
@@ -272,6 +276,7 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
                          ELSE pg_catalog.format_type(a.atttypid, NULL)
                     END AS data_type,
                     t.typname AS udt_name,
+                    (t.typtype = 'e') AS is_enum,
                     CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable
              FROM pg_attribute a
              JOIN pg_class c ON c.oid = a.attrelid
@@ -290,10 +295,17 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
               column_name: string;
               data_type: string;
               udt_name: string;
+              is_enum: boolean;
               is_nullable: string;
             }[];
           }>(
-            `SELECT column_name, data_type, udt_name, is_nullable
+            `SELECT column_name, data_type, udt_name, is_nullable,
+              EXISTS (
+                SELECT 1 FROM pg_catalog.pg_type t
+                JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                WHERE t.typname = columns.udt_name AND n.nspname = columns.udt_schema
+                  AND t.typtype = 'e'
+              ) AS is_enum
        FROM information_schema.columns
        WHERE table_name = ? AND table_schema = ?
        ORDER BY ordinal_position`,
@@ -353,6 +365,7 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
       name: col.column_name,
       type: col.data_type,
       ...(col.udt_name ? { udtName: col.udt_name } : {}),
+      ...(col.is_enum === true ? { isEnum: true } : {}),
       nullable: col.is_nullable === 'YES',
       isPrimaryKey: pkColumns.has(col.column_name),
     }));

@@ -92,6 +92,7 @@ interface MappingColumn {
   name: string;
   type: string;
   udtName?: string;
+  isEnum?: boolean;
 }
 
 function isCompatibleFieldColumn(field: FieldMappingTarget, column: MappingColumn): boolean {
@@ -107,11 +108,11 @@ function isCompatibleFieldColumn(field: FieldMappingTarget, column: MappingColum
   }
 
   if (field === 'status') {
-    // PostgreSQL reports enum columns as USER-DEFINED, with the enum name in
-    // udt_name. Integer status codes are common in older catalogues too.
+    // USER-DEFINED alone also includes extension types, not just enums.
+    // Integer status codes are common in older catalogues too.
     return (
       /(char|text|xml|enum|smallint|integer|boolean|bool)/.test(normalizedType) ||
-      (normalizedType === 'user-defined' && Boolean(column.udtName?.trim()))
+      column.isEnum === true
     );
   }
 
@@ -121,7 +122,7 @@ function isCompatibleFieldColumn(field: FieldMappingTarget, column: MappingColum
     field === 'category' ||
     field === 'description'
   ) {
-    return isTextColumn(column) || /(xml|enum)/.test(normalizedType);
+    return isTextColumn(column) || column.isEnum === true || /(xml|enum)/.test(normalizedType);
   }
 
   return /(char|text|json|xml|enum)/.test(normalizedType);

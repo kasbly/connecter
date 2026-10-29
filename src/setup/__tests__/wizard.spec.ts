@@ -293,7 +293,7 @@ describe('getFieldMappingPrompt', () => {
 
   it('offers PostgreSQL enums and integer status codes', () => {
     const prompt = getFieldMappingPrompt('status', [
-      { name: 'state', type: 'USER-DEFINED', udtName: 'listing_state' },
+      { name: 'state', type: 'USER-DEFINED', udtName: 'listing_state', isEnum: true },
       { name: 'status_code', type: 'smallint' },
       { name: 'id', type: 'uuid' },
     ]);
@@ -302,6 +302,33 @@ describe('getFieldMappingPrompt', () => {
       expect.arrayContaining(['state', 'status_code']),
     );
     expect(prompt.choices.map((choice) => choice.value)).not.toContain('id');
+  });
+
+  it.each(['title', 'description', 'currency', 'category', 'status'] as const)(
+    'offers confirmed PostgreSQL enums for %s and preserves saved selections',
+    (field) => {
+      const prompt = getFieldMappingPrompt(
+        field,
+        [
+          { name: 'custom_value', type: 'USER-DEFINED', udtName: 'CatalogValue', isEnum: true },
+          { name: 'location', type: 'USER-DEFINED', udtName: 'geometry' },
+          { name: 'enum_named_extension', type: 'USER-DEFINED', udtName: 'currency_enum' },
+        ],
+        'custom_value',
+      );
+      expect(prompt.choices.map((choice) => choice.value)).toContain('custom_value');
+      expect(prompt.choices.map((choice) => choice.value)).not.toContain('location');
+      expect(prompt.choices.map((choice) => choice.value)).not.toContain('enum_named_extension');
+      expect(prompt.default).toBe('custom_value');
+    },
+  );
+
+  it.each(['price', 'images'] as const)('does not offer scalar enums for %s', (field) => {
+    expect(
+      getFieldMappingPrompt(field, [
+        { name: 'custom_value', type: 'USER-DEFINED', udtName: 'CatalogValue', isEnum: true },
+      ]).choices.map((choice) => choice.value),
+    ).not.toContain('custom_value');
   });
 
   it('offers citext columns reported as user-defined for text field mappings', () => {
@@ -803,6 +830,109 @@ describe('serializeEnvValue', () => {
 });
 
 describe('runWizard', () => {
+  it('preserves mixed-currency enum mappings through setup and a saved-config rerun', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    vi.clearAllMocks();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      raw: vi.fn().mockResolvedValue({ rows: [] }),
+    });
+    promptMocks.select.mockImplementation(
+      (prompt: { message: string; default?: string; choices: Array<{ value: string }> }) => {
+        if (prompt.message.startsWith('Database type')) return Promise.resolve('postgres');
+        if (prompt.message.startsWith('Which table contains')) return Promise.resolve('products');
+        if (prompt.message.startsWith('Which column is the unique listing id'))
+          return Promise.resolve('id');
+        if (prompt.message.startsWith('Which reverse proxy')) return Promise.resolve('none');
+        const field = /^Which column contains the (\w+)\?$/.exec(prompt.message)?.[1];
+        if (field && ['title', 'price', 'currency', 'category'].includes(field)) {
+          expect(prompt.choices.map((choice) => choice.value)).toContain(field);
+          expect(prompt.default).toBe(field);
+          return Promise.resolve(prompt.default);
+        }
+        return Promise.resolve(UNMAPPED_FIELD_VALUE);
+      },
+    );
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('password');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockImplementation(({ message, choices }) => {
+      if (message.startsWith('Which columns should be searchable')) {
+        expect(choices.map((choice: { value: string }) => choice.value)).not.toContain('currency');
+        expect(choices.map((choice: { value: string }) => choice.value)).not.toContain('category');
+        return Promise.resolve(['title']);
+      }
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValue({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 2,
+            columns: [
+              { name: 'id', type: 'integer', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              {
+                name: 'currency',
+                type: 'USER-DEFINED',
+                udtName: 'Currency',
+                isEnum: true,
+                nullable: false,
+                isPrimaryKey: false,
+              },
+              {
+                name: 'category',
+                type: 'USER-DEFINED',
+                udtName: 'ProductCategory',
+                isEnum: true,
+                nullable: false,
+                isPrimaryKey: false,
+              },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+    try {
+      process.chdir(directory);
+      for (let run = 0; run < 2; run++) {
+        await runWizard();
+        const inventory = loadExistingSetupConfig(
+          join(directory, 'connector.config.yml'),
+          join(directory, '.env'),
+        ).resources.inventory;
+        expect(inventory.fields).toMatchObject({ currency: '"currency"', category: '"category"' });
+        const products = [
+          { id: 1, title: 'Local product', price: 100, currency: 'SAR', category: 'electronics' },
+          { id: 2, title: 'Imported product', price: 100, currency: 'USD', category: 'books' },
+        ];
+        expect(
+          products.map((row) => mapRowToInventoryItem(row, inventory, new Map())),
+        ).toMatchObject(
+          products.map(({ price, currency, category }) => ({ price, currency, category })),
+        );
+      }
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('refuses an empty schema before showing the inventory-object selector', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();

@@ -148,6 +148,80 @@ describe('introspectDatabase', () => {
     knexMock.mockReset();
   });
 
+  it.each(['table', 'view', 'materialized view'] as const)(
+    'identifies scalar enums separately from extension types in a %s',
+    async (kind) => {
+      const db = {
+        raw: vi
+          .fn()
+          .mockResolvedValueOnce(undefined)
+          .mockResolvedValueOnce({ rows: [{ name: 'products', kind }] })
+          .mockResolvedValueOnce({
+            rows: [
+              {
+                column_name: 'currency',
+                data_type: 'USER-DEFINED',
+                udt_name: 'Currency',
+                is_enum: true,
+                is_nullable: 'NO',
+              },
+              {
+                column_name: 'category',
+                data_type: 'USER-DEFINED',
+                udt_name: 'ProductCategory',
+                is_enum: true,
+                is_nullable: 'YES',
+              },
+              {
+                column_name: 'location',
+                data_type: 'USER-DEFINED',
+                udt_name: 'geometry',
+                is_enum: false,
+                is_nullable: 'YES',
+              },
+            ],
+          })
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [{ estimate: 2 }] })
+          .mockResolvedValueOnce({ rows: [] }),
+      };
+      knexMock.mockReturnValueOnce(db);
+      const { result } = await introspectDatabase({ ...connection, schema: 'catalog' });
+      expect(result.tables[0]?.columns).toEqual([
+        {
+          name: 'currency',
+          type: 'USER-DEFINED',
+          udtName: 'Currency',
+          isEnum: true,
+          nullable: false,
+          isPrimaryKey: false,
+        },
+        {
+          name: 'category',
+          type: 'USER-DEFINED',
+          udtName: 'ProductCategory',
+          isEnum: true,
+          nullable: true,
+          isPrimaryKey: false,
+        },
+        {
+          name: 'location',
+          type: 'USER-DEFINED',
+          udtName: 'geometry',
+          nullable: true,
+          isPrimaryKey: false,
+        },
+      ]);
+      const columnSql = db.raw.mock.calls[2]![0] as string;
+      expect(columnSql).toContain("t.typtype = 'e'");
+      if (kind !== 'materialized view') {
+        // Type names can collide across schemas; resolve the column's actual UDT.
+        expect(columnSql).toContain('t.typname = columns.udt_name');
+        expect(columnSql).toContain('n.nspname = columns.udt_schema');
+      }
+    },
+  );
+
   it('retries a rejected plaintext probe with verified TLS', async () => {
     const plaintextDb = {
       raw: vi
