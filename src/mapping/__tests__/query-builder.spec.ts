@@ -541,6 +541,75 @@ describe('buildQuery', () => {
     });
   });
 
+  it.each([
+    ['mileageMin', 'minKilometers', 'gte'],
+    ['mileageMax', 'maxKilometers', 'lte'],
+    ['kilometersMin', 'minKilometers', 'gte'],
+    ['kilometersMax', 'maxKilometers', 'lte'],
+    ['wattageMin', 'minWattage', 'gte'],
+    ['wattageMax', 'maxWattage', 'lte'],
+    ['yearMin', 'minYear', 'gte'],
+    ['yearMax', 'maxYear', 'lte'],
+  ] as const)('applies schema range %s through configured %s', (alias, canonical, type) => {
+    const config: InventoryResourceConfig = {
+      ...baseConfig,
+      filterableColumns: { [canonical]: { column: 'reading', type } },
+    };
+
+    const result = buildQuery({ [`filter.${alias}`]: '50000' }, config);
+
+    expect(result.conditions).toEqual(
+      buildQuery({ [`filter.${canonical}`]: '50000' }, config).conditions,
+    );
+    expect(result.conditions).toHaveLength(1);
+    expect(result.conditions[0]).toMatchObject({
+      operator: type === 'gte' ? '>=' : '<=',
+      value: 50000,
+    });
+    expect(result.ignoredFilters).toEqual([]);
+    expect(Object.keys(config.filterableColumns!)).toEqual([canonical]);
+    expect(() => buildQuery({ [`filter.${alias}`]: 'not-a-number' }, config)).toThrow(
+      `Query parameter "filter.${alias}" must be a finite number`,
+    );
+    expect(() => buildQuery({ [`filter.${alias}`]: ['1', '2'] }, config)).toThrow(
+      `Query parameter "filter.${alias}" must be provided only once`,
+    );
+  });
+
+  it('applies fuel through the setup fuelType mapping', () => {
+    const result = buildQuery(
+      { 'filter.fuel': 'diesel' },
+      {
+        ...baseConfig,
+        filterableColumns: { fuelType: { column: 'fuel_source', type: 'string' } },
+      },
+    );
+
+    expect(result.conditions).toEqual([{ column: 'fuel_source', operator: '=', value: 'diesel' }]);
+    expect(result.ignoredFilters).toEqual([]);
+  });
+
+  it('preserves explicit schema filter mappings instead of replacing them with aliases', () => {
+    const result = buildQuery(
+      { 'filter.mileageMin': '100', 'filter.fuel': 'diesel' },
+      {
+        ...baseConfig,
+        filterableColumns: {
+          minKilometers: { column: 'kilometers', type: 'gte' },
+          mileageMin: { column: 'custom_mileage', type: 'number' },
+          fuelType: { column: 'fuel_type', type: 'string' },
+          fuel: { column: 'custom_fuel', type: 'string' },
+        },
+      },
+    );
+
+    expect(result.conditions).toEqual([
+      { column: 'custom_mileage', operator: '=', value: 100 },
+      { column: 'custom_fuel', operator: '=', value: 'diesel' },
+    ]);
+    expect(result.ignoredFilters).toEqual([]);
+  });
+
   it('reports filter parameters that are not declared in the config without rejecting the query', () => {
     const result = buildQuery(
       { 'filter.minMileage': '10000', 'filter.color': 'blue', 'filter.make': 'Toyota' },

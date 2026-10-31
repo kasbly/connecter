@@ -5778,6 +5778,125 @@ describe('runWizard', () => {
       });
     }
 
+    it.each([
+      ['mapping-only', 'bundled', 'docker compose restart connector'],
+      ['stage key', 'bundled', 'docker compose up -d --force-recreate connector'],
+      ['retire key', 'bundled', 'docker compose up -d --force-recreate connector'],
+      ['database host', 'bundled', 'docker compose up -d --force-recreate connector'],
+      ['database password', 'bundled', 'docker compose up -d --force-recreate connector'],
+      ['TLS CA', 'bundled', 'docker compose up -d --force-recreate connector'],
+      ['domain', 'bundled', 'docker compose up -d --force-recreate connector caddy'],
+      ['stage key', 'none', 'docker compose up -d --force-recreate connector'],
+    ] as const)('reloads a %s rerun with %s using %s', async (change, topology, command) => {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      vi.clearAllMocks();
+      mockMinimalRunPrompts(topology);
+
+      try {
+        process.chdir(directory);
+        await runWizard();
+        const envPath = join(directory, '.env');
+        const configPath = join(directory, 'connector.config.yml');
+        if (change === 'retire key') {
+          writeFileSync(
+            envPath,
+            `${readFileSync(envPath, 'utf-8')}CONNECTOR_API_KEY_PENDING=kc_pending\n`,
+          );
+        }
+        if (change === 'database password') {
+          // A retained config literal takes precedence over the old env value.
+          const config = yaml.load(readFileSync(configPath, 'utf-8')) as {
+            database: { password: string };
+          };
+          config.database.password = 'new-database-password';
+          writeFileSync(configPath, yaml.dump(config));
+        }
+        const originalEnv = parse(readFileSync(envPath, 'utf-8'));
+        consoleLog.mockClear();
+        mockMinimalRunPrompts(topology);
+        promptMocks.confirm.mockImplementation(({ message }: { message: string }) => {
+          if (message.startsWith('Does this database require TLS'))
+            return Promise.resolve(change === 'TLS CA');
+          if (message.startsWith('Generate and stage'))
+            return Promise.resolve(change === 'stage key');
+          if (message.startsWith('Retire the previous'))
+            return Promise.resolve(change === 'retire key');
+          return Promise.resolve(true);
+        });
+        const input = promptMocks.input.getMockImplementation()!;
+        promptMocks.input.mockImplementation((prompt) => {
+          if (change === 'database host' && prompt.message.startsWith('Host'))
+            return Promise.resolve('localhost');
+          if (change === 'domain' && prompt.message.startsWith('Public DNS name'))
+            return Promise.resolve('new.merchant.example');
+          if (prompt.message.startsWith('Path to the PEM CA'))
+            return Promise.resolve(join(directory, 'ca.pem'));
+          return input(prompt);
+        });
+        if (change === 'TLS CA') {
+          writeFileSync(
+            join(directory, 'ca.pem'),
+            '-----BEGIN CERTIFICATE-----\nmerchant-ca\n-----END CERTIFICATE-----',
+          );
+          const select = promptMocks.select.getMockImplementation()!;
+          promptMocks.select.mockImplementation((prompt) =>
+            prompt.message.startsWith('TLS certificate verification')
+              ? Promise.resolve('custom-ca')
+              : select(prompt),
+          );
+        }
+        // Rewrite formatting without changing values; only the mapping changes.
+        if (change === 'mapping-only') {
+          writeFileSync(
+            envPath,
+            `# Operator comment\n${Object.entries(originalEnv)
+              .reverse()
+              .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+              .join('\n')}\n`,
+          );
+          promptMocks.checkbox.mockImplementation(({ message }) =>
+            Promise.resolve(
+              message.startsWith('Which columns should be searchable') ? ['title'] : [],
+            ),
+          );
+        }
+        await runWizard();
+
+        expect(consoleLog).toHaveBeenCalledWith(expect.stringContaining(command));
+        if (change !== 'mapping-only') {
+          expect(consoleLog).not.toHaveBeenCalledWith(
+            expect.stringContaining('docker compose restart connector'),
+          );
+          if (change !== 'domain')
+            expect(consoleLog).not.toHaveBeenCalledWith(expect.stringContaining('connector caddy'));
+        }
+        const env = parse(readFileSync(envPath, 'utf-8'));
+        if (change === 'mapping-only') {
+          expect(env).toEqual(originalEnv);
+          expect(
+            loadExistingSetupConfig(configPath, envPath).resources.inventory.searchableColumns,
+          ).toEqual(['"title"']);
+        }
+        if (change === 'stage key') expect(env['CONNECTOR_API_KEY_PENDING']).toMatch(/^kc_/);
+        if (change === 'retire key') {
+          expect(env['CONNECTOR_API_KEY']).toBe('kc_pending');
+          expect(env['CONNECTOR_API_KEY_PENDING']).toBeUndefined();
+        }
+        if (change === 'database host')
+          expect(env['CONNECTOR_CONTAINER_DB_HOST']).toBe('host.docker.internal');
+        if (change === 'database password')
+          expect(env['DB_PASSWORD']).toBe('new-database-password');
+        if (change === 'TLS CA') expect(env['DB_SSL_CA']).toContain('merchant-ca');
+        if (change === 'domain') expect(env['CONNECTOR_DOMAIN']).toBe('new.merchant.example');
+      } finally {
+        consoleLog.mockRestore();
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
     it('recommends `docker compose up -d` and the HTTPS domain only for the bundled Caddy proxy', async () => {
       const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
       const previousDirectory = process.cwd();

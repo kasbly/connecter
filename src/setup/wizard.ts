@@ -1887,10 +1887,21 @@ export async function runWizard(): Promise<void> {
   // for. `custom`/`none` traffic reaches the connector directly (or from the
   // operator's own proxy) rather than from Caddy at 172.30.0.2, so starting
   // Caddy anyway would put an untrusted hop in front of the connector.
+  // Compose reads env_file and interpolated service settings only when creating
+  // containers. Compare parsed values so quoting/comment-only rewrites still
+  // use the lightweight restart that reloads the bind-mounted mapping.
+  const nextEnv = parse(envContent);
+  const environmentChanged = [
+    ...new Set([...Object.keys(existingEnv), ...Object.keys(nextEnv)]),
+  ].some((key) => existingEnv[key] !== nextEnv[key]);
+  const domainChanged = existingEnv['CONNECTOR_DOMAIN'] !== nextEnv['CONNECTOR_DOMAIN'];
+  const dockerReloadCommand = environmentChanged
+    ? `docker compose up -d --force-recreate connector${proxyTopology === 'bundled' && domainChanged ? ' caddy' : ''}`
+    : 'docker compose restart connector';
   if (proxyTopology === 'bundled') {
     console.log(
       hasExistingConfig || hasExistingEnv
-        ? '\n   Restart the connector: docker compose restart connector'
+        ? `\n   ${environmentChanged ? 'Recreate' : 'Restart'} the connector: ${dockerReloadCommand}`
         : '\n   Start the connector: docker compose up -d',
     );
     console.log(`   Verify the public endpoint: curl -fsS https://${connectorDomain}/health`);
@@ -1919,7 +1930,7 @@ export async function runWizard(): Promise<void> {
   } else {
     console.log(
       (hasExistingConfig || hasExistingEnv
-        ? '\n   Restart your npm start process (or `docker compose restart connector` '
+        ? `\n   Restart your npm start process (or \`${dockerReloadCommand}\` `
         : '\n   Start the connector: npm run build && npm start (or `docker compose up -d` ') +
         'after removing the caddy service from docker-compose.yml)',
     );

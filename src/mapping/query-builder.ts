@@ -156,14 +156,33 @@ function isFixedActiveStatus(config: InventoryResourceConfig): boolean {
  * Otherwise the connector reports `ignoredFilters: ["status"]` and every search
  * fails (#32903). A literal non-ACTIVE status (`'SOLD'`) is not a column, so it
  * is left alone.
+ *
+ * Schema-aware clients send `wattageMin` while setup writes `minWattage`.
+ * Expose aliases only for configured filters, preserving explicit mappings.
  */
 function getEffectiveFilterableColumns(
   config: InventoryResourceConfig,
 ): NonNullable<InventoryResourceConfig['filterableColumns']> {
   const configured = config.filterableColumns ?? {};
+  const effective = { ...configured };
   const statusField = config.fields.status?.trim();
-  if (configured.status || !statusField || statusField.startsWith("'")) return configured;
-  return { ...configured, status: { column: statusField, type: 'string' } };
+  if (!effective.status && statusField && !statusField.startsWith("'")) {
+    effective.status = { column: statusField, type: 'string' };
+  }
+
+  for (const [key, filter] of Object.entries(configured)) {
+    const match = /^(min|max)([A-Z].*)$/.exec(key);
+    if (!match || filter.type !== (match[1] === 'min' ? 'gte' : 'lte')) continue;
+
+    const attribute = match[2]!.charAt(0).toLowerCase() + match[2]!.slice(1);
+    const bound = match[1] === 'min' ? 'Min' : 'Max';
+    effective[`${attribute}${bound}`] ??= filter;
+    // Setup normalizes mileage columns to the canonical kilometers attribute.
+    if (attribute === 'kilometers') effective[`mileage${bound}`] ??= filter;
+  }
+  if (configured.fuelType) effective.fuel ??= configured.fuelType;
+
+  return effective;
 }
 
 /**
