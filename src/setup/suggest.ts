@@ -524,6 +524,145 @@ export function getInStockFilterDefault(
   return !existingBaseFilter.includes(quotedColumn);
 }
 
+const FILTER_WORD = /[A-Za-z0-9_$]/;
+
+/**
+ * Index just past a single-quoted string or double-quoted identifier that
+ * starts at `start` (doubled quotes escape), or -1 when it never closes.
+ */
+function skipQuoted(text: string, start: number): number {
+  const quote = text[start];
+  let index = start + 1;
+  while (index < text.length) {
+    if (text[index] === quote) {
+      if (text[index + 1] === quote) {
+        index += 2;
+        continue;
+      }
+      return index + 1;
+    }
+    index += 1;
+  }
+  return -1;
+}
+
+/**
+ * Split a hand-written `baseFilter` into its top-level `AND` clauses, ignoring
+ * `AND` inside quotes, parentheses, `BETWEEN x AND y` and `CASE ... END`.
+ * Returns null when the text cannot be split with certainty (unbalanced
+ * quotes or parentheses, comments, dollar quoting, escape strings), so the
+ * caller keeps or asks about the whole string instead of mangling it.
+ */
+export function splitTopLevelAndClauses(filter: string): string[] | null {
+  const clauses: string[] = [];
+  let depth = 0;
+  let start = 0;
+  let pendingBetween = 0;
+  let caseDepth = 0;
+  let index = 0;
+  while (index < filter.length) {
+    const char = filter[index]!;
+    const previous = filter[index - 1];
+    const previousIsWord = previous !== undefined && FILTER_WORD.test(previous);
+    if (char === "'" || char === '"') {
+      const end = skipQuoted(filter, index);
+      if (end === -1) return null;
+      index = end;
+      continue;
+    }
+    if (char === ';') return null;
+    if (
+      (char === '-' && filter[index + 1] === '-') ||
+      (char === '/' && filter[index + 1] === '*')
+    ) {
+      return null;
+    }
+    if (char === '$' && !previousIsWord && /^\$[A-Za-z_]*\$/.test(filter.slice(index))) return null;
+    if ((char === 'e' || char === 'E') && filter[index + 1] === "'" && !previousIsWord) return null;
+    if (char === '(') {
+      depth += 1;
+    } else if (char === ')') {
+      depth -= 1;
+      if (depth < 0) return null;
+    } else if (depth === 0 && !previousIsWord && /[A-Za-z]/.test(char)) {
+      const word = /^[A-Za-z0-9_$]+/.exec(filter.slice(index))![0];
+      const keyword = word.toUpperCase();
+      if (keyword === 'BETWEEN') {
+        pendingBetween += 1;
+      } else if (keyword === 'CASE') {
+        caseDepth += 1;
+      } else if (keyword === 'END' && caseDepth > 0) {
+        caseDepth -= 1;
+      } else if (keyword === 'AND' && caseDepth === 0) {
+        if (pendingBetween > 0) {
+          pendingBetween -= 1;
+        } else {
+          const clause = filter.slice(start, index).trim();
+          if (clause === '') return null;
+          clauses.push(clause);
+          start = index + word.length;
+        }
+      }
+      index += word.length;
+      continue;
+    }
+    index += 1;
+  }
+  if (depth !== 0 || pendingBetween !== 0 || caseDepth !== 0) return null;
+  const last = filter.slice(start).trim();
+  if (last === '') return null;
+  clauses.push(last);
+  return clauses;
+}
+
+/** True when one pair of parentheses encloses the entire clause. */
+function isFullyParenthesized(clause: string): boolean {
+  if (!clause.startsWith('(')) return false;
+  let depth = 0;
+  let index = 0;
+  while (index < clause.length) {
+    const char = clause[index]!;
+    if (char === "'" || char === '"') {
+      const end = skipQuoted(clause, index);
+      if (end === -1) return false;
+      index = end;
+      continue;
+    }
+    if (char === '(') depth += 1;
+    if (char === ')') {
+      depth -= 1;
+      if (depth === 0) return index === clause.length - 1;
+    }
+    index += 1;
+  }
+  return false;
+}
+
+/**
+ * Wrap a carried-forward clause in parentheses so an `OR` inside it cannot
+ * widen the filter when joined with `AND` (#19809). Already-enclosed clauses
+ * stay as they are, so repeated reruns do not keep nesting parentheses.
+ */
+export function wrapCustomFilterClause(clause: string): string {
+  const trimmed = clause.trim();
+  return isFullyParenthesized(trimmed) ? trimmed : `(${trimmed})`;
+}
+
+/**
+ * Canonical form used only to recognise a wizard-detected clause in an older
+ * filter: ignores redundant outer parentheses, whitespace runs, case, and the
+ * quotes around plain lowercase identifiers (`published = true` is the same
+ * clause as `"published" = true`).
+ */
+export function normalizeFilterClause(clause: string): string {
+  let text = clause.trim();
+  while (isFullyParenthesized(text)) text = text.slice(1, -1).trim();
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/"([a-z_][a-z0-9_]*)"/g, '$1')
+    .toLowerCase();
+}
+
 // Columns likely useful for text search
 const SEARCHABLE_PATTERNS: RegExp[] = [
   /^title$/i,

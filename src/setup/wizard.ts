@@ -37,6 +37,9 @@ import {
   classifyRelationType,
   isTextColumn,
   getInStockFilterDefault,
+  normalizeFilterClause,
+  splitTopLevelAndClauses,
+  wrapCustomFilterClause,
   getSearchableColumnDefault,
   isAttributeEligibleColumn,
   isListingUrlColumn,
@@ -1271,17 +1274,27 @@ export async function runWizard(): Promise<void> {
   const inStockFilter = suggestInStockFilter(selectedTable.columns);
   const softDeleteColumn = suggestSoftDeleteColumn(selectedTable.columns);
 
-  let baseFilterParts: string[] = [];
+  const baseFilterParts: string[] = [];
+  const existingBaseFilter = existingConfig?.resources.inventory.baseFilter?.trim() || undefined;
+  // Top-level AND clauses of the old filter; null when it cannot be split safely.
+  const existingClauses = existingBaseFilter ? splitTopLevelAndClauses(existingBaseFilter) : [];
+  const existingClauseKeys = new Set((existingClauses ?? []).map(normalizeFilterClause));
+  const existingHasClause = (expression: string): boolean =>
+    existingBaseFilter !== undefined &&
+    (existingClauseKeys.has(normalizeFilterClause(expression)) ||
+      existingBaseFilter.includes(expression));
+  // Clauses the wizard asks about below; every other clause is the merchant's own.
+  const detectedClauseKeys = new Set<string>();
 
   if (publishedFilter) {
     const publishedFilterExpression = publishedFilter.expression.replace(
       publishedFilter.column,
       quoteIfNeeded(publishedFilter.column),
     );
+    detectedClauseKeys.add(normalizeFilterClause(publishedFilterExpression));
     const usePublished = await confirm({
       message: `Only expose published items? (detected column: ${publishedFilter.column})`,
-      default:
-        existingConfig?.resources.inventory.baseFilter?.includes(publishedFilterExpression) ?? true,
+      default: existingBaseFilter === undefined || existingHasClause(publishedFilterExpression),
     });
     if (usePublished) {
       baseFilterParts.push(publishedFilterExpression);
@@ -1293,13 +1306,16 @@ export async function runWizard(): Promise<void> {
       inStockFilter.column,
       quoteIfNeeded(inStockFilter.column),
     );
+    detectedClauseKeys.add(normalizeFilterClause(stockFilterExpression));
     const exposeInStock = await confirm({
       message: `Only expose in-stock items? (detected column: ${inStockFilter.column})`,
-      default: getInStockFilterDefault(
-        existingConfig?.resources.inventory.baseFilter,
-        quoteIfNeeded(inStockFilter.column),
-        stockFilterExpression,
-      ),
+      default:
+        existingHasClause(stockFilterExpression) ||
+        getInStockFilterDefault(
+          existingConfig?.resources.inventory.baseFilter,
+          quoteIfNeeded(inStockFilter.column),
+          stockFilterExpression,
+        ),
     });
     if (exposeInStock) {
       baseFilterParts.push(stockFilterExpression);
@@ -1307,17 +1323,50 @@ export async function runWizard(): Promise<void> {
   }
 
   if (softDeleteColumn) {
+    detectedClauseKeys.add(normalizeFilterClause(`${quoteIfNeeded(softDeleteColumn)} IS NULL`));
     const excludeDeleted = await confirm({
       message: `Exclude soft-deleted items? (detected column: ${softDeleteColumn})`,
       default:
-        existingConfig?.resources.inventory.baseFilter?.includes(
-          `${quoteIfNeeded(softDeleteColumn)} IS NULL`,
-        ) ?? true,
+        existingBaseFilter === undefined ||
+        existingHasClause(`${quoteIfNeeded(softDeleteColumn)} IS NULL`),
     });
     if (excludeDeleted) {
       baseFilterParts.push(`${quoteIfNeeded(softDeleteColumn)} IS NULL`);
     }
   }
+
+  // Carry the merchant's own clauses forward (#35253). The wizard has no
+  // question for a rule like `"store_id" = 42`, so rebuilding the filter from
+  // the three detected clauses alone would silently expose the rows it hid.
+  // They only apply to the same table: another table's clauses name columns
+  // this one may not have.
+  const sameTable =
+    existingInventory !== undefined &&
+    existingInventory.table === selectedTableName &&
+    (existingInventory.schema ?? selectedSchema) === selectedSchema;
+  if (existingBaseFilter !== undefined && sameTable) {
+    if (existingClauses) {
+      for (const clause of existingClauses) {
+        if (!detectedClauseKeys.has(normalizeFilterClause(clause))) {
+          baseFilterParts.push(wrapCustomFilterClause(clause));
+        }
+      }
+    } else {
+      const keepCustomFilter = await confirm({
+        message: `Keep your existing custom filter \`${existingBaseFilter}\`?`,
+        default: true,
+      });
+      if (keepCustomFilter) {
+        // Drop a detected clause the kept filter already contains verbatim.
+        for (let index = baseFilterParts.length - 1; index >= 0; index -= 1) {
+          if (existingBaseFilter.includes(baseFilterParts[index]!))
+            baseFilterParts.splice(index, 1);
+        }
+        baseFilterParts.push(wrapCustomFilterClause(existingBaseFilter));
+      }
+    }
+  }
+  const baseFilter = baseFilterParts.length > 0 ? baseFilterParts.join(' AND ') : undefined;
 
   // Reserve the final row-attribute keys before naming relations. Include
   // canonical targets and preserved custom mappings so no child table can
@@ -1722,7 +1771,7 @@ export async function runWizard(): Promise<void> {
       inventory: {
         schema: selectedSchema,
         table: selectedTableName,
-        ...(baseFilterParts.length > 0 ? { baseFilter: baseFilterParts.join(' AND ') } : {}),
+        ...(baseFilter !== undefined ? { baseFilter } : {}),
         idColumn: quoteIfNeeded(idColumn),
         ...(updatedAtColumn ? { updatedAtColumn: quoteIfNeeded(updatedAtColumn) } : {}),
         ...(updatedAtEpoch ? { updatedAtEpoch } : {}),
@@ -1858,6 +1907,11 @@ export async function runWizard(): Promise<void> {
     );
     await db.destroy();
     throw error;
+  }
+  if (hasExistingConfig && existingBaseFilter !== baseFilter) {
+    console.log(
+      `\nRow filter (baseFilter) changed:\n  before: ${existingBaseFilter ?? '(none)'}\n  after:  ${baseFilter ?? '(none)'}`,
+    );
   }
   if (hasExistingConfig) backupPrivateFile(configPath);
   if (hasExistingEnv) backupPrivateFile(envPath);

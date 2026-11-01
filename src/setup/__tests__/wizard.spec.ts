@@ -30,7 +30,12 @@ import {
   writePrivateFile,
   verifyUniqueListingIdColumn,
 } from '../wizard.js';
-import { suggestFieldMappings } from '../suggest.js';
+import {
+  normalizeFilterClause,
+  splitTopLevelAndClauses,
+  suggestFieldMappings,
+  wrapCustomFilterClause,
+} from '../suggest.js';
 import { getUpdatedAtEpochPrompt } from '../updated-at-epoch.js';
 import { runWizard } from '../wizard.js';
 import { loadConfig } from '../../config/config.loader.js';
@@ -3560,6 +3565,247 @@ describe('runWizard', () => {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  describe('hand-written baseFilter clauses on a rerun (#35253)', () => {
+    const rerunWithBaseFilter = async (
+      baseFilter: string,
+      extraColumns: Array<{ name: string; type: string }>,
+      confirmAnswer: (message: string, fallback: boolean) => boolean = (_message, fallback) =>
+        fallback,
+    ) => {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const db = Object.assign(vi.fn(), {
+        destroy: vi.fn().mockResolvedValue(undefined),
+        withSchema: vi.fn(() => ({
+          table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+        })),
+      });
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+      vi.clearAllMocks();
+      writeFileSync(
+        join(directory, 'connector.config.yml'),
+        [
+          'version: 1',
+          'auth:',
+          '  apiKeys:',
+          '    - key: key',
+          '      label: test',
+          'database:',
+          '  type: postgres',
+          '  host: database.example.com',
+          '  port: 5432',
+          '  database: catalog',
+          '  user: reader',
+          '  password: secret',
+          '  ssl: false',
+          'resources:',
+          '  inventory:',
+          '    table: products',
+          '    idColumn: id',
+          '    fields:',
+          '      title: title',
+          '      price: price',
+          '      currency: currency',
+          `    baseFilter: ${JSON.stringify(baseFilter)}`,
+          '',
+        ].join('\n'),
+      );
+
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
+      for (const answer of [
+        'title',
+        'price',
+        'currency',
+        '\0unmapped',
+        '\0unmapped',
+        'description',
+        '\0unmapped',
+      ]) {
+        promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+      }
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+      for (const answer of [
+        'database.example.com',
+        '5432',
+        'catalog',
+        'reader',
+        'public',
+        'connector.merchant.example',
+      ]) {
+        promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+      }
+      // Accept every prompt's default, as an operator pressing Enter would.
+      promptMocks.confirm.mockImplementation(({ message, default: answer }) =>
+        Promise.resolve(
+          message.startsWith('Existing connector configuration') ||
+            confirmAnswer(message, answer ?? false),
+        ),
+      );
+      promptMocks.checkbox.mockImplementation(({ message }) => {
+        if (message.startsWith('Which filters should be available')) {
+          return Promise.resolve(['minPrice', 'maxPrice', 'currency']);
+        }
+        return Promise.resolve([]);
+      });
+      vi.mocked(introspectDatabase).mockResolvedValueOnce({
+        db: db as never,
+        result: {
+          tables: [
+            {
+              name: 'products',
+              kind: 'table',
+              rowCount: 100,
+              columns: [
+                { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+                { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+                { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+                { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+                { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+                ...extraColumns.map((column) => ({
+                  ...column,
+                  nullable: false,
+                  isPrimaryKey: false,
+                })),
+              ],
+            },
+          ],
+          foreignKeys: [],
+        },
+        retriedWithTls: false,
+      });
+
+      try {
+        process.chdir(directory);
+        await runWizard();
+        const config = loadExistingSetupConfig(
+          join(directory, 'connector.config.yml'),
+          join(directory, '.env'),
+        );
+        return {
+          baseFilter: config.resources.inventory.baseFilter,
+          logs: consoleLog.mock.calls.map((call) => String(call[0])),
+        };
+      } finally {
+        consoleLog.mockRestore();
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    };
+
+    it('keeps a hand-added clause next to the detected published clause', async () => {
+      const { baseFilter, logs } = await rerunWithBaseFilter(
+        'published = true AND "store_id" = 42',
+        [{ name: 'published', type: 'boolean' }],
+      );
+
+      expect(baseFilter).toContain('"store_id" = 42');
+      expect(baseFilter).toBe('"published" = true AND ("store_id" = 42)');
+      expect(logs.join('\n')).toContain('Row filter (baseFilter) changed');
+    });
+
+    it('keeps the hand-written filter on a table with no published, stock or soft-delete column', async () => {
+      const { baseFilter } = await rerunWithBaseFilter(
+        'visibility = \'public\' AND "isTest" = false',
+        [],
+      );
+
+      expect(baseFilter).toBe('(visibility = \'public\') AND ("isTest" = false)');
+    });
+
+    it('wraps an OR clause so it cannot widen the filter, and stays stable on another rerun', async () => {
+      const { baseFilter } = await rerunWithBaseFilter(
+        "(visibility = 'public' OR visibility = 'shared') AND \"store_id\" = 42",
+        [],
+      );
+
+      expect(baseFilter).toBe(
+        "(visibility = 'public' OR visibility = 'shared') AND (\"store_id\" = 42)",
+      );
+      const again = await rerunWithBaseFilter(baseFilter!, []);
+      expect(again.baseFilter).toBe(baseFilter);
+      expect(again.logs.join('\n')).not.toContain('Row filter (baseFilter) changed');
+    });
+
+    it('still lets the operator remove a wizard-owned clause with an explicit No', async () => {
+      const { baseFilter } = await rerunWithBaseFilter(
+        'published = true AND "store_id" = 42',
+        [{ name: 'published', type: 'boolean' }],
+        (message, fallback) => (message.startsWith('Only expose published') ? false : fallback),
+      );
+
+      expect(baseFilter).toBe('("store_id" = 42)');
+    });
+
+    it('asks before keeping a filter it cannot split safely, defaulting to Yes', async () => {
+      const unsplittable = "visibility = 'public' -- hide drafts\n AND store_id = 42";
+      const kept = await rerunWithBaseFilter(unsplittable, []);
+
+      expect(promptMocks.confirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: `Keep your existing custom filter \`${unsplittable}\`?`,
+          default: true,
+        }),
+      );
+      expect(kept.baseFilter).toContain('store_id = 42');
+
+      const dropped = await rerunWithBaseFilter(unsplittable, [], (message, fallback) =>
+        message.startsWith('Keep your existing custom filter') ? false : fallback,
+      );
+      expect(dropped.baseFilter).toBeUndefined();
+    });
+  });
+
+  describe('baseFilter clause helpers (#35253)', () => {
+    it('splits only top-level AND clauses, respecting quotes, parentheses, BETWEEN and CASE', () => {
+      expect(
+        splitTopLevelAndClauses('a = \'x AND y\' and (b = 1 AND c = 2) AND "d AND e" = 3'),
+      ).toEqual(["a = 'x AND y'", '(b = 1 AND c = 2)', '"d AND e" = 3']);
+      expect(splitTopLevelAndClauses('price BETWEEN 1 AND 5 AND qty > 0')).toEqual([
+        'price BETWEEN 1 AND 5',
+        'qty > 0',
+      ]);
+      expect(
+        splitTopLevelAndClauses(
+          "CASE WHEN a = 1 AND b = 2 THEN true ELSE false END AND c = 'it''s'",
+        ),
+      ).toEqual(['CASE WHEN a = 1 AND b = 2 THEN true ELSE false END', "c = 'it''s'"]);
+    });
+
+    it('refuses to split text it cannot parse with certainty', () => {
+      for (const text of [
+        "a = 'unterminated",
+        '(a = 1',
+        'a = 1)',
+        'a = 1 -- note',
+        'a = 1 /* note */',
+        'a = $$x$$',
+        "a = E'it\\'s'",
+        'a = 1 AND',
+        'AND a = 1',
+        'a BETWEEN 1',
+      ]) {
+        expect(splitTopLevelAndClauses(text)).toBeNull();
+      }
+    });
+
+    it('wraps a clause once and recognises detected clauses regardless of quoting', () => {
+      expect(wrapCustomFilterClause('a = 1 OR b = 2')).toBe('(a = 1 OR b = 2)');
+      expect(wrapCustomFilterClause('(a = 1 OR b = 2)')).toBe('(a = 1 OR b = 2)');
+      expect(wrapCustomFilterClause("(a = 1) OR (b = ')')")).toBe("((a = 1) OR (b = ')'))");
+      expect(normalizeFilterClause('( published   =  true )')).toBe(
+        normalizeFilterClause('"published" = true'),
+      );
+      expect(normalizeFilterClause('"deletedAt" IS NULL')).not.toBe(
+        normalizeFilterClause('deletedAt IS NULL'),
+      );
+    });
   });
 
   it('suggests a listing-URL column as an attribute mapping, wiring it onto attributes.url for resolvePublicListingUrl (#25311)', async () => {

@@ -489,8 +489,10 @@ hiding sold-out items with an in-stock filter. The runtime only reads `searchabl
 `baseFilter` from your git-ignored `connector.config.yml`, so `git pull` never rewrites them. To
 pick the new defaults up, re-run `npm run setup` (it starts from your existing answers, pre-checks
 newly suggested identifier search columns, and defaults a newly detected in-stock filter to Yes),
-then rebuild/restart as above. `npm run validate` only probes the existing mapping; it does not
-change it.
+then rebuild/restart as above. Any extra `AND` clause you added to `baseFilter` by hand (for
+example `"store_id" = 42`) is carried forward in parentheses, and the wizard prints the old and new
+filter before saving when they differ. `npm run validate` only probes the existing mapping; it does
+not change it.
 
 **After either path**, re-run `npm run validate` to confirm your configuration and inventory
 mapping still hold against the updated code before pointing traffic at it:
