@@ -1,8 +1,42 @@
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { connectorConfigSchema } from './config/config.schema.js';
 import type { DatabaseAdapter } from './db/adapter.interface.js';
 import { startConnector } from './index.js';
 import { buildApp } from './server.js';
+
+describe('CURRENT_CONNECTOR_VERSION pin', () => {
+  it('matches the latest services/connector content SHA', () => {
+    // Keep this equal to the short SHA of the last commit that changed
+    // services/connector (`git log -1 --no-merges --format=%H -- services/connector`),
+    // which is exactly what sync-connector.yml stamps into the public
+    // mirror's version.json. Any PR touching services/connector must update
+    // the pin in the same PR (#32980, #35313).
+    const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
+    const contentVersion = execFileSync(
+      'git',
+      ['log', '-1', '--no-merges', '--format=%H', '--', 'services/connector'],
+      { cwd: repoRoot, encoding: 'utf8' },
+    )
+      .trim()
+      .slice(0, 7);
+    expect(contentVersion).toMatch(/^[a-f0-9]{7}$/);
+
+    const pinSource = readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../../apps/api/src/modules/inventory/providers/connector.provider.ts',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    );
+    const pinMatch = pinSource.match(/CURRENT_CONNECTOR_VERSION = '([a-f0-9]+)'/);
+    expect(pinMatch?.[1]).toBe(contentVersion);
+  });
+});
 
 describe('startConnector', () => {
   it('keeps health diagnostics reachable when the initial mapping probe fails', async () => {
