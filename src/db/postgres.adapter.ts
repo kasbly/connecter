@@ -12,6 +12,7 @@ import type {
   TableInfo,
   ColumnInfo,
 } from './adapter.interface.js';
+import { STATUS_VALUE_BTRIM_CHARS_SQL, trimStatusValue } from '../mapping/field-mapper.js';
 import { safeNumericRangeExpression } from '../mapping/numeric-range.js';
 
 /**
@@ -232,22 +233,24 @@ export class PostgresAdapter implements DatabaseAdapter {
         const sourceValues = condition.value as string[];
         // Case-insensitive like the `=` branch below (#25604) and like the
         // read-side `resolveInventoryStatus`, which also does
-        // `.trim().toLowerCase()` on both the column value and the configured
+        // trim + `toLowerCase()` on both the column value and the configured
         // source values. Without this, a catalogue storing 'Active' is read
         // back as ACTIVE but never matches `WHERE status IN ('ACTIVE', ...)`,
         // so filter.status=ACTIVE returns zero rows for it (residual of
         // #25604 — the IN branch was left exact). `::text` keeps this a
-        // no-op for enum/integer status columns. `btrim` matches the
-        // read-side `.trim()` too: without it, a stored 'active ' (a stray
-        // trailing space from CSV/Excel/legacy-ERP imports) reads back as
-        // ACTIVE everywhere else but is silently excluded here (#28392).
-        const normalizedValues = sourceValues.map((value) => value.trim().toLowerCase());
+        // no-op for enum/integer status columns. `btrim` with
+        // `STATUS_VALUE_BTRIM_CHARS_SQL` matches the read-side
+        // `trimStatusValue`: one-arg `btrim` only strips space, so a stored
+        // 'active\r', NBSP-padded, or tab-only cell read as ACTIVE (or blank)
+        // everywhere else but was silently excluded here (#28392 leftover
+        // #35432).
+        const normalizedValues = sourceValues.map((value) => trimStatusValue(value).toLowerCase());
         // `''` is the blank status token. `IN ('')` matches an empty string but
         // never SQL NULL (`btrim(NULL)` is NULL), so a blank mapped to ACTIVE
         // would stay invisible to customer search and Test connection.
         const matchesBlank = normalizedValues.some((value) => value === '');
         const placeholders = normalizedValues.map(() => '?').join(', ');
-        const comparison = `lower(btrim(${condition.column}::text)) IN (${placeholders})`;
+        const comparison = `lower(btrim(${condition.column}::text, ${STATUS_VALUE_BTRIM_CHARS_SQL})) IN (${placeholders})`;
         queryBuilder = queryBuilder.whereRaw(
           matchesBlank ? `(${comparison} OR ${condition.column} IS NULL)` : comparison,
           normalizedValues,

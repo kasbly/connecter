@@ -1190,8 +1190,12 @@ describe('PostgresAdapter list count (#17420)', () => {
 
     const { countQuery, dataQuery } = await runListQuery({ count: 3, conditions });
 
-    expect(countQuery.sql).toContain('lower(btrim(availability::text)) IN (?, ?)');
-    expect(dataQuery.sql).toContain('lower(btrim(availability::text)) IN (?, ?)');
+    expect(countQuery.sql).toContain(
+      `lower(btrim(availability::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?)`,
+    );
+    expect(dataQuery.sql).toContain(
+      `lower(btrim(availability::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?)`,
+    );
     expect(countQuery.bindings.slice(0, 2)).toEqual(['sold', 'closed']);
     expect(dataQuery.bindings.slice(0, 2)).toEqual(['sold', 'closed']);
   });
@@ -1211,33 +1215,44 @@ describe('PostgresAdapter list count (#17420)', () => {
       dataRows: [{ id: '1', price: 10, status: 'Active' }],
     });
 
-    expect(dataQuery.sql).toContain('lower(btrim(status::text)) IN (?, ?)');
-    expect(countQuery.sql).toContain('lower(btrim(status::text)) IN (?, ?)');
+    expect(dataQuery.sql).toContain(
+      `lower(btrim(status::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?)`,
+    );
+    expect(countQuery.sql).toContain(
+      `lower(btrim(status::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?)`,
+    );
     expect(dataQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
     expect(countQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
     expect(result.rows).toEqual([{ id: '1', price: 10, status: 'Active' }]);
   });
 
   it('matches filter.status=ACTIVE against a stored value with stray whitespace via btrim (#28392)', async () => {
-    // resolveInventoryStatus reads a stored ' active ' back as ACTIVE by
-    // trimming both sides, but the IN filter only trimmed the configured
-    // source values, so this row read as live everywhere else yet was
-    // invisible to every filtered search. See #28392.
+    // resolveInventoryStatus reads a stored ' active ' / 'active\r' back as
+    // ACTIVE by trimming both sides. One-arg `btrim` only strips space, so
+    // a CRLF leftover used to read as live yet stay invisible to every
+    // filtered search (#28392 leftover #35432).
     const conditions: QueryCondition[] = [
       { column: 'status', operator: 'IN', value: ['ACTIVE', 'active'] },
     ];
 
     const { countQuery, dataQuery, result } = await runListQuery({
-      count: 1,
+      count: 2,
       conditions,
-      dataRows: [{ id: '1', price: 10, status: ' active ' }],
+      dataRows: [
+        { id: '1', price: 10, status: ' active ' },
+        { id: '2', price: 10, status: 'active\r' },
+      ],
     });
 
-    expect(dataQuery.sql).toContain('lower(btrim(status::text)) IN (?, ?)');
-    expect(countQuery.sql).toContain('lower(btrim(status::text)) IN (?, ?)');
+    const statusInPredicate = `lower(btrim(status::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?)`;
+    expect(dataQuery.sql).toContain(statusInPredicate);
+    expect(countQuery.sql).toContain(statusInPredicate);
     expect(dataQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
     expect(countQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
-    expect(result.rows).toEqual([{ id: '1', price: 10, status: ' active ' }]);
+    expect(result.rows).toEqual([
+      { id: '1', price: 10, status: ' active ' },
+      { id: '2', price: 10, status: 'active\r' },
+    ]);
   });
 
   it('matches a blank status token with IS NULL as well as an empty string', async () => {
@@ -1246,12 +1261,15 @@ describe('PostgresAdapter list count (#17420)', () => {
     ];
 
     const { countQuery, dataQuery } = await runListQuery({
-      count: 1,
+      count: 2,
       conditions,
-      dataRows: [{ id: '1', price: 10, status: null }],
+      dataRows: [
+        { id: '1', price: 10, status: null },
+        { id: '2', price: 10, status: '\t' },
+      ],
     });
 
-    const blankPredicate = '(lower(btrim(status::text)) IN (?, ?) OR status IS NULL)';
+    const blankPredicate = `(lower(btrim(status::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?) OR status IS NULL)`;
     expect(dataQuery.sql).toContain(blankPredicate);
     expect(countQuery.sql).toContain(blankPredicate);
     expect(dataQuery.bindings.slice(0, 2)).toEqual(['', 'for_sale']);

@@ -364,6 +364,10 @@ export async function probeInventoryResource(
     const ids = new Set<string>();
     for (const row of sampleRows) {
       const id = String(resolveColumnValue(row, resourceConfig.idColumn) ?? '');
+      // Blank ids (SQL NULL or '') already fail the wire contract and are
+      // withheld from GET /inventory. Treating two of them as a duplicate
+      // unique listing id took the whole catalogue offline (#35431).
+      if (!id.trim()) continue;
       if (ids.has(id)) {
         throw new Error(
           `Inventory resource probe failed: duplicate unique listing id in column ${resourceConfig.idColumn}. Choose a unique column or expose a stable unique ID through a view.`,

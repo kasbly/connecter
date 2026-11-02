@@ -75,6 +75,33 @@ describe('health route', () => {
     await app.close();
   });
 
+  it('skips blank listing ids in uniqueness check and reports them as wire-contract violations', async () => {
+    const dbAdapter = createHealthAdapter(true);
+    vi.mocked(dbAdapter.query).mockResolvedValue({
+      rows: [
+        { sku: null, title: 'Draft A', price: 50 },
+        { sku: null, title: 'Draft B', price: 100 },
+        { sku: 'A', title: 'Chair', price: 50 },
+        { sku: 'B', title: 'Desk', price: 100 },
+      ],
+      total: 4,
+    });
+    const resource = { ...inventoryResource, idColumn: 'sku' };
+    await expect(probeInventoryResource(dbAdapter, resource)).resolves.toMatchObject({
+      wireContractViolationIds: ['', ''],
+    });
+    const app = Fastify();
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, resource));
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'ok',
+      resources: 'ok',
+      wireContractViolationIds: ['', ''],
+    });
+    await app.close();
+  });
+
   it('returns 503 when the database is disconnected', async () => {
     const app = Fastify();
     const dbAdapter = createHealthAdapter(false);

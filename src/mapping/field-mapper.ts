@@ -251,11 +251,36 @@ const DEFAULT_STATUS_VALUES: Required<StatusValuesConfig> = {
  */
 export const BLANK_STATUS_VALUE = '';
 
+/**
+ * Characters both the status read path and `filter.status` IN predicate strip.
+ * One-argument PostgreSQL `btrim` only removes space, so a CRLF/Excel leftover
+ * (`\r`, tab, NBSP, BOM) used to read as ACTIVE while `filter.status=ACTIVE`
+ * silently dropped the row (#35432).
+ *
+ * Space, tab, LF, CR, FF, VT, NBSP (U+00A0), BOM (U+FEFF).
+ */
+export const STATUS_VALUE_TRIM_CHARS = ' \t\n\r\f\v\u00A0\uFEFF';
+
+/**
+ * `btrim` second argument for {@link STATUS_VALUE_TRIM_CHARS}. A SQL constant,
+ * never a `?` binding — Knex would steal it from the IN placeholders.
+ */
+export const STATUS_VALUE_BTRIM_CHARS_SQL = "E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279)";
+
+/** Strip {@link STATUS_VALUE_TRIM_CHARS} from both ends — JS counterpart of the SQL `btrim`. */
+export function trimStatusValue(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && STATUS_VALUE_TRIM_CHARS.includes(value.charAt(start))) start += 1;
+  while (end > start && STATUS_VALUE_TRIM_CHARS.includes(value.charAt(end - 1))) end -= 1;
+  return start === 0 && end === value.length ? value : value.slice(start, end);
+}
+
 /** Collapse NULL and trim-empty cells to the blank token; keep every other spelling. */
 export function toStatusValueToken(value: unknown): string {
   if (value === null || value === undefined) return BLANK_STATUS_VALUE;
   const text = String(value);
-  return text.trim() === '' ? BLANK_STATUS_VALUE : text;
+  return trimStatusValue(text) === '' ? BLANK_STATUS_VALUE : text;
 }
 
 /**
@@ -274,7 +299,7 @@ export function resolveInventoryStatus(
   // Blank is a real token (`''`). It matches only when a list contains it —
   // `IN ('')` cannot see SQL NULL, and the defaults do not list blank, so an
   // unmapped NULL stays unknown instead of becoming ACTIVE.
-  const normalizedValue = toStatusValueToken(value).trim().toLowerCase();
+  const normalizedValue = trimStatusValue(toStatusValueToken(value)).toLowerCase();
 
   // A `statusValues` block that is present is read literally, matching the
   // filter direction below and the README: a key the merchant left out of the
@@ -288,7 +313,8 @@ export function resolveInventoryStatus(
   const mappings = statusValues ?? DEFAULT_STATUS_VALUES;
   return INVENTORY_STATUSES.find((status) =>
     (mappings[status] ?? []).some(
-      (sourceValue) => toStatusValueToken(sourceValue).trim().toLowerCase() === normalizedValue,
+      (sourceValue) =>
+        trimStatusValue(toStatusValueToken(sourceValue)).toLowerCase() === normalizedValue,
     ),
   );
 }

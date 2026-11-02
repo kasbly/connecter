@@ -385,6 +385,10 @@ describe('mapRowToInventoryItem', () => {
   it('uses the documented case-insensitive defaults for canonical status values', () => {
     expect(resolveInventoryStatus('sold', undefined)).toBe('SOLD');
     expect(getSourceStatusValues('SOLD', undefined)).toEqual(['SOLD', 'sold']);
+    // Same charset as filter-path `btrim(..., E' \t\n\r\f\v' || chr(160) || chr(65279))`
+    // — a CRLF leftover must still resolve, not only a space (#35432).
+    expect(resolveInventoryStatus('active\r', undefined)).toBe('ACTIVE');
+    expect(resolveInventoryStatus('active\u00A0', undefined)).toBe('ACTIVE');
   });
 
   it('agrees with the filter direction on a statusValues block that omits ACTIVE', () => {
@@ -408,6 +412,9 @@ describe('mapRowToInventoryItem', () => {
     expect(toStatusValueToken(null)).toBe('');
     expect(toStatusValueToken(undefined)).toBe('');
     expect(toStatusValueToken('   ')).toBe('');
+    expect(toStatusValueToken('\t')).toBe('');
+    expect(toStatusValueToken('\r')).toBe('');
+    expect(toStatusValueToken('\u00A0')).toBe('');
     expect(toStatusValueToken('for_sale')).toBe('for_sale');
 
     const blankMapped: StatusValuesConfig = { ACTIVE: [''] };
@@ -415,6 +422,7 @@ describe('mapRowToInventoryItem', () => {
     expect(resolveInventoryStatus(undefined, blankMapped)).toBe('ACTIVE');
     expect(resolveInventoryStatus('', blankMapped)).toBe('ACTIVE');
     expect(resolveInventoryStatus('   ', blankMapped)).toBe('ACTIVE');
+    expect(resolveInventoryStatus('\t', blankMapped)).toBe('ACTIVE');
     expect(getSourceStatusValues('ACTIVE', blankMapped)).toEqual(['']);
 
     // Unmapped blank stays unknown so the unknown-status policy still applies.
