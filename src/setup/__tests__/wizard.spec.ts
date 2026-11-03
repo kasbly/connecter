@@ -3413,6 +3413,248 @@ describe('runWizard', () => {
     }
   });
 
+  /**
+   * Rerun against a saved config whose .env still holds DB_PASSWORD, answering
+   * the connection prompts with `answers`. `connect` stands in for
+   * introspectDatabase, answering `connectCalls` attempts. Pass
+   * `reachesMapping: false` when the run is expected to throw at the connection
+   * step, so no once-values are left queued for prompts that never run.
+   */
+  async function rerunWithSavedConfig(
+    answers: { host: string; port: string; database: string; user: string },
+    connect: (options: { password: string }) => Promise<unknown>,
+    { reachesMapping = true, connectCalls = 1 } = {},
+  ): Promise<{ directory: string }> {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    vi.clearAllMocks();
+    writeFileSync(
+      join(directory, 'connector.config.yml'),
+      [
+        'version: 1',
+        'auth:',
+        '  apiKeys:',
+        '    - key: ${CONNECTOR_API_KEY}',
+        '      label: kasbly-production',
+        'database:',
+        '  type: postgres',
+        '  host: database.example.com',
+        '  port: 5432',
+        '  database: catalog',
+        '  user: reader',
+        '  password: ${DB_PASSWORD}',
+        '  ssl: false',
+        'resources:',
+        '  inventory:',
+        '    schema: merchant_data',
+        '    table: products',
+        '    idColumn: id',
+        '    fields:',
+        '      title: title',
+        '      price: price',
+        '      currency: currency',
+        '      description: description',
+        '    searchableColumns: [title, description]',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(directory, '.env'),
+      'DB_PASSWORD=old-secret\nCONNECTOR_API_KEY=kc_existing\n',
+    );
+
+    const selectAnswers = ['postgres'];
+    const inputAnswers = [
+      answers.host,
+      answers.port,
+      answers.database,
+      answers.user,
+      'merchant_data',
+    ];
+    if (reachesMapping) {
+      selectAnswers.push(
+        'products',
+        'id',
+        '\0unmapped',
+        'title',
+        'price',
+        'currency',
+        '\0unmapped',
+        '\0unmapped',
+        'description',
+        '\0unmapped',
+        '\0unmapped',
+        'bundled',
+      );
+      inputAnswers.push('connector.merchant.example');
+    }
+    for (const answer of selectAnswers) {
+      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    for (const answer of inputAnswers) {
+      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
+    }
+    promptMocks.confirm.mockImplementation(({ message }) =>
+      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }) => {
+      if (message.startsWith('Select additional')) return Promise.resolve([]);
+      if (message.startsWith('Which columns should be searchable')) {
+        return Promise.resolve(['title', 'description']);
+      }
+      if (message.startsWith('Which filters should be available')) {
+        return Promise.resolve(['minPrice', 'maxPrice', 'currency']);
+      }
+      return Promise.resolve([]);
+    });
+    for (let attempt = 0; attempt < connectCalls; attempt++) {
+      vi.mocked(introspectDatabase).mockImplementationOnce(connect as never);
+    }
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+    } catch (error) {
+      rmSync(directory, { recursive: true, force: true });
+      throw error;
+    } finally {
+      process.chdir(previousDirectory);
+    }
+    return { directory };
+  }
+
+  function connectedDatabase() {
+    return {
+      db: Object.assign(vi.fn(), {
+        destroy: vi.fn().mockResolvedValue(undefined),
+        withSchema: vi.fn(() => ({
+          table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+        })),
+      }),
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table' as const,
+            rowCount: 100,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    };
+  }
+
+  function passwordRejected() {
+    return Object.assign(new Error('password authentication failed for user "reader"'), {
+      code: '28P01',
+    });
+  }
+
+  const sameTarget = {
+    host: 'database.example.com',
+    port: '5432',
+    database: 'catalog',
+    user: 'reader',
+  };
+
+  it('asks for the database password again when a rerun changes the username, instead of sending the saved one', async () => {
+    promptMocks.password.mockResolvedValueOnce('new-secret');
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const connect = vi.fn(() => Promise.resolve(connectedDatabase()));
+    let directory = '';
+    try {
+      ({ directory } = await rerunWithSavedConfig({ ...sameTarget, user: 'reader_v2' }, connect));
+
+      expect(promptMocks.password).toHaveBeenCalledTimes(1);
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(connect).toHaveBeenCalledWith(
+        expect.objectContaining({ user: 'reader_v2', password: 'new-secret' }),
+      );
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(config.database.user).toBe('reader_v2');
+      expect(config.database.password).toBe('new-secret');
+    } finally {
+      consoleLog.mockRestore();
+      if (directory) rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the saved database password when a rerun leaves host, port, database and user unchanged', async () => {
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const connect = vi.fn(() => Promise.resolve(connectedDatabase()));
+    let directory = '';
+    try {
+      ({ directory } = await rerunWithSavedConfig(sameTarget, connect));
+
+      expect(promptMocks.password).not.toHaveBeenCalled();
+      expect(connect).toHaveBeenCalledWith(
+        expect.objectContaining({ user: 'reader', password: 'old-secret' }),
+      );
+    } finally {
+      consoleLog.mockRestore();
+      if (directory) rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('re-prompts once for the password when the saved one is rejected with 28P01', async () => {
+    promptMocks.password.mockResolvedValueOnce('rotated-secret');
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const connect = vi.fn((options: { password: string }) =>
+      options.password === 'old-secret'
+        ? Promise.reject(passwordRejected())
+        : Promise.resolve(connectedDatabase()),
+    );
+    let directory = '';
+    try {
+      ({ directory } = await rerunWithSavedConfig(sameTarget, connect, { connectCalls: 2 }));
+
+      expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('rejected the password'));
+      expect(promptMocks.password).toHaveBeenCalledTimes(1);
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(connect).toHaveBeenLastCalledWith(
+        expect.objectContaining({ password: 'rotated-secret' }),
+      );
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(config.database.password).toBe('rotated-secret');
+    } finally {
+      consoleLog.mockRestore();
+      consoleWarn.mockRestore();
+      if (directory) rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('gives up after a second 28P01 instead of prompting in a loop', async () => {
+    promptMocks.password.mockResolvedValueOnce('still-wrong');
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const connect = vi.fn(() => Promise.reject(passwordRejected()));
+    try {
+      await expect(
+        rerunWithSavedConfig(sameTarget, connect, { reachesMapping: false, connectCalls: 2 }),
+      ).rejects.toThrow(/password authentication failed/);
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(promptMocks.password).toHaveBeenCalledTimes(1);
+    } finally {
+      consoleLog.mockRestore();
+      consoleWarn.mockRestore();
+    }
+  });
+
   it('restores a numeric published filter while adding SKU search and stock defaults (#31602, #33273)', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
@@ -3573,6 +3815,7 @@ describe('runWizard', () => {
       extraColumns: Array<{ name: string; type: string }>,
       confirmAnswer: (message: string, fallback: boolean) => boolean = (_message, fallback) =>
         fallback,
+      options: { configTable?: string; extraYaml?: string[] } = {},
     ) => {
       const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
       const previousDirectory = process.cwd();
@@ -3603,13 +3846,14 @@ describe('runWizard', () => {
           '  ssl: false',
           'resources:',
           '  inventory:',
-          '    table: products',
+          `    table: ${options.configTable ?? 'products'}`,
           '    idColumn: id',
           '    fields:',
           '      title: title',
           '      price: price',
           '      currency: currency',
-          `    baseFilter: ${JSON.stringify(baseFilter)}`,
+          ...(baseFilter ? [`    baseFilter: ${JSON.stringify(baseFilter)}`] : []),
+          ...(options.extraYaml ?? []),
           '',
         ].join('\n'),
       );
@@ -3690,6 +3934,8 @@ describe('runWizard', () => {
         );
         return {
           baseFilter: config.resources.inventory.baseFilter,
+          attributes: config.resources.inventory.attributes,
+          filterableColumns: config.resources.inventory.filterableColumns,
           logs: consoleLog.mock.calls.map((call) => String(call[0])),
         };
       } finally {
@@ -3759,6 +4005,71 @@ describe('runWizard', () => {
         message.startsWith('Keep your existing custom filter') ? false : fallback,
       );
       expect(dropped.baseFilter).toBeUndefined();
+    });
+
+    describe('carried-forward attributes and filters whose column is gone (#35653)', () => {
+      const staleYaml = [
+        '    attributes:',
+        '      odometer: km',
+        '      ghost: gone_col',
+        '      quoted: \'"Gone Col"\'',
+        '    filterableColumns:',
+        '      kmFloor: { column: km, type: gte }',
+      ];
+
+      it('drops them when the rerun picks another table, and says which', async () => {
+        const { attributes, filterableColumns, logs } = await rerunWithBaseFilter(
+          '',
+          [],
+          undefined,
+          {
+            configTable: 'vehicles',
+            extraYaml: staleYaml,
+          },
+        );
+
+        expect(attributes ?? {}).not.toHaveProperty('odometer');
+        expect(attributes ?? {}).not.toHaveProperty('ghost');
+        expect(attributes ?? {}).not.toHaveProperty('quoted');
+        expect(filterableColumns ?? {}).not.toHaveProperty('kmFloor');
+        const output = logs.join('\n');
+        expect(output).toContain('Dropped existing mappings whose column is not on products');
+        expect(output).toContain('attributes.odometer (km)');
+        expect(output).toContain('filterableColumns.kmFloor (km)');
+      });
+
+      it('drops only the mappings whose column was dropped from the same table', async () => {
+        const { attributes, filterableColumns, logs } = await rerunWithBaseFilter(
+          '',
+          [{ name: 'km', type: 'integer' }],
+          undefined,
+          { extraYaml: staleYaml },
+        );
+
+        // `km` still exists, so both mappings that point at it survive.
+        expect(attributes).toMatchObject({ odometer: 'km' });
+        expect(filterableColumns).toMatchObject({ kmFloor: { column: 'km', type: 'gte' } });
+        // `gone_col` and `"Gone Col"` are not columns of the table any more.
+        expect(attributes ?? {}).not.toHaveProperty('ghost');
+        expect(attributes ?? {}).not.toHaveProperty('quoted');
+        const output = logs.join('\n');
+        expect(output).toContain('attributes.ghost (gone_col)');
+        expect(output).toContain('attributes.quoted ("Gone Col")');
+        expect(output).not.toContain('attributes.odometer');
+        expect(output).not.toContain('filterableColumns.kmFloor');
+      });
+
+      it('keeps a non-identifier expression only on the same table', async () => {
+        const expressionYaml = ['    attributes:', '      kmLabel: "km::text"'];
+        const same = await rerunWithBaseFilter('', [], undefined, { extraYaml: expressionYaml });
+        expect(same.attributes).toMatchObject({ kmLabel: 'km::text' });
+
+        const other = await rerunWithBaseFilter('', [], undefined, {
+          configTable: 'vehicles',
+          extraYaml: expressionYaml,
+        });
+        expect(other.attributes ?? {}).not.toHaveProperty('kmLabel');
+      });
     });
   });
 

@@ -845,10 +845,22 @@ export async function runWizard(): Promise<void> {
     validate: (value) => value.trim() !== '' || 'Username is required',
   });
   // Password prompts deliberately have no default. Reuse the validated existing
-  // value on edits so a mapping-only change does not require re-entering it.
-  const dbPassword =
-    existingConfig?.database.password ??
-    (await password({
+  // value on edits so a mapping-only change does not require re-entering it —
+  // but only while the connection target is unchanged. A saved password belongs
+  // to one host/port/database/user; sending it to a different target would
+  // fail (or leak it to another server), and leave no way to supply a new one.
+  const savedDatabase = existingConfig?.database;
+  const reusableSavedPassword =
+    savedDatabase !== undefined &&
+    savedDatabase.password !== undefined &&
+    savedDatabase.host === dbHost &&
+    savedDatabase.port === parseInt(dbPort, 10) &&
+    savedDatabase.database === dbName &&
+    savedDatabase.user === dbUser
+      ? savedDatabase.password
+      : undefined;
+  const promptForDbPassword = (): Promise<string> =>
+    password({
       message: 'Password:',
       mask: true,
       // A password carrying both a single quote and a double quote or backslash
@@ -863,7 +875,8 @@ export async function runWizard(): Promise<void> {
           return error instanceof Error ? error.message : String(error);
         }
       },
-    }));
+    });
+  let dbPassword = reusableSavedPassword ?? (await promptForDbPassword());
   const requiresTls = await confirm({
     message: 'Does this database require TLS?',
     default: existingConfig?.database.ssl ?? shouldDefaultToTls(dbHost),
@@ -879,7 +892,7 @@ export async function runWizard(): Promise<void> {
   const selectedSchema = dbSchema?.trim() || 'public';
 
   console.log('\nConnecting...');
-  const connection = await introspectDatabase({
+  const connectOptions = (): Parameters<typeof introspectDatabase>[0] => ({
     type: dbType,
     host: dbHost,
     port: parseInt(dbPort, 10),
@@ -891,6 +904,20 @@ export async function runWizard(): Promise<void> {
     sslRejectUnauthorized: tls.rejectUnauthorized,
     schema: selectedSchema,
   });
+  let connection: Awaited<ReturnType<typeof introspectDatabase>>;
+  try {
+    connection = await introspectDatabase(connectOptions());
+  } catch (error) {
+    // 28P01 = invalid_password. Credentials get rotated, so give the operator
+    // one chance to type the new password instead of ending the run (and having
+    // every rerun resend the same rejected one).
+    if (!isPasswordAuthFailure(error)) throw error;
+    console.warn(
+      `The database rejected the password for user "${dbUser}" (${error instanceof Error ? error.message : String(error)}). Enter the current password to try again.`,
+    );
+    dbPassword = await promptForDbPassword();
+    connection = await introspectDatabase(connectOptions());
+  }
   const { db, result } = connection;
   if (connection.retriedWithTls) {
     tls.enabled = true;
@@ -1400,6 +1427,7 @@ export async function runWizard(): Promise<void> {
   // as an achievable outcome and had no way to be reselected — that's the
   // only case worth preserving. `url` is excluded: Step 3a always asks
   // explicitly, so an unpicked url this run is deliberate too.
+  const droppedStaleMappings: string[] = [];
   const reachableAttributeTargets = new Set(
     unmappedColumns.map(
       (column) =>
@@ -1411,6 +1439,13 @@ export async function runWizard(): Promise<void> {
     existingConfig?.resources.inventory.attributes ?? {},
   )) {
     if (key === 'url' || key in attributes || reachableAttributeTargets.has(key)) continue;
+    // Another table, or a column since dropped or renamed, would put a
+    // `column does not exist` error into the pre-save probe's SELECT list and
+    // block setup for good (#35653). Drop it and say so.
+    if (!carriedColumnStillApplies(column, sameTable, selectedTable.columns)) {
+      droppedStaleMappings.push(`attributes.${key} (${column})`);
+      continue;
+    }
     attributes[key] = column;
   }
 
@@ -1692,9 +1727,23 @@ export async function runWizard(): Promise<void> {
   );
   const carriedForwardFilterableColumns = Object.fromEntries(
     Object.entries(existingConfig?.resources.inventory.filterableColumns ?? {}).filter(
-      ([key]) => !maxFilterSuggestions.some((f) => f.filterName === key),
+      ([key, filter]) => {
+        if (maxFilterSuggestions.some((f) => f.filterName === key)) return false;
+        // Same guard as the attributes carry-forward: a filter on a column
+        // this table lacks would fail the pre-save probe (#35653).
+        if (!carriedColumnStillApplies(filter.column, sameTable, selectedTable.columns)) {
+          droppedStaleMappings.push(`filterableColumns.${key} (${filter.column})`);
+          return false;
+        }
+        return true;
+      },
     ),
   );
+  if (droppedStaleMappings.length > 0) {
+    console.log(
+      `\nDropped existing mappings whose column is not on ${selectedTableName}: ${droppedStaleMappings.join(', ')}`,
+    );
+  }
   const filterableColumns = {
     ...carriedForwardFilterableColumns,
     ...filterableColumnsFromSelection,
@@ -2089,6 +2138,13 @@ export function loadExistingSetupConfig(configPath: string, envPath: string): Co
   }
 }
 
+/** PostgreSQL `invalid_password` (SQLSTATE 28P01): the server rejected the credentials. */
+function isPasswordAuthFailure(error: unknown): boolean {
+  return (
+    typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '28P01'
+  );
+}
+
 /** Convert the legacy container-only host value back to the host-side default on reruns. */
 export function getSetupHostDefault(host: string | undefined): string {
   return host === 'host.docker.internal' ? 'localhost' : (host ?? 'localhost');
@@ -2141,6 +2197,27 @@ function getExistingMappingSelection(
 
 function unquoteIdentifier(value: string): string {
   return value.match(/^"((?:[^"]|"")*)"$/)?.[1]?.replaceAll('""', '"') ?? value;
+}
+
+/**
+ * Whether an existing attribute/filter mapping can be carried into a rerun.
+ * Only the same table can keep it, and a plain or quoted column reference must
+ * still exist there. Anything else is a SQL expression the wizard cannot
+ * check, so it is kept on the same table only (#35653).
+ */
+function carriedColumnStillApplies(
+  expression: string,
+  sameTable: boolean,
+  columns: ReadonlyArray<{ name: string }>,
+): boolean {
+  if (!sameTable) return false;
+  const isQuoted = /^"(?:[^"]|"")*"$/.test(expression);
+  const isBare = /^[A-Za-z_][A-Za-z0-9_$]*$/.test(expression);
+  if (!isQuoted && !isBare) return true;
+  const name = unquoteIdentifier(expression);
+  // PostgreSQL folds an unquoted identifier to lower case.
+  const lookup = isBare ? name.toLowerCase() : name;
+  return columns.some((column) => column.name === lookup);
 }
 
 function getFixedConfigValue(value: string | undefined): string | undefined {
