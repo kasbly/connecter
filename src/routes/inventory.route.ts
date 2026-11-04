@@ -375,6 +375,12 @@ export function registerInventoryRoutes(app: FastifyInstance, deps: InventoryDep
     async (request: FastifyRequest, reply: FastifyReply) => {
       const { id } = request.params as { id: string };
 
+      // PostgreSQL rejects 0x00 in UTF8 bindings (SQLSTATE 22021). No row can
+      // store a NUL id, so treat it as absent without querying.
+      if (id.includes('\0')) {
+        return reply.code(404).send({ error: 'Item not found' });
+      }
+
       let row: Record<string, unknown> | null;
       try {
         row = resourceConfig.schema

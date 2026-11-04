@@ -1174,6 +1174,26 @@ describe('inventory routes', () => {
     await app.close();
   });
 
+  it('GET /inventory/:id returns 404 without querying when the id contains a NUL byte', async () => {
+    const mockAdapter = createMockDbAdapter();
+    const app = Fastify();
+    registerInventoryRoutes(app, {
+      dbAdapter: mockAdapter,
+      resourceConfig: testConfig,
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/inventory/AB%0012',
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: 'Item not found' });
+    expect(mockAdapter.queryById).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
   it.each([
     ['/inventory/not-a-number', '22P02'],
     ['/inventory/99999999999', '22003'],

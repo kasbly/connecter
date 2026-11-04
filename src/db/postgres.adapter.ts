@@ -12,7 +12,11 @@ import type {
   TableInfo,
   ColumnInfo,
 } from './adapter.interface.js';
-import { STATUS_VALUE_BTRIM_CHARS_SQL, trimStatusValue } from '../mapping/field-mapper.js';
+import {
+  relationKey,
+  STATUS_VALUE_BTRIM_CHARS_SQL,
+  trimStatusValue,
+} from '../mapping/field-mapper.js';
 import { safeNumericRangeExpression } from '../mapping/numeric-range.js';
 
 /**
@@ -467,7 +471,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     const rows = rawResult.rows;
 
     for (const row of rows) {
-      const fk = String(row['__fk']);
+      const fk = relationKey(row['__fk']);
       delete row['__fk'];
       const existing = result.get(fk);
       if (existing) {

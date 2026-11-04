@@ -343,6 +343,11 @@ export function getSourceStatusValues(
   return sourceValues?.length ? sourceValues : undefined;
 }
 
+/** Match PostgreSQL character(n) keys without stripping significant non-space characters. */
+export function relationKey(value: unknown): string {
+  return String(value).replace(/ +$/, '');
+}
+
 export function mapRowToInventoryItem(
   row: Record<string, unknown>,
   config: InventoryResourceConfig,
@@ -385,7 +390,7 @@ export function mapRowToInventoryItem(
     for (const [relationName, relationConfig] of Object.entries(config.relations)) {
       const relData = relationData.get(relationName);
       const referenceValue = resolveColumnValue(row, relationConfig.referenceKey);
-      const relRows = relData?.get(String(referenceValue)) ?? [];
+      const relRows = relData?.get(relationKey(referenceValue)) ?? [];
 
       if (relationConfig.imageUrlField) {
         for (const relationRow of relRows) {
@@ -632,7 +637,7 @@ export function getMappedImageValues(
   for (const [relationName, relationConfig] of getRelationConfigs(resourceConfig)) {
     if (!relationConfig.imageUrlField) continue;
     const referenceValue = resolveColumnValue(row, relationConfig.referenceKey);
-    const relationRows = relationData.get(relationName)?.get(String(referenceValue)) ?? [];
+    const relationRows = relationData.get(relationName)?.get(relationKey(referenceValue)) ?? [];
     values.push(...relationRows.map((relationRow) => relationRow[relationConfig.imageUrlField!]));
   }
 

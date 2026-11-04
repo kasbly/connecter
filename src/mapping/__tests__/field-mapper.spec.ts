@@ -793,6 +793,38 @@ describe('mapRowToInventoryItem', () => {
       'https://x/1.jpg',
     ]);
   });
+
+  it.each([
+    { reference: 'AB12    ', key: 'AB12' },
+    { reference: ' AB12    ', key: ' AB12' },
+    { reference: 'AB12\t', key: 'AB12\t' },
+    { reference: 'AB12\u00a0', key: 'AB12\u00a0' },
+  ])(
+    'looks up flattened features using only ASCII space padding ($reference)',
+    ({ reference, key }) => {
+      const config: InventoryResourceConfig = {
+        ...baseConfig,
+        relations: {
+          features: {
+            table: 'Feature',
+            foreignKey: 'car_sku',
+            referenceKey: 'sku',
+            fields: { name: 'name' },
+            flatten: 'name',
+          },
+        },
+      };
+      const relations = new Map([['features', new Map([[key, [{ name: 'ABS' }]]])]]);
+
+      expect(
+        mapRowToInventoryItem(
+          { id: 1, sku: reference, title: 'Car', price: 100 },
+          config,
+          relations,
+        ).attributes.features,
+      ).toEqual(['ABS']);
+    },
+  );
 });
 
 describe('validateInventoryItemWireContract', () => {

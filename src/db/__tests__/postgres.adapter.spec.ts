@@ -10,6 +10,7 @@ import {
 } from '../postgres.adapter.js';
 import type { QueryCondition, SortOptions } from '../adapter.interface.js';
 import { buildQuery } from '../../mapping/query-builder.js';
+import { getMappedImageValues, mapRowToInventoryItem } from '../../mapping/field-mapper.js';
 
 const { knexMock, rawMock } = vi.hoisted(() => {
   const rawMock = vi.fn().mockResolvedValue(undefined);
@@ -857,6 +858,42 @@ describe('PostgresAdapter relation ordering', () => {
     expect(result.get('1')).toEqual([{ url: 'https://x/1.jpg' }]);
     expect([...result.keys()]).toEqual(['1']);
   });
+
+  it.each(['AB12', 'AB12    '])(
+    'maps padded character foreign keys to photos for parent %j',
+    async (parentId) => {
+      const adapter = createAdapterForRelationQuery();
+      rawMock.mockResolvedValue({
+        rows: [{ url: 'https://x/1.jpg', __fk: 'AB12      ' }],
+      });
+      const config: InventoryResourceConfig = {
+        table: 'cars',
+        idColumn: 'id',
+        fields: { title: 'title', price: 'price' },
+        relations: {
+          photos: {
+            table: 'car_photos',
+            foreignKey: 'car_sku',
+            referenceKey: 'sku',
+            fields: { url: 'url' },
+            imageUrlField: 'url',
+          },
+        },
+      };
+      const photos = await adapter.queryRelation({
+        table: 'car_photos',
+        foreignKey: 'car_sku',
+        parentIds: [parentId],
+        fields: { url: 'url' },
+      });
+      const row = { id: 1, sku: parentId, title: 'Car', price: 100 };
+      const relations = new Map([['photos', photos]]);
+
+      expect([...photos.keys()]).toEqual(['AB12']);
+      expect(mapRowToInventoryItem(row, config, relations).images).toEqual(['https://x/1.jpg']);
+      expect(getMappedImageValues(row, config, relations)).toEqual(['https://x/1.jpg']);
+    },
+  );
 });
 
 describe('resolveCountLimit', () => {
