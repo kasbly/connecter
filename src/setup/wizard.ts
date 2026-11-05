@@ -863,7 +863,7 @@ export async function runWizard(): Promise<void> {
     password({
       message: 'Password:',
       mask: true,
-      // A password carrying both a single quote and a double quote or backslash
+      // A password carrying both a single quote and a double quote, backslash or `$`
       // makes serializeEnvValue throw when the .env is written at the end of the
       // wizard — by then connector.config.yml may already be on disk with no
       // matching .env (#27786). Reject it here, before ~30 more prompts run.
@@ -2304,14 +2304,15 @@ export function serializeEnvValue(value: string): string {
   // Backticks are dotenv-only quoting: Docker Compose's `env_file` parser does
   // not strip them, so a value containing `'` must go straight to double
   // quotes instead (#26518). Guard those against `"` and `\` too — dotenv
-  // keeps `\"`/`\\` literal while Compose unescapes them, the other point
-  // where the two parsers diverge.
-  if (!/["\\]/.test(value)) {
+  // keeps `\"`/`\\` literal while Compose unescapes them, and `$` is never
+  // expanded by dotenv but is interpolated by Compose inside double quotes.
+  // Escaping as `$$` doesn't help (dotenv keeps it literal), so refuse it.
+  if (!/["\\$]/.test(value)) {
     return `"${value}"`;
   }
 
   throw new Error(
-    'Environment value contains both a single quote and a double quote or backslash; ' +
+    'Environment value contains both a single quote and a double quote, backslash or dollar sign; ' +
       'no quoting works in both dotenv and Docker Compose env_file — set this variable manually.',
   );
 }

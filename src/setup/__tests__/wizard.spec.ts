@@ -713,7 +713,7 @@ describe('mergeEnvironmentFile', () => {
     });
   });
 
-  it.each(['pa$&ss', 'pa$1ss', 'pa$`ss', "pa$'ss"])(
+  it.each(['pa$&ss', 'pa$1ss', 'pa$`ss', 'pa$$ss'])(
     'rewrites value %j as a literal rather than a String.replace pattern',
     (value) => {
       const existing = "DB_HOST=db\nDB_PASSWORD='old'\nAPI_KEY=k\n";
@@ -811,7 +811,7 @@ describe('loadExistingSetupConfig', () => {
 });
 
 describe('serializeEnvValue', () => {
-  it.each(['p@ss#word', 'my pass ', 'a"b#c', "a'b#c"])(
+  it.each(['p@ss#word', 'my pass ', 'a"b#c', "a'b#c", 'a$b'])(
     'round-trips dotenv-significant value %j',
     (value) => {
       expect(parse(`DB_PASSWORD=${serializeEnvValue(value)}\n`).DB_PASSWORD).toBe(value);
@@ -826,10 +826,12 @@ describe('serializeEnvValue', () => {
     expect(serializeEnvValue("R3ad'Only!")).not.toContain('`');
   });
 
-  it.each(['a\'b"c', "a'b\\c"])(
-    'throws instead of writing an unparseable value %j when a single quote collides with a double quote or backslash',
+  it.each(['a\'b"c', "a'b\\c", "a'b$c", "R3ad'Only$2024"])(
+    'throws instead of writing an unparseable value %j when a single quote collides with a double quote, backslash or dollar sign',
     (value) => {
-      expect(() => serializeEnvValue(value)).toThrow(/single quote.*double quote or backslash/);
+      expect(() => serializeEnvValue(value)).toThrow(
+        /single quote.*double quote, backslash or dollar sign/,
+      );
     },
   );
 });
@@ -1327,7 +1329,9 @@ describe('runWizard', () => {
 
     try {
       process.chdir(directory);
-      await expect(runWizard()).rejects.toThrow(/single quote.*double quote or backslash/);
+      await expect(runWizard()).rejects.toThrow(
+        /single quote.*double quote, backslash or dollar sign/,
+      );
       // Both files must be untouched: the config write must not have run ahead
       // of the (throwing) .env build (#27786).
       expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
