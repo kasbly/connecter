@@ -722,6 +722,73 @@ describe('buildQuery', () => {
       expect(result.sort).toEqual({ column: '"price"', direction: 'asc', tiebreaker: '"id"' });
     });
 
+    describe('canonical Kasbly sort fields (#35913)', () => {
+      it('sorts sortBy=price by the mapped quoted price column', () => {
+        const config: InventoryResourceConfig = {
+          ...baseConfig,
+          fields: { title: 'title', price: '"salePrice"' },
+        };
+        const result = buildQuery({ sortBy: 'price', sortDirection: 'asc' }, config);
+        expect(result.sort).toEqual({ column: '"salePrice"', direction: 'asc', tiebreaker: 'id' });
+        expect(result.ignoredFilters).toEqual([]);
+      });
+
+      it('sorts sortBy=price by a differently named column', () => {
+        const config: InventoryResourceConfig = {
+          ...baseConfig,
+          fields: { title: 'name', price: 'sale_price' },
+        };
+        expect(buildQuery({ sortBy: 'price' }, config).sort.column).toBe('sale_price');
+        expect(buildQuery({ sortBy: 'title' }, config).sort.column).toBe('name');
+      });
+
+      it('resolves sortBy=updatedAt to updatedAtColumn', () => {
+        const config: InventoryResourceConfig = { ...baseConfig, updatedAtColumn: '"modified_at"' };
+        const result = buildQuery({ sortBy: 'updatedAt', sortDirection: 'asc' }, config);
+        expect(result.sort).toEqual({
+          column: '"modified_at"',
+          direction: 'asc',
+          tiebreaker: 'id',
+        });
+        expect(result.ignoredFilters).toEqual([]);
+      });
+
+      it('reports sortBy as ignored when price is a literal', () => {
+        const config: InventoryResourceConfig = {
+          ...baseConfig,
+          fields: { title: 'title', price: "'0'" },
+        };
+        const result = buildQuery({ sortBy: 'price' }, config);
+        expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc', tiebreaker: 'id' });
+        expect(result.ignoredFilters).toEqual(['sortBy']);
+      });
+
+      it('reports sortBy as ignored when updatedAt is not mapped', () => {
+        const config: InventoryResourceConfig = { ...baseConfig, updatedAtColumn: undefined };
+        const result = buildQuery({ sortBy: 'updatedAt' }, config);
+        expect(result.sort).toEqual({ column: 'id', direction: 'desc' });
+        expect(result.ignoredFilters).toEqual(['sortBy']);
+      });
+
+      it('reports sortBy as ignored for an unknown column and not when absent or empty', () => {
+        expect(buildQuery({ sortBy: 'nonexistentColumn' }, baseConfig).ignoredFilters).toEqual([
+          'sortBy',
+        ]);
+        expect(buildQuery({}, baseConfig).ignoredFilters).toEqual([]);
+        expect(buildQuery({ sortBy: '' }, baseConfig).ignoredFilters).toEqual([]);
+      });
+
+      it('does not forward an unsafe mapped price expression into ORDER BY', () => {
+        const config: InventoryResourceConfig = {
+          ...baseConfig,
+          fields: { title: 'title', price: 'CAST(amount AS numeric)' },
+        };
+        const result = buildQuery({ sortBy: 'price' }, config);
+        expect(result.sort.column).toBe('updatedAt');
+        expect(result.ignoredFilters).toEqual(['sortBy']);
+      });
+    });
+
     it('falls back to the default sort column when sortBy is not a known column', () => {
       const result = buildQuery({ sortBy: 'nonexistentColumn' }, baseConfig);
       expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc', tiebreaker: 'id' });

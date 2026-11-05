@@ -142,6 +142,27 @@ function normalizeSortColumn(columnExpr: string): string {
   return quotedColumnMatch ? quotedColumnMatch[1]! : trimmedColumnExpr;
 }
 
+/**
+ * Kasbly sends canonical field names (`sortBy=price`), not the merchant's
+ * column vocabulary. Translate them to the mapped column before the allowlist
+ * check so a `fields.price: sale_price` config still sorts by price (#35913).
+ * Literal values (`'0'`) are not columns and cannot be sorted, and the result
+ * must be safe to interpolate into the raw `ORDER BY`.
+ */
+function resolveCanonicalSortColumn(
+  requestedSortBy: string,
+  config: InventoryResourceConfig,
+): string | undefined {
+  let column: string | undefined;
+  if (requestedSortBy === 'price' || requestedSortBy === 'title') {
+    column = config.fields[requestedSortBy]?.trim();
+  } else if (requestedSortBy === 'updatedAt') {
+    column = config.updatedAtColumn?.trim();
+  }
+  if (!column || /^'.*'$/.test(column) || !isSafeOrderByColumn(column)) return undefined;
+  return column;
+}
+
 function isFixedActiveStatus(config: InventoryResourceConfig): boolean {
   const statusField = config.fields.status;
   return statusField === undefined || /^'ACTIVE'$/i.test(statusField.trim());
@@ -297,10 +318,20 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   const allowedSortColumns = new Map(
     getRequiredColumns(config).map((column) => [normalizeSortColumn(column), column]),
   );
-  const sortBy =
-    requestedSortBy !== undefined
-      ? (allowedSortColumns.get(normalizeSortColumn(requestedSortBy)) ?? defaultSort.column)
-      : defaultSort.column;
+  const canonicalSortColumn =
+    requestedSortBy !== undefined ? resolveCanonicalSortColumn(requestedSortBy, config) : undefined;
+  const servedSortColumn =
+    canonicalSortColumn ??
+    (requestedSortBy !== undefined
+      ? allowedSortColumns.get(normalizeSortColumn(requestedSortBy))
+      : undefined);
+  const sortBy = servedSortColumn ?? defaultSort.column;
+  // A requested sort that cannot be served used to fall back silently, so a
+  // caller read the default order as sorted. Report it like any other
+  // unsupported request parameter (#35913).
+  if (requestedSortBy?.trim() && servedSortColumn === undefined) {
+    ignoredFilters.push('sortBy');
+  }
   const sortDirection = requestedSortDirection === 'asc' ? ('asc' as const) : defaultSort.direction;
 
   // Search across searchable columns

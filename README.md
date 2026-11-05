@@ -142,15 +142,15 @@ set `resources.inventory.updatedAtEpoch` to `s` or `ms` alongside
 This also converts `updatedSince` into an integer bound in the source units.
 Omit `updatedAtEpoch` for PostgreSQL timestamp/date columns.
 
-| Parameter       | Type            | Description                                  |
-| --------------- | --------------- | -------------------------------------------- |
-| `pageSize`      | number          | Items per page (1-100, default 20)           |
-| `page`          | number          | Page number (default 1)                      |
-| `search`        | string          | Full-text search across searchable columns   |
-| `sortBy`        | string          | Column to sort by (default: updatedAt or id) |
-| `sortDirection` | `asc` \| `desc` | Sort direction (default: desc)               |
-| `updatedSince`  | ISO 8601        | Only items updated after this timestamp      |
-| `filter.<name>` | string/number   | Dynamic filters defined in config            |
+| Parameter       | Type            | Description                                                                                                                                                         |
+| --------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pageSize`      | number          | Items per page (1-100, default 20)                                                                                                                                  |
+| `page`          | number          | Page number (default 1)                                                                                                                                             |
+| `search`        | string          | Full-text search across searchable columns                                                                                                                          |
+| `sortBy`        | string          | `price`, `title`, `updatedAt` (resolved through the mapping) or a mapped column; unservable values fall back to the default sort and are listed in `ignoredFilters` |
+| `sortDirection` | `asc` \| `desc` | Sort direction (default: desc)                                                                                                                                      |
+| `updatedSince`  | ISO 8601        | Only items updated after this timestamp                                                                                                                             |
+| `filter.<name>` | string/number   | Dynamic filters defined in config                                                                                                                                   |
 
 Results are always ordered by the requested sort column and then by
 `resources.inventory.idColumn` descending. That second key keeps consecutive
