@@ -8,18 +8,18 @@ import { startConnector } from './index.js';
 import { buildApp } from './server.js';
 
 describe('CURRENT_CONNECTOR_VERSION pin', () => {
-  it('matches the latest services/connector content SHA', () => {
-    // Keep this equal to the short SHA of the last commit that changed
-    // services/connector (`git log -1 --no-merges --format=%H -- services/connector`),
-    // which is exactly what sync-connector.yml stamps into the public
-    // mirror's version.json. Any PR touching services/connector must update
-    // the pin in the same PR (#32980, #35313).
+  it('matches the services/connector tree SHA', () => {
+    // Keep this equal to the short tree SHA of services/connector
+    // (`git rev-parse HEAD:services/connector | cut -c1-7`), which is exactly
+    // what sync-connector.yml stamps into the public mirror's version.json.
+    // A tree SHA depends only on the directory's contents, so any PR touching
+    // services/connector sets the pin in the same commit and it survives
+    // rebases (#32980, #35313, #36156).
     const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
-    const contentVersion = execFileSync(
-      'git',
-      ['log', '-1', '--no-merges', '--format=%H', '--', 'services/connector'],
-      { cwd: repoRoot, encoding: 'utf8' },
-    )
+    const contentVersion = execFileSync('git', ['rev-parse', 'HEAD:services/connector'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
       .trim()
       .slice(0, 7);
     expect(contentVersion).toMatch(/^[a-f0-9]{7}$/);

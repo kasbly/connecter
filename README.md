@@ -95,7 +95,7 @@ column list), unmapped source status values, or catalogue-derived listing ids to
 anonymous caller (#26697). Fetch `GET /diagnostics` with your API key for that detail.
 
 `version` is read from `version.json` when present — written by `sync-connector.yml` at sync
-time as the short SHA of the synced commit, so it changes whenever a real connector fix ships —
+time as the short tree SHA of the connector source, so it changes whenever a real connector fix ships —
 falling back to `package.json`'s version (`1.0.0`) for a checkout that predates `version.json`. See
 "Updating the connector" below.
 
