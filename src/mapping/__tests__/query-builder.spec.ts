@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { buildQuery, getDefaultSort, splitConditions } from '../query-builder.js';
+import {
+  buildQuery,
+  excludeRelationFromSearch,
+  getDefaultSort,
+  getSearchableColumns,
+  getUnsearchableRelationNames,
+  splitConditions,
+} from '../query-builder.js';
 import type { InventoryResourceConfig } from '../../config/config.types.js';
 
 const baseConfig: InventoryResourceConfig = {
@@ -249,6 +256,29 @@ describe('buildQuery', () => {
         value: 'leather',
       }),
     );
+  });
+
+  it('leaves a relation the probe excluded out of search (#36279)', () => {
+    const config = {
+      ...baseConfig,
+      searchableColumns: undefined,
+      relations: {
+        features: {
+          table: 'CarFeature',
+          foreignKey: 'carId',
+          referenceKey: 'id',
+          fields: { name: 'name' },
+          flatten: 'name',
+        },
+      },
+    };
+    expect(getSearchableColumns(config)).toHaveLength(1);
+
+    excludeRelationFromSearch(config, 'features');
+
+    expect(getSearchableColumns(config)).toEqual([]);
+    expect(getUnsearchableRelationNames(config)).toEqual(['features']);
+    expect(buildQuery({ search: 'leather' }, config).ignoredFilters).toEqual(['search']);
   });
 
   it('lets an operator opt a flattened relation out of search', () => {

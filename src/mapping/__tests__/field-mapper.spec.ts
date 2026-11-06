@@ -385,8 +385,9 @@ describe('mapRowToInventoryItem', () => {
   it('uses the documented case-insensitive defaults for canonical status values', () => {
     expect(resolveInventoryStatus('sold', undefined)).toBe('SOLD');
     expect(getSourceStatusValues('SOLD', undefined)).toEqual(['SOLD', 'sold']);
-    // Same charset as filter-path `btrim(..., E' \t\n\r\f\v' || chr(160) || chr(65279))`
-    // — a CRLF leftover must still resolve, not only a space (#35432).
+    // Same charset as the filter-path `btrim(..., E' \t\n\r\f\x0B' || chr(160) || chr(65279))`
+    // (`chr(...)` guarded by getdatabaseencoding() = 'UTF8', #36278) — a CRLF
+    // leftover must still resolve, not only a space (#35432).
     expect(resolveInventoryStatus('active\r', undefined)).toBe('ACTIVE');
     expect(resolveInventoryStatus('active\u00A0', undefined)).toBe('ACTIVE');
   });

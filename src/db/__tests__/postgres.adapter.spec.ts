@@ -10,7 +10,16 @@ import {
 } from '../postgres.adapter.js';
 import type { QueryCondition, SortOptions } from '../adapter.interface.js';
 import { buildQuery } from '../../mapping/query-builder.js';
-import { getMappedImageValues, mapRowToInventoryItem } from '../../mapping/field-mapper.js';
+import {
+  getMappedImageValues,
+  mapRowToInventoryItem,
+  STATUS_VALUE_BTRIM_CHARS_SQL,
+} from '../../mapping/field-mapper.js';
+
+// Pinned literal (#36278): `\v` is not a PostgreSQL escape and a bare
+// `chr(65279)` / `chr(160)` raises SQLSTATE 54000 on a non-UTF8 database.
+const STATUS_BTRIM_CHARS_SQL =
+  "E' \\t\\n\\r\\f\\x0B' || chr(CASE WHEN getdatabaseencoding() = 'UTF8' THEN 160 ELSE 32 END) || chr(CASE WHEN getdatabaseencoding() = 'UTF8' THEN 65279 ELSE 32 END)";
 
 const { knexMock, rawMock } = vi.hoisted(() => {
   const rawMock = vi.fn().mockResolvedValue(undefined);
@@ -1228,10 +1237,10 @@ describe('PostgresAdapter list count (#17420)', () => {
     const { countQuery, dataQuery } = await runListQuery({ count: 3, conditions });
 
     expect(countQuery.sql).toContain(
-      `lower(btrim(availability::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?)`,
+      `lower(btrim(availability::text, ${STATUS_BTRIM_CHARS_SQL})) IN (?, ?)`,
     );
     expect(dataQuery.sql).toContain(
-      `lower(btrim(availability::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?)`,
+      `lower(btrim(availability::text, ${STATUS_BTRIM_CHARS_SQL})) IN (?, ?)`,
     );
     expect(countQuery.bindings.slice(0, 2)).toEqual(['sold', 'closed']);
     expect(dataQuery.bindings.slice(0, 2)).toEqual(['sold', 'closed']);
@@ -1253,10 +1262,10 @@ describe('PostgresAdapter list count (#17420)', () => {
     });
 
     expect(dataQuery.sql).toContain(
-      `lower(btrim(status::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?)`,
+      `lower(btrim(status::text, ${STATUS_BTRIM_CHARS_SQL})) IN (?, ?)`,
     );
     expect(countQuery.sql).toContain(
-      `lower(btrim(status::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?)`,
+      `lower(btrim(status::text, ${STATUS_BTRIM_CHARS_SQL})) IN (?, ?)`,
     );
     expect(dataQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
     expect(countQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
@@ -1281,7 +1290,7 @@ describe('PostgresAdapter list count (#17420)', () => {
       ],
     });
 
-    const statusInPredicate = `lower(btrim(status::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?)`;
+    const statusInPredicate = `lower(btrim(status::text, ${STATUS_BTRIM_CHARS_SQL})) IN (?, ?)`;
     expect(dataQuery.sql).toContain(statusInPredicate);
     expect(countQuery.sql).toContain(statusInPredicate);
     expect(dataQuery.bindings.slice(0, 2)).toEqual(['active', 'active']);
@@ -1290,6 +1299,18 @@ describe('PostgresAdapter list count (#17420)', () => {
       { id: '1', price: 10, status: ' active ' },
       { id: '2', price: 10, status: 'active\r' },
     ]);
+  });
+
+  it('keeps the status btrim charset valid on PostgreSQL: no \\v escape, chr() guarded by encoding (#36278)', () => {
+    expect(STATUS_VALUE_BTRIM_CHARS_SQL).toBe(STATUS_BTRIM_CHARS_SQL);
+    // `E'\\v'` is the letter `v` in PostgreSQL, so btrim stripped it from `aktiv`/`visible`.
+    expect(STATUS_VALUE_BTRIM_CHARS_SQL).not.toContain('\\v');
+    expect(STATUS_VALUE_BTRIM_CHARS_SQL).toContain('\\x0B');
+    // A bare chr(160)/chr(65279) raises SQLSTATE 54000 on a non-UTF8 database.
+    expect(STATUS_VALUE_BTRIM_CHARS_SQL).not.toMatch(/chr\(\d/);
+    expect(STATUS_VALUE_BTRIM_CHARS_SQL).toContain(
+      "chr(CASE WHEN getdatabaseencoding() = 'UTF8' THEN 65279 ELSE 32 END)",
+    );
   });
 
   it('matches a blank status token with IS NULL as well as an empty string', async () => {
@@ -1306,7 +1327,7 @@ describe('PostgresAdapter list count (#17420)', () => {
       ],
     });
 
-    const blankPredicate = `(lower(btrim(status::text, E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279))) IN (?, ?) OR status IS NULL)`;
+    const blankPredicate = `(lower(btrim(status::text, ${STATUS_BTRIM_CHARS_SQL})) IN (?, ?) OR status IS NULL)`;
     expect(dataQuery.sql).toContain(blankPredicate);
     expect(countQuery.sql).toContain(blankPredicate);
     expect(dataQuery.bindings.slice(0, 2)).toEqual(['', 'for_sale']);

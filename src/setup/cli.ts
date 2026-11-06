@@ -39,6 +39,7 @@ export async function validateConnectorConfig(
   const {
     formatUnknownStatusWarning,
     formatUnservableImageWarning,
+    formatUnsearchableRelationWarning,
     formatUnservableListingUrlWarning,
     formatWireContractViolationWarning,
     probeInventoryResource,
@@ -56,6 +57,7 @@ export async function validateConnectorConfig(
   let wireContractViolationIds: string[];
   let unservableImageIds: string[];
   let unservableListingUrlIds: string[];
+  let unsearchableRelations: string[];
   try {
     await dbAdapter.connect();
     ({
@@ -63,6 +65,7 @@ export async function validateConnectorConfig(
       wireContractViolationIds,
       unservableImageIds,
       unservableListingUrlIds,
+      unsearchableRelations,
     } = await probeInventoryResource(dbAdapter, inventoryResource));
   } finally {
     await dbAdapter.disconnect();
@@ -77,6 +80,8 @@ export async function validateConnectorConfig(
   if (unservableImageWarning) console.warn(`Warning: ${unservableImageWarning}`);
   const unservableListingUrlWarning = formatUnservableListingUrlWarning(unservableListingUrlIds);
   if (unservableListingUrlWarning) console.warn(`Warning: ${unservableListingUrlWarning}`);
+  const unsearchableRelationWarning = formatUnsearchableRelationWarning(unsearchableRelations);
+  if (unsearchableRelationWarning) console.warn(`Warning: ${unsearchableRelationWarning}`);
 
   return {
     unknownStatusValues,

@@ -264,8 +264,16 @@ export const STATUS_VALUE_TRIM_CHARS = ' \t\n\r\f\v\u00A0\uFEFF';
 /**
  * `btrim` second argument for {@link STATUS_VALUE_TRIM_CHARS}. A SQL constant,
  * never a `?` binding — Knex would steal it from the IN placeholders.
+ *
+ * Two PostgreSQL traps (#36278): `\v` is not an escape (an unknown one is the
+ * character itself, so `E'\v'` strips a lowercase `v`) — use `\x0B`; and
+ * `chr(160)` / `chr(65279)` raise SQLSTATE 54000 outside a UTF8 database, so
+ * the `CASE` sits inside `chr(...)` (a `CASE` around `chr(...)` is folded at
+ * plan time and still fails) and falls back to a space, already in the set.
+ * NBSP/BOM are therefore only trimmed by SQL on UTF8 databases.
  */
-export const STATUS_VALUE_BTRIM_CHARS_SQL = "E' \\t\\n\\r\\f\\v' || chr(160) || chr(65279)";
+export const STATUS_VALUE_BTRIM_CHARS_SQL =
+  "E' \\t\\n\\r\\f\\x0B' || chr(CASE WHEN getdatabaseencoding() = 'UTF8' THEN 160 ELSE 32 END) || chr(CASE WHEN getdatabaseencoding() = 'UTF8' THEN 65279 ELSE 32 END)";
 
 /** Strip {@link STATUS_VALUE_TRIM_CHARS} from both ends — JS counterpart of the SQL `btrim`. */
 export function trimStatusValue(value: string): string {

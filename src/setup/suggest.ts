@@ -879,3 +879,30 @@ export function suggestUpdatedAtColumn(columns: IntrospectedColumn[]): string | 
   }
   return null;
 }
+
+const TEXT_JOIN_TYPES = new Set(['text', 'character varying', 'character']);
+const NUMERIC_JOIN_TYPES = new Set([
+  'smallint',
+  'integer',
+  'bigint',
+  'numeric',
+  'real',
+  'double precision',
+]);
+
+/**
+ * Whether PostgreSQL can evaluate `child = parent` for these two join columns.
+ * Integer widths and text widths compare with each other; anything else needs
+ * the same underlying type. Unknown columns are treated as comparable.
+ */
+export function areJoinColumnsComparable(
+  child: IntrospectedColumn | undefined,
+  parent: IntrospectedColumn | undefined,
+): boolean {
+  if (!child || !parent) return true;
+  if (TEXT_JOIN_TYPES.has(child.type) && TEXT_JOIN_TYPES.has(parent.type)) return true;
+  if (NUMERIC_JOIN_TYPES.has(child.type) && NUMERIC_JOIN_TYPES.has(parent.type)) return true;
+  return (
+    child.type === parent.type && (child.udtName ?? child.type) === (parent.udtName ?? parent.type)
+  );
+}

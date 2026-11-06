@@ -1729,171 +1729,180 @@ describe('runWizard', () => {
   });
 
   it.each([
-    { selectedFeatureColumns: ['name'], flattened: true },
-    { selectedFeatureColumns: ['name', 'description'], flattened: false },
-    { selectedFeatureColumns: ['description'], flattened: false },
-  ])('exposes feature columns ($selectedFeatureColumns)', async (testCase) => {
-    const { selectedFeatureColumns, flattened } = testCase;
-    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
-    const previousDirectory = process.cwd();
-    const distinctImageTypes = ['gallery'];
-    const db = Object.assign(vi.fn(), {
-      destroy: vi.fn().mockResolvedValue(undefined),
-      withSchema: vi.fn(() => ({
-        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
-      })),
-      raw: vi.fn(() => Promise.resolve({ rows: distinctImageTypes.map((value) => ({ value })) })),
-    });
-
-    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
-      if (message.startsWith('Database type')) return Promise.resolve('postgres');
-      if (message.startsWith('Which table contains')) return Promise.resolve('Car');
-      if (message.startsWith('Which column is the unique listing id')) {
-        return Promise.resolve('id');
-      }
-      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
-      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
-      if (fieldMatch && ['title', 'price', 'currency', 'description'].includes(fieldMatch[1]!)) {
-        return Promise.resolve(fieldMatch[1]);
-      }
-      return Promise.resolve('\0unmapped');
-    });
-    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
-      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
-      if (message.startsWith('Port')) return Promise.resolve('5432');
-      if (message.startsWith('Database name')) return Promise.resolve('catalog');
-      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('merchant_data');
-      if (message.startsWith('Public DNS name')) {
-        return Promise.resolve('connector.merchant.example');
-      }
-      if (message.startsWith('Public site origin'))
-        return Promise.resolve('https://shop.example.com');
-      if (message.startsWith('Public site origin for relative image paths')) {
-        return Promise.resolve('https://shop.example.com');
-      }
-      return Promise.resolve('reader');
-    });
-    promptMocks.password.mockResolvedValue('p@ss#word');
-    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
-      Promise.resolve(!message.startsWith('Does this database require TLS')),
-    );
-    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
-      if (message.startsWith('Select additional')) return Promise.resolve([]);
-      if (message.startsWith('Which columns should be searchable')) {
-        return Promise.resolve(['title']);
-      }
-      if (message.startsWith('Which filters should be available')) return Promise.resolve([]);
-      if (message.startsWith('Select columns from Image')) return Promise.resolve(['url']);
-      if (message.startsWith('Select columns from CarFeatures')) {
-        return Promise.resolve(selectedFeatureColumns);
-      }
-      if (message.startsWith('Which "type" values on Image')) return Promise.resolve([]);
-      return Promise.resolve([]);
-    });
-    vi.mocked(introspectDatabase).mockResolvedValueOnce({
-      db: db as never,
-      result: {
-        tables: [
-          {
-            name: 'Car',
-            kind: 'table',
-            rowCount: 50,
-            columns: [
-              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
-              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
-              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
-              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
-              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
-            ],
-          },
-          {
-            // README's example images table: a URL plus a `type` column that
-            // also stores non-photo rows (thumbnails, icons, invoices) mixed
-            // in with gallery/featured photos.
-            name: 'Image',
-            kind: 'table',
-            rowCount: 500,
-            columns: [
-              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
-              { name: 'carId', type: 'uuid', nullable: false, isPrimaryKey: false },
-              { name: 'thumbnail_url', type: 'text', nullable: false, isPrimaryKey: false },
-              { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
-            ],
-          },
-          {
-            name: 'CarFeatures',
-            kind: 'table',
-            rowCount: 120,
-            columns: [
-              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
-              { name: 'carId', type: 'uuid', nullable: false, isPrimaryKey: false },
-              { name: 'filename', type: 'text', nullable: false, isPrimaryKey: false },
-              { name: 'name', type: 'text', nullable: false, isPrimaryKey: false },
-              { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
-            ],
-          },
-        ],
-        foreignKeys: [
-          {
-            constraintName: 'Image_carId_fkey',
-            fromTable: 'Image',
-            fromColumn: 'carId',
-            toTable: 'Car',
-            toColumn: 'id',
-          },
-          {
-            constraintName: 'CarFeatures_carId_fkey',
-            fromTable: 'CarFeatures',
-            fromColumn: 'carId',
-            toTable: 'Car',
-            toColumn: 'id',
-          },
-        ],
-      },
-      retriedWithTls: false,
-    });
-
-    try {
-      process.chdir(directory);
-      await runWizard();
-
-      const config = loadExistingSetupConfig(
-        join(directory, 'connector.config.yml'),
-        join(directory, '.env'),
-      );
-      const relations = config.resources.inventory.relations ?? {};
-
-      expect(relations['Image__carId']).toMatchObject({
-        table: 'Image',
-        imageUrlField: 'url',
+    { selectedFeatureColumns: ['name'], flattened: true, featureCarIdType: 'uuid' },
+    { selectedFeatureColumns: ['name', 'description'], flattened: false, featureCarIdType: 'uuid' },
+    { selectedFeatureColumns: ['description'], flattened: false, featureCarIdType: 'uuid' },
+    // The join compares the two columns directly, so a flattened relation over
+    // incomparable types must not be searchable (#36279).
+    { selectedFeatureColumns: ['name'], flattened: true, featureCarIdType: 'integer' },
+  ])(
+    'exposes feature columns ($selectedFeatureColumns, carId $featureCarIdType)',
+    async (testCase) => {
+      const { selectedFeatureColumns, flattened, featureCarIdType } = testCase;
+      const searchable = featureCarIdType === 'uuid';
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const distinctImageTypes = ['gallery'];
+      const db = Object.assign(vi.fn(), {
+        destroy: vi.fn().mockResolvedValue(undefined),
+        withSchema: vi.fn(() => ({
+          table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+        })),
+        raw: vi.fn(() => Promise.resolve({ rows: distinctImageTypes.map((value) => ({ value })) })),
       });
-      expect(relations['CarFeatures__carId']).toMatchObject({
-        table: 'CarFeatures',
-        publishAs: 'features',
-        fields: Object.fromEntries(
-          selectedFeatureColumns.map((column) => [column, quoteIfNeeded(column)]),
-        ),
-      });
-      expect(relations['CarFeatures__carId']?.flatten).toBe(flattened ? 'name' : undefined);
-      expect(relations['CarFeatures__carId']?.searchable).toBe(flattened ? true : undefined);
 
-      const featureRow = Object.fromEntries(
-        selectedFeatureColumns.map((column) => [
-          column,
-          column === 'name' ? 'ABS' : 'Anti-lock braking system',
-        ]),
+      promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+        if (message.startsWith('Database type')) return Promise.resolve('postgres');
+        if (message.startsWith('Which table contains')) return Promise.resolve('Car');
+        if (message.startsWith('Which column is the unique listing id')) {
+          return Promise.resolve('id');
+        }
+        if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+        const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+        if (fieldMatch && ['title', 'price', 'currency', 'description'].includes(fieldMatch[1]!)) {
+          return Promise.resolve(fieldMatch[1]);
+        }
+        return Promise.resolve('\0unmapped');
+      });
+      promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+        if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+        if (message.startsWith('Port')) return Promise.resolve('5432');
+        if (message.startsWith('Database name')) return Promise.resolve('catalog');
+        if (message.startsWith('PostgreSQL schema')) return Promise.resolve('merchant_data');
+        if (message.startsWith('Public DNS name')) {
+          return Promise.resolve('connector.merchant.example');
+        }
+        if (message.startsWith('Public site origin'))
+          return Promise.resolve('https://shop.example.com');
+        if (message.startsWith('Public site origin for relative image paths')) {
+          return Promise.resolve('https://shop.example.com');
+        }
+        return Promise.resolve('reader');
+      });
+      promptMocks.password.mockResolvedValue('p@ss#word');
+      promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+        Promise.resolve(!message.startsWith('Does this database require TLS')),
       );
-      const mapped = mapRowToInventoryItem(
-        { id: 'car-1', title: 'Car', price: 100, currency: 'SAR' },
-        config.resources.inventory,
-        new Map([['CarFeatures__carId', new Map([['car-1', [featureRow]]])]]),
-      );
-      expect(mapped.attributes['features']).toEqual(flattened ? ['ABS'] : [featureRow]);
-    } finally {
-      process.chdir(previousDirectory);
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
+      promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
+        if (message.startsWith('Select additional')) return Promise.resolve([]);
+        if (message.startsWith('Which columns should be searchable')) {
+          return Promise.resolve(['title']);
+        }
+        if (message.startsWith('Which filters should be available')) return Promise.resolve([]);
+        if (message.startsWith('Select columns from Image')) return Promise.resolve(['url']);
+        if (message.startsWith('Select columns from CarFeatures')) {
+          return Promise.resolve(selectedFeatureColumns);
+        }
+        if (message.startsWith('Which "type" values on Image')) return Promise.resolve([]);
+        return Promise.resolve([]);
+      });
+      vi.mocked(introspectDatabase).mockResolvedValueOnce({
+        db: db as never,
+        result: {
+          tables: [
+            {
+              name: 'Car',
+              kind: 'table',
+              rowCount: 50,
+              columns: [
+                { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+                { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+                { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+                { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+                { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+              ],
+            },
+            {
+              // README's example images table: a URL plus a `type` column that
+              // also stores non-photo rows (thumbnails, icons, invoices) mixed
+              // in with gallery/featured photos.
+              name: 'Image',
+              kind: 'table',
+              rowCount: 500,
+              columns: [
+                { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+                { name: 'carId', type: 'uuid', nullable: false, isPrimaryKey: false },
+                { name: 'thumbnail_url', type: 'text', nullable: false, isPrimaryKey: false },
+                { name: 'url', type: 'text', nullable: false, isPrimaryKey: false },
+              ],
+            },
+            {
+              name: 'CarFeatures',
+              kind: 'table',
+              rowCount: 120,
+              columns: [
+                { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+                { name: 'carId', type: featureCarIdType, nullable: false, isPrimaryKey: false },
+                { name: 'filename', type: 'text', nullable: false, isPrimaryKey: false },
+                { name: 'name', type: 'text', nullable: false, isPrimaryKey: false },
+                { name: 'description', type: 'text', nullable: true, isPrimaryKey: false },
+              ],
+            },
+          ],
+          foreignKeys: [
+            {
+              constraintName: 'Image_carId_fkey',
+              fromTable: 'Image',
+              fromColumn: 'carId',
+              toTable: 'Car',
+              toColumn: 'id',
+            },
+            {
+              constraintName: 'CarFeatures_carId_fkey',
+              fromTable: 'CarFeatures',
+              fromColumn: 'carId',
+              toTable: 'Car',
+              toColumn: 'id',
+            },
+          ],
+        },
+        retriedWithTls: false,
+      });
+
+      try {
+        process.chdir(directory);
+        await runWizard();
+
+        const config = loadExistingSetupConfig(
+          join(directory, 'connector.config.yml'),
+          join(directory, '.env'),
+        );
+        const relations = config.resources.inventory.relations ?? {};
+
+        expect(relations['Image__carId']).toMatchObject({
+          table: 'Image',
+          imageUrlField: 'url',
+        });
+        expect(relations['CarFeatures__carId']).toMatchObject({
+          table: 'CarFeatures',
+          publishAs: 'features',
+          fields: Object.fromEntries(
+            selectedFeatureColumns.map((column) => [column, quoteIfNeeded(column)]),
+          ),
+        });
+        expect(relations['CarFeatures__carId']?.flatten).toBe(flattened ? 'name' : undefined);
+        expect(relations['CarFeatures__carId']?.searchable).toBe(
+          flattened ? searchable : undefined,
+        );
+
+        const featureRow = Object.fromEntries(
+          selectedFeatureColumns.map((column) => [
+            column,
+            column === 'name' ? 'ABS' : 'Anti-lock braking system',
+          ]),
+        );
+        const mapped = mapRowToInventoryItem(
+          { id: 'car-1', title: 'Car', price: 100, currency: 'SAR' },
+          config.resources.inventory,
+          new Map([['CarFeatures__carId', new Map([['car-1', [featureRow]]])]]),
+        );
+        expect(mapped.attributes['features']).toEqual(flattened ? ['ABS'] : [featureRow]);
+      } finally {
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.each([
     {

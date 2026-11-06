@@ -20,7 +20,10 @@ import {
 import {
   DEFAULT_PAGE_SIZE,
   getDefaultSort,
+  excludeRelationFromSearch,
+  getRelationSearchExpressions,
   getSearchableColumns,
+  getUnsearchableRelationNames,
 } from '../mapping/query-builder.js';
 
 let cachedVersion: string | null = null;
@@ -177,6 +180,11 @@ export interface ResourceHealth {
   unservableImageIds?: string[];
   /** externalIds of sampled rows with a listing URL that needs a public origin. */
   unservableListingUrlIds?: string[];
+  /**
+   * Flattened relations left out of free-text search because their join
+   * columns have incomparable types. Their values are still served (#36279).
+   */
+  unsearchableRelations?: string[];
 }
 
 export interface InventoryResourceProbeResult {
@@ -188,10 +196,16 @@ export interface InventoryResourceProbeResult {
   unservableImageIds: string[];
   /** externalIds of sampled rows served without a customer-facing listing URL. */
   unservableListingUrlIds: string[];
+  /** Flattened relations served but left out of search (join types incomparable). */
+  unsearchableRelations: string[];
 }
 
 export type ResourceHealthCheck = () => Promise<ResourceHealth>;
 export type AuditHealthCheck = () => AuditHealth;
+
+function errorCode(error: unknown): unknown {
+  return typeof error === 'object' && error !== null ? Reflect.get(error, 'code') : undefined;
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -220,7 +234,7 @@ export async function probeInventoryResource(
   // Search and configured filters do not need to be selected for a normal
   // inventory response, but they are column expressions the resource can use.
   // Include them in the probe so startup catches those latent mapping errors.
-  const searchableColumns = getSearchableColumns(resourceConfig);
+  let searchableColumns = getSearchableColumns(resourceConfig);
   // `type: string` filters compile to `${column}::text ILIKE` on the live
   // `=` branch (`applyBaseFilterAndConditions`). Probe them the same way so
   // an enum/integer status mapping the query path can serve is not classified
@@ -290,6 +304,31 @@ export async function probeInventoryResource(
     return wrapped;
   };
 
+  // Re-probes each flattened relation's search subquery alone after the
+  // combined probe failed with `42883`, and removes the ones that fail the
+  // same way. Returns false when no relation was at fault, so the original
+  // error still takes the resource offline.
+  const excludeUncomparableSearchRelations = async (error: unknown): Promise<boolean> => {
+    if (errorCode(error) !== '42883') return false;
+    let excluded = false;
+    for (const { name, expression } of getRelationSearchExpressions(resourceConfig)) {
+      try {
+        await dbAdapter.probeSearchableColumns({
+          ...(resourceConfig.schema ? { schema: resourceConfig.schema } : {}),
+          table: resourceConfig.table,
+          columns: [expression],
+          probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
+          ...(resourceConfig.baseFilter ? { baseFilter: resourceConfig.baseFilter } : {}),
+        });
+      } catch (relationError) {
+        if (errorCode(relationError) !== '42883') continue;
+        excludeRelationFromSearch(resourceConfig, name);
+        excluded = true;
+      }
+    }
+    return excluded;
+  };
+
   try {
     ({ rows } = await runProbeQuery([], DEFAULT_PAGE_SIZE));
     // Selecting a searchable or filter column only proves it exists. Real
@@ -298,11 +337,14 @@ export async function probeInventoryResource(
     // CASE expression. This forces those expressions through a zero-row
     // `WHERE FALSE` check — never a real query over the merchant's table
     // (#26342) — rather than emptying the mapping sample.
-    if (
-      searchableColumns.length > 0 ||
-      stringFilterColumns.length > 0 ||
-      rangeFilterColumns.length > 0
-    ) {
+    const runSearchProbe = async () => {
+      if (
+        searchableColumns.length === 0 &&
+        stringFilterColumns.length === 0 &&
+        rangeFilterColumns.length === 0
+      ) {
+        return;
+      }
       await dbAdapter.probeSearchableColumns({
         ...(resourceConfig.schema ? { schema: resourceConfig.schema } : {}),
         table: resourceConfig.table,
@@ -312,6 +354,17 @@ export async function probeInventoryResource(
         probeTerm: SEARCHABLE_COLUMN_PROBE_TERM,
         ...(resourceConfig.baseFilter ? { baseFilter: resourceConfig.baseFilter } : {}),
       });
+    };
+    try {
+      await runSearchProbe();
+    } catch (error) {
+      // A flattened relation's search subquery compares the child join column
+      // with the parent key directly, so incomparable types raise `42883` at
+      // parse time. Free-text search over features is optional: serve the
+      // catalogue and drop only that relation from search (#36279).
+      if (!(await excludeUncomparableSearchRelations(error))) throw error;
+      searchableColumns = getSearchableColumns(resourceConfig);
+      await runSearchProbe();
     }
   } catch (error) {
     throw wrapProbeError(
@@ -471,6 +524,7 @@ export async function probeInventoryResource(
       wireContractViolationIds,
       unservableImageIds,
       unservableListingUrlIds,
+      unsearchableRelations: getUnsearchableRelationNames(resourceConfig),
     };
 
   const observedStatuses = await probeStatusValues(dbAdapter, resourceConfig, statusColumn, rows);
@@ -493,6 +547,7 @@ export async function probeInventoryResource(
     wireContractViolationIds,
     unservableImageIds,
     unservableListingUrlIds,
+    unsearchableRelations: getUnsearchableRelationNames(resourceConfig),
   };
 }
 
@@ -615,6 +670,24 @@ export function formatUnservableListingUrlWarning(
   );
 }
 
+/**
+ * One operator-facing line naming the flattened relations left out of search
+ * because their join columns have incomparable types, or `null` when none is.
+ * The relation's values are still served on every listing (#36279).
+ */
+export function formatUnsearchableRelationWarning(
+  unsearchableRelations: readonly string[] = [],
+): string | null {
+  if (unsearchableRelations.length === 0) return null;
+
+  const names = unsearchableRelations.map((name) => JSON.stringify(name)).join(', ');
+  return (
+    `Flattened relations ${names} are served but not searched: the child join column and the ` +
+    'parent key have types PostgreSQL cannot compare. Set `searchable: false` on the relation to ' +
+    'silence this, or expose a view that casts one side so both join columns share a type.'
+  );
+}
+
 export function createResourceHealthCheck(
   dbAdapter: DatabaseAdapter,
   resourceConfig: InventoryResourceConfig,
@@ -641,12 +714,14 @@ export function createResourceHealthCheck(
             wireContractViolationIds,
             unservableImageIds,
             unservableListingUrlIds,
+            unsearchableRelations,
           }) => ({
             ok: true,
             ...(unknownStatusValues.length > 0 ? { unknownStatusValues } : {}),
             ...(wireContractViolationIds.length > 0 ? { wireContractViolationIds } : {}),
             ...(unservableImageIds.length > 0 ? { unservableImageIds } : {}),
             ...(unservableListingUrlIds.length > 0 ? { unservableListingUrlIds } : {}),
+            ...(unsearchableRelations.length > 0 ? { unsearchableRelations } : {}),
           }),
         )
         .catch((error: unknown) => ({
@@ -733,6 +808,9 @@ function buildDiagnosticFields(snapshot: HealthSnapshot): Record<string, unknown
       : {}),
     ...(resourceHealth?.unservableListingUrlIds?.length
       ? { unservableListingUrlIds: resourceHealth.unservableListingUrlIds }
+      : {}),
+    ...(resourceHealth?.unsearchableRelations?.length
+      ? { unsearchableRelations: resourceHealth.unsearchableRelations }
       : {}),
   };
 }

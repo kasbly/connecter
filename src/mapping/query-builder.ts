@@ -42,15 +42,38 @@ function flattenedRelationSearchOrderBy(
 }
 
 /**
- * Returns main-table searchable columns and scalar subqueries for flattened
- * child relations. This preserves the existing term grouping: one term can
- * match either a listing column or a flattened feature value.
+ * Flattened relations whose search subquery the database rejected (SQLSTATE
+ * `42883`, e.g. a `varchar` child join column against an `integer` parent
+ * key, #36279). The health probe records them here so the same resource's
+ * live search leaves them out instead of failing every read.
  */
-export function getSearchableColumns(config: InventoryResourceConfig): string[] {
-  const columns = [...(config.searchableColumns ?? [])];
+const unsearchableRelations = new WeakMap<InventoryResourceConfig, Set<string>>();
 
-  for (const relation of Object.values(config.relations ?? {})) {
-    if (!relation.flatten || relation.searchable === false) continue;
+/** Leaves one flattened relation out of free-text search for this resource. */
+export function excludeRelationFromSearch(config: InventoryResourceConfig, name: string): void {
+  const names = unsearchableRelations.get(config) ?? new Set<string>();
+  names.add(name);
+  unsearchableRelations.set(config, names);
+}
+
+/** Relation names the probe removed from search because their join cannot compile. */
+export function getUnsearchableRelationNames(config: InventoryResourceConfig): string[] {
+  return [...(unsearchableRelations.get(config) ?? [])];
+}
+
+/**
+ * The search subquery of every flattened relation still included in search,
+ * keyed by relation name. Each is a standalone scalar expression, so the
+ * health probe can test one in isolation.
+ */
+export function getRelationSearchExpressions(
+  config: InventoryResourceConfig,
+): { name: string; expression: string }[] {
+  const expressions: { name: string; expression: string }[] = [];
+  const excluded = unsearchableRelations.get(config);
+
+  for (const [name, relation] of Object.entries(config.relations ?? {})) {
+    if (!relation.flatten || relation.searchable === false || excluded?.has(name)) continue;
 
     const flattenedColumn = relation.fields[relation.flatten];
     if (
@@ -73,17 +96,31 @@ export function getSearchableColumns(config: InventoryResourceConfig): string[] 
       flattenedColumn,
       relation.orderBy,
     );
-    columns.push(
-      `COALESCE((SELECT string_agg(${RELATION_SEARCH_ALIAS}_bounded.value, ' ') FROM (` +
+    expressions.push({
+      name,
+      expression:
+        `COALESCE((SELECT string_agg(${RELATION_SEARCH_ALIAS}_bounded.value, ' ') FROM (` +
         `SELECT ${RELATION_SEARCH_ALIAS}.${flattenedColumn}::text AS value ` +
         `FROM ${quoteIdentifier(relationSchema)}.${quoteIdentifier(relation.table)} AS ${RELATION_SEARCH_ALIAS} ` +
         `WHERE ${RELATION_SEARCH_ALIAS}.${relation.foreignKey} = ${quoteIdentifier(inventorySchema)}.${quoteIdentifier(config.table)}.${relation.referenceKey}${relationFilter} ` +
         `ORDER BY ${orderByClause} ` +
         `LIMIT ${RELATION_ROWS_PER_PARENT_LIMIT}) AS ${RELATION_SEARCH_ALIAS}_bounded), '')`,
-    );
+    });
   }
 
-  return columns;
+  return expressions;
+}
+
+/**
+ * Returns main-table searchable columns and scalar subqueries for flattened
+ * child relations. This preserves the existing term grouping: one term can
+ * match either a listing column or a flattened feature value.
+ */
+export function getSearchableColumns(config: InventoryResourceConfig): string[] {
+  return [
+    ...(config.searchableColumns ?? []),
+    ...getRelationSearchExpressions(config).map(({ expression }) => expression),
+  ];
 }
 
 export interface ParsedQuery {

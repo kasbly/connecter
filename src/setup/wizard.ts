@@ -14,6 +14,7 @@ import {
   compareSetupTablesByRowCount,
   formatSetupTableChoice,
   introspectDatabase,
+  type IntrospectedColumn,
   type IntrospectedTable,
 } from './introspect.js';
 import {
@@ -34,6 +35,7 @@ import {
   suggestImageTypeColumn,
   suggestJoinColumn,
   suggestReferenceColumn,
+  areJoinColumnsComparable,
   classifyRelationType,
   isTextColumn,
   getInStockFilterDefault,
@@ -52,6 +54,7 @@ import { createDatabaseAdapter } from '../db/adapter.factory.js';
 import {
   formatUnknownStatusWarning,
   formatUnservableImageWarning,
+  formatUnsearchableRelationWarning,
   formatUnservableListingUrlWarning,
   formatWireContractViolationWarning,
   isTransientProbeError,
@@ -563,6 +566,7 @@ async function collectConfiguredRelation(options: {
   relTable: IntrospectedTable;
   selectedSchema: string;
   selectedTableName: string;
+  parentColumns: IntrospectedColumn[];
   idColumn: string;
   existingRelation: RelationConfig | undefined;
   existingRelationName: string | undefined;
@@ -574,6 +578,7 @@ async function collectConfiguredRelation(options: {
     relTable,
     selectedSchema,
     selectedTableName,
+    parentColumns,
     idColumn,
     existingRelation,
     existingRelationName,
@@ -738,7 +743,19 @@ async function collectConfiguredRelation(options: {
       relation['flatten'] = nameCol.name;
       // Keep this explicit in generated config. Runtime also treats omitted
       // legacy values as enabled so upgraded connectors gain the behavior.
-      relation['searchable'] = true;
+      const joinTypesComparable = areJoinColumnsComparable(
+        relTable.columns.find((column) => column.name === suggestion.foreignKeyColumn),
+        parentColumns.find((column) => column.name === suggestion.toColumn),
+      );
+      relation['searchable'] = joinTypesComparable;
+      if (!joinTypesComparable) {
+        // Search compares the join columns directly (42883 otherwise, #36279).
+        console.log(
+          `\nNote: ${suggestion.table}.${suggestion.foreignKeyColumn} and ` +
+            `${selectedTableName}.${suggestion.toColumn} have different types, so ` +
+            `${suggestion.table} is served as features but not searched.`,
+        );
+      }
     }
   }
 
@@ -1493,6 +1510,7 @@ export async function runWizard(): Promise<void> {
         relTable,
         selectedSchema,
         selectedTableName,
+        parentColumns: selectedTable.columns,
         idColumn,
         existingRelation: existingRelationEntry?.[1],
         existingRelationName: existingRelationEntry?.[0],
@@ -1589,6 +1607,7 @@ export async function runWizard(): Promise<void> {
       relTable,
       selectedSchema,
       selectedTableName,
+      parentColumns: selectedTable.columns,
       idColumn,
       existingRelation: existingRelationEntry?.[1],
       existingRelationName: existingRelationEntry?.[0],
@@ -1874,6 +1893,7 @@ export async function runWizard(): Promise<void> {
       wireContractViolationIds,
       unservableImageIds,
       unservableListingUrlIds,
+      unsearchableRelations,
     } = await probeInventoryResource(validationAdapter, config.resources.inventory);
     // Mirrors `npm run validate` (cli.ts): an unmapped source status is silently
     // reported as unknownStatusPolicy and withheld from customers, so the
@@ -1887,6 +1907,8 @@ export async function runWizard(): Promise<void> {
     if (imageWarning) console.warn(`Warning: ${imageWarning}`);
     const listingUrlWarning = formatUnservableListingUrlWarning(unservableListingUrlIds);
     if (listingUrlWarning) console.warn(`Warning: ${listingUrlWarning}`);
+    const unsearchableRelationWarning = formatUnsearchableRelationWarning(unsearchableRelations);
+    if (unsearchableRelationWarning) console.warn(`Warning: ${unsearchableRelationWarning}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const isWireContractFailure = message.startsWith(

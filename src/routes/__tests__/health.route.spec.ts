@@ -8,6 +8,7 @@ import {
   UNKNOWN_STATUS_VALUE_LIMIT,
   createResourceHealthCheck,
   formatUnknownStatusWarning,
+  formatUnsearchableRelationWarning,
   formatUnservableImageWarning,
   formatUnservableListingUrlWarning,
   formatWireContractViolationWarning,
@@ -318,6 +319,77 @@ describe('health route', () => {
       resourceError: expect.stringContaining('operator does not exist'),
     });
     await app.close();
+  });
+
+  it('serves inventory and leaves a flattened relation out of search when its join types are incomparable (#36279)', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    const mismatch = Object.assign(
+      new Error('operator does not exist: character varying = integer'),
+      { code: '42883' },
+    );
+    // Only the combined probe and the isolated `features` expression fail.
+    const probeSearchableColumns = vi.fn(
+      async ({ columns }: { columns: string[] }): Promise<void> => {
+        if (columns.some((column) => column.includes('"CarFeature"'))) throw mismatch;
+      },
+    );
+    dbAdapter.probeSearchableColumns = probeSearchableColumns;
+    dbAdapter.queryRelation = vi.fn().mockResolvedValue(new Map());
+    const resource = {
+      ...inventoryResource,
+      searchableColumns: ['title'],
+      relations: {
+        features: {
+          table: 'CarFeature',
+          foreignKey: 'carId',
+          referenceKey: 'id',
+          fields: { name: 'name' },
+          flatten: 'name',
+        },
+      },
+    };
+    registerHealthRoute(app, dbAdapter, createResourceHealthCheck(dbAdapter, resource));
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'ok',
+      resources: 'ok',
+      unsearchableRelations: ['features'],
+    });
+    // Live search now omits the relation, so it cannot fail the read.
+    expect(buildQuery({ search: 'abs' }, resource).conditions.map((c) => c.column)).toEqual([
+      'title',
+    ]);
+    expect(formatUnsearchableRelationWarning(['features'])).toContain('"features"');
+    await app.close();
+  });
+
+  it('still fails the resource when 42883 comes from a plain searchable column, not a relation (#36279)', async () => {
+    const dbAdapter = createHealthAdapter(true);
+    dbAdapter.probeSearchableColumns = vi.fn().mockRejectedValue(
+      Object.assign(new Error('operator does not exist: integer ~~* unknown'), {
+        code: '42883',
+      }),
+    );
+
+    await expect(
+      probeInventoryResource(dbAdapter, {
+        ...inventoryResource,
+        searchableColumns: ['state'],
+        relations: {
+          features: {
+            table: 'CarFeature',
+            foreignKey: 'carId',
+            referenceKey: 'id',
+            fields: { name: 'name' },
+            flatten: 'name',
+          },
+        },
+      }),
+    ).rejects.toThrow('operator does not exist');
   });
 
   it('reports a healthy resource when a `type: string` filter column is mapped to an enum column (#27056)', async () => {
