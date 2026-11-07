@@ -98,6 +98,7 @@ describe('validate reporting', () => {
       wireContractViolationIds: [],
       unservableImageIds: [],
       unservableListingUrlIds: [],
+      unreadableUpdatedAtIds: [],
     });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"under_offer"'));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('RESERVED'));
@@ -144,6 +145,7 @@ describe('validate reporting', () => {
       wireContractViolationIds: ['42'],
       unservableImageIds: [],
       unservableListingUrlIds: [],
+      unreadableUpdatedAtIds: [],
     });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"42"'));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('withheld from customers'));
@@ -184,6 +186,7 @@ describe('validate reporting', () => {
       wireContractViolationIds: [],
       unservableImageIds: ['1', '2'],
       unservableListingUrlIds: [],
+      unreadableUpdatedAtIds: [],
     });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('absolute http(s) URLs'));
     expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('withheld from customers'));

@@ -23,6 +23,8 @@ export interface ConnectorValidationResult {
   unservableImageIds: string[];
   /** Sampled listing ids whose mapped customer URL needs a public origin. */
   unservableListingUrlIds: string[];
+  /** Sampled listing ids served with `updatedAt: null` for an unreadable text date. */
+  unreadableUpdatedAtIds: string[];
 }
 
 /**
@@ -41,6 +43,7 @@ export async function validateConnectorConfig(
     formatUnservableImageWarning,
     formatUnsearchableRelationWarning,
     formatUnservableListingUrlWarning,
+    formatUnreadableUpdatedAtWarning,
     formatWireContractViolationWarning,
     probeInventoryResource,
   } = await import('../routes/health.route.js');
@@ -57,6 +60,7 @@ export async function validateConnectorConfig(
   let wireContractViolationIds: string[];
   let unservableImageIds: string[];
   let unservableListingUrlIds: string[];
+  let unreadableUpdatedAtIds: string[];
   let unsearchableRelations: string[];
   try {
     await dbAdapter.connect();
@@ -65,6 +69,7 @@ export async function validateConnectorConfig(
       wireContractViolationIds,
       unservableImageIds,
       unservableListingUrlIds,
+      unreadableUpdatedAtIds,
       unsearchableRelations,
     } = await probeInventoryResource(dbAdapter, inventoryResource));
   } finally {
@@ -80,6 +85,8 @@ export async function validateConnectorConfig(
   if (unservableImageWarning) console.warn(`Warning: ${unservableImageWarning}`);
   const unservableListingUrlWarning = formatUnservableListingUrlWarning(unservableListingUrlIds);
   if (unservableListingUrlWarning) console.warn(`Warning: ${unservableListingUrlWarning}`);
+  const unreadableUpdatedAtWarning = formatUnreadableUpdatedAtWarning(unreadableUpdatedAtIds);
+  if (unreadableUpdatedAtWarning) console.warn(`Warning: ${unreadableUpdatedAtWarning}`);
   const unsearchableRelationWarning = formatUnsearchableRelationWarning(unsearchableRelations);
   if (unsearchableRelationWarning) console.warn(`Warning: ${unsearchableRelationWarning}`);
 
@@ -89,6 +96,7 @@ export async function validateConnectorConfig(
     wireContractViolationIds,
     unservableImageIds,
     unservableListingUrlIds,
+    unreadableUpdatedAtIds,
   };
 }
 

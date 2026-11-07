@@ -8,6 +8,7 @@ import {
   UNKNOWN_STATUS_VALUE_LIMIT,
   createResourceHealthCheck,
   formatUnknownStatusWarning,
+  formatUnreadableUpdatedAtWarning,
   formatUnsearchableRelationWarning,
   formatUnservableImageWarning,
   formatUnservableListingUrlWarning,
@@ -852,6 +853,44 @@ describe('health route', () => {
     expect(response.json()).not.toHaveProperty('resourceError');
     expect(response.json()).not.toHaveProperty('wireContractViolationIds');
     await app.close();
+  });
+
+  it('keeps the resource healthy and advises when the last-updated column is DD/MM/YYYY text (#36440)', async () => {
+    const app = Fastify();
+    const dbAdapter = createHealthAdapter(true);
+    // Text DESC order puts day 13-31 first, so every row on page 1 is day-first.
+    vi.mocked(dbAdapter.query).mockResolvedValueOnce({
+      rows: [
+        { id: '1', title: 'Test', price: 100, updated_at: '31/10/2026' },
+        { id: '2', title: 'Also test', price: 200, updated_at: '25/12/2026' },
+      ],
+      total: 2,
+    });
+    registerHealthRoute(
+      app,
+      dbAdapter,
+      createResourceHealthCheck(dbAdapter, { ...inventoryResource, updatedAtColumn: 'updated_at' }),
+    );
+
+    const response = await app.inject({ method: 'GET', url: '/diagnostics' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'ok',
+      resources: 'ok',
+      unreadableUpdatedAtIds: ['1', '2'],
+    });
+    expect(response.json()).not.toHaveProperty('resourceError');
+    expect(response.json()).not.toHaveProperty('wireContractViolationIds');
+    expect(dbAdapter.query).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+
+  it('names the column and the fix in the unreadable updatedAt warning (#36440)', () => {
+    expect(formatUnreadableUpdatedAtWarning([])).toBeNull();
+    expect(formatUnreadableUpdatedAtWarning(['1', '2'])).toMatch(
+      /not an ISO date.*"1", "2".*to_timestamp.*updatedAtColumn/s,
+    );
   });
 
   it('keeps the resource healthy when every sampled row stores a jsonb images column of objects (#27421)', async () => {

@@ -5,6 +5,7 @@ import {
   getRelationConfigs,
   getRequiredColumns,
   getSourceStatusValues,
+  hasUnreadableUpdatedAtText,
   mapRowToInventoryItem,
   normalizeImageUrls,
   normalizeListingUrl,
@@ -162,7 +163,7 @@ describe('mapRowToInventoryItem', () => {
     );
   });
 
-  it.each([Infinity, '999999999999999999999', 'not-a-date'])(
+  it.each([Infinity, '999999999999999999999', '2026-13-45'])(
     'keeps invalid updatedAt %j subject to wire validation',
     (updatedAt) => {
       const item = mapRowToInventoryItem(
@@ -173,6 +174,33 @@ describe('mapRowToInventoryItem', () => {
       expect(() => validateInventoryItemWireContract(item)).toThrow('Invalid updatedAt date');
     },
   );
+
+  it.each(['25/12/2026', '03/10/2026', '25.12.2026', 'not-a-date', '31/12/2026 10:00'])(
+    'publishes updatedAt null for unreadable text date %j instead of withholding the listing (#36440)',
+    (updatedAt) => {
+      const row = { id: '1', title: 'Test', price: 100, updatedAt };
+      const item = mapRowToInventoryItem(row, baseConfig, new Map());
+      expect(item.updatedAt).toBeNull();
+      expect(() => validateInventoryItemWireContract(item)).not.toThrow();
+      expect(hasUnreadableUpdatedAtText(row, baseConfig)).toBe(true);
+    },
+  );
+
+  it.each([
+    '2026-12-25',
+    '2026-12-25 10:00:00',
+    '2026-12-25T10:00:00Z',
+    'Fri, 25 Dec 2026 10:00:00 GMT',
+    '1710000000',
+    1710000000,
+    new Date('2026-01-15T10:00:00Z'),
+    null,
+    '',
+  ])('does not report readable updatedAt %j as unreadable (#36440)', (updatedAt) => {
+    expect(
+      hasUnreadableUpdatedAtText({ id: '1', title: 'Test', price: 100, updatedAt }, baseConfig),
+    ).toBe(false);
+  });
 
   it('handles missing updatedAt', () => {
     const configNoUpdate = { ...baseConfig, updatedAtColumn: undefined };

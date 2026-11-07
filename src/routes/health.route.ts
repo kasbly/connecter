@@ -8,6 +8,7 @@ import type { DatabaseAdapter, QueryCondition } from '../db/adapter.interface.js
 import {
   getImageValueProblems,
   getUnservableListingUrlValues,
+  hasUnreadableUpdatedAtText,
   getMappedImageValues,
   getRelationConfigs,
   getRequiredColumns,
@@ -181,6 +182,12 @@ export interface ResourceHealth {
   /** externalIds of sampled rows with a listing URL that needs a public origin. */
   unservableListingUrlIds?: string[];
   /**
+   * externalIds of sampled rows whose text last-updated value is not
+   * ISO-shaped (e.g. DD/MM/YYYY). They are served with `updatedAt: null`; the
+   * fix is a real timestamp column, not withholding the listing (#36440).
+   */
+  unreadableUpdatedAtIds?: string[];
+  /**
    * Flattened relations left out of free-text search because their join
    * columns have incomparable types. Their values are still served (#36279).
    */
@@ -196,6 +203,8 @@ export interface InventoryResourceProbeResult {
   unservableImageIds: string[];
   /** externalIds of sampled rows served without a customer-facing listing URL. */
   unservableListingUrlIds: string[];
+  /** externalIds of sampled rows served with `updatedAt: null` for an unreadable text date. */
+  unreadableUpdatedAtIds: string[];
   /** Flattened relations served but left out of search (join types incomparable). */
   unsearchableRelations: string[];
 }
@@ -442,6 +451,7 @@ export async function probeInventoryResource(
   let wireContractViolationIds: string[] = [];
   const unservableImageIds: string[] = [];
   const unservableListingUrlIds: string[] = [];
+  const unreadableUpdatedAtIds: string[] = [];
   if (rows.length > 0) {
     const evaluateRows = (
       sampleRows: Record<string, unknown>[],
@@ -473,6 +483,9 @@ export async function probeInventoryResource(
         }
         if (getUnservableListingUrlValues(row, resourceConfig).length > 0) {
           unservableListingUrlIds.push(externalId);
+        }
+        if (hasUnreadableUpdatedAtText(row, resourceConfig)) {
+          unreadableUpdatedAtIds.push(externalId);
         }
       }
       return pageViolations;
@@ -524,6 +537,7 @@ export async function probeInventoryResource(
       wireContractViolationIds,
       unservableImageIds,
       unservableListingUrlIds,
+      unreadableUpdatedAtIds,
       unsearchableRelations: getUnsearchableRelationNames(resourceConfig),
     };
 
@@ -547,6 +561,7 @@ export async function probeInventoryResource(
     wireContractViolationIds,
     unservableImageIds,
     unservableListingUrlIds,
+    unreadableUpdatedAtIds,
     unsearchableRelations: getUnsearchableRelationNames(resourceConfig),
   };
 }
@@ -656,6 +671,25 @@ export function formatUnservableImageWarning(unservableImageIds: readonly string
   );
 }
 
+/**
+ * One operator-facing line naming the sampled listings whose text last-updated
+ * value cannot be read as a date, or `null` when there are none. They are still
+ * sold, with `updatedAt: null` (#36440).
+ */
+export function formatUnreadableUpdatedAtWarning(
+  unreadableUpdatedAtIds: readonly string[] = [],
+): string | null {
+  if (unreadableUpdatedAtIds.length === 0) return null;
+
+  const ids = unreadableUpdatedAtIds.map((id) => JSON.stringify(id)).join(', ');
+  return (
+    `Inventory sample rows have a last-updated value that is not an ISO date (for example DD/MM/YYYY text): ${ids}. ` +
+    'These listings are still sold but are published without an updatedAt. ' +
+    'Sorting by the column and updatedSince need a real timestamp: expose one through a view ' +
+    "(e.g. to_timestamp(updated_at, 'DD/MM/YYYY')) or leave resources.inventory.updatedAtColumn unmapped."
+  );
+}
+
 /** One operator-facing line for relative/malformed mapped listing URLs. */
 export function formatUnservableListingUrlWarning(
   unservableListingUrlIds: readonly string[],
@@ -714,6 +748,7 @@ export function createResourceHealthCheck(
             wireContractViolationIds,
             unservableImageIds,
             unservableListingUrlIds,
+            unreadableUpdatedAtIds,
             unsearchableRelations,
           }) => ({
             ok: true,
@@ -721,6 +756,7 @@ export function createResourceHealthCheck(
             ...(wireContractViolationIds.length > 0 ? { wireContractViolationIds } : {}),
             ...(unservableImageIds.length > 0 ? { unservableImageIds } : {}),
             ...(unservableListingUrlIds.length > 0 ? { unservableListingUrlIds } : {}),
+            ...(unreadableUpdatedAtIds.length > 0 ? { unreadableUpdatedAtIds } : {}),
             ...(unsearchableRelations.length > 0 ? { unsearchableRelations } : {}),
           }),
         )
@@ -808,6 +844,9 @@ function buildDiagnosticFields(snapshot: HealthSnapshot): Record<string, unknown
       : {}),
     ...(resourceHealth?.unservableListingUrlIds?.length
       ? { unservableListingUrlIds: resourceHealth.unservableListingUrlIds }
+      : {}),
+    ...(resourceHealth?.unreadableUpdatedAtIds?.length
+      ? { unreadableUpdatedAtIds: resourceHealth.unreadableUpdatedAtIds }
       : {}),
     ...(resourceHealth?.unsearchableRelations?.length
       ? { unsearchableRelations: resourceHealth.unsearchableRelations }

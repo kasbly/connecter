@@ -435,8 +435,15 @@ export function mapRowToInventoryItem(
         const date = new Date(numericDate * (units === 's' ? 1000 : 1));
         // Keep invalid/out-of-range source values visible to wire validation.
         updatedAt = Number.isFinite(date.getTime()) ? date.toISOString() : String(rawDate);
+      } else if (rawDate instanceof Date) {
+        updatedAt = rawDate.toISOString();
       } else {
-        updatedAt = rawDate instanceof Date ? rawDate.toISOString() : String(rawDate);
+        // Optional metadata the connector cannot read must not withhold a
+        // listing whose title, price and currency are valid (#36440).
+        updatedAt =
+          typeof rawDate === 'string' && isUnreadableUpdatedAtText(rawDate)
+            ? null
+            : String(rawDate);
       }
     }
   }
@@ -461,6 +468,44 @@ export function mapRowToInventoryItem(
     attributes,
     updatedAt,
   };
+}
+
+/** `YYYY-MM-DD` followed by end of string or a `T`/space time separator. */
+const ISO_DATE_PREFIX = /^\d{4}-\d{2}-\d{2}(?:[T ]|$)/;
+/** `NN/NN/YYYY`-style numeric dates, whose day/month order cannot be known. */
+const NUMERIC_SEPARATED_DATE = /^\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}/;
+
+/**
+ * True for a text last-updated value that cannot be read unambiguously: not
+ * ISO-8601-prefixed, and either unparseable or a numeric `NN/NN/YYYY` date that
+ * V8 reads month-first (`25/12/2026` is NaN, `03/10/2026` is 10 March). Such a
+ * value is published as `updatedAt: null` instead of failing the wire contract
+ * for the whole listing (#36440). ISO-shaped values keep going to wire
+ * validation, so a broken `2026-13-45` stays visible.
+ */
+function isUnreadableUpdatedAtText(rawDate: unknown): boolean {
+  const text = String(rawDate).trim();
+  if (ISO_DATE_PREFIX.test(text)) return false;
+  return !Number.isFinite(Date.parse(text)) || NUMERIC_SEPARATED_DATE.test(text);
+}
+
+/**
+ * Whether the row's last-updated cell is a text value the mapper publishes as
+ * `updatedAt: null` (see `isUnreadableUpdatedAtText`). Numeric values and
+ * `Date` objects are handled by the epoch / ISO paths, never reported here.
+ */
+export function hasUnreadableUpdatedAtText(
+  row: Record<string, unknown>,
+  config: InventoryResourceConfig,
+): boolean {
+  if (!config.updatedAtColumn) return false;
+  const rawDate = resolveColumnValue(row, config.updatedAtColumn);
+  return (
+    typeof rawDate === 'string' &&
+    rawDate.trim() !== '' &&
+    !/^[+-]?\d+(?:\.\d+)?$/.test(rawDate.trim()) &&
+    isUnreadableUpdatedAtText(rawDate)
+  );
 }
 
 /** Keys, in priority order, under which a jsonb image object stores its URL. */
