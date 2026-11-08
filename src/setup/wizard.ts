@@ -654,6 +654,11 @@ async function collectConfiguredRelation(options: {
     foreignKey: quoteIfNeeded(suggestion.foreignKeyColumn),
     referenceKey: quoteIfNeeded(suggestion.toColumn ?? idColumn),
     fields: fieldsMap,
+    ...(existingRelation?.filter !== undefined ? { filter: existingRelation.filter } : {}),
+    ...(existingRelation?.orderBy &&
+    carriedColumnStillApplies(existingRelation.orderBy.column, true, relTable.columns)
+      ? { orderBy: existingRelation.orderBy }
+      : {}),
   };
 
   if (suggestion.relationType === 'images') {
@@ -664,9 +669,11 @@ async function collectConfiguredRelation(options: {
       relation['imageUrlField'] = urlCol.name;
     }
 
-    const orderColumn = relTable.columns.find((col) =>
-      /^(sort_?order|position|order|is_?primary)$/i.test(col.name),
-    );
+    const orderColumn = relation.orderBy
+      ? relTable.columns.find((col) => unquoteIdentifier(relation.orderBy!.column) === col.name)
+      : relTable.columns.find((col) =>
+          /^(sort_?order|position|order|is_?primary)$/i.test(col.name),
+        );
     if (orderColumn) {
       const defaultDirection = /^is_?primary$/i.test(orderColumn.name) ? 'desc' : 'asc';
       const useOrder = await confirm({
@@ -674,10 +681,12 @@ async function collectConfiguredRelation(options: {
         default: Boolean(existingRelation?.orderBy),
       });
       if (useOrder) {
-        relation['orderBy'] = {
+        relation['orderBy'] = relation.orderBy ?? {
           column: quoteIfNeeded(orderColumn.name),
           direction: defaultDirection,
         };
+      } else {
+        delete relation.orderBy;
       }
     }
 
@@ -685,9 +694,9 @@ async function collectConfiguredRelation(options: {
     // 'featured'` shape when a type/kind/category column exists; `filter`
     // is a raw SQL predicate the relation query applies directly against
     // the source column (see queryRelation), independent of the `fields`
-    // map above, so this runs whether or not the operator also chose to
-    // carry the column into `fields`. Leave `filter` unset when there's
-    // no such column (nothing to filter on).
+    // map above. A hand-written predicate may hide private rows using clauses
+    // these checkboxes cannot express. Keep it verbatim instead of replacing
+    // it with a broader, type-only predicate on a rerun.
     if (typeColumn) {
       const pkColumn = relTable.columns.find((col) => col.isPrimaryKey);
       const distinctTypeValues = await collectDistinctColumnValues(
@@ -699,37 +708,56 @@ async function collectConfiguredRelation(options: {
       );
       if (distinctTypeValues.length > 0) {
         const presentedValues = distinctTypeValues.slice(0, IMAGE_TYPE_VALUE_PROMPT_LIMIT);
+        const savedFilter = existingRelation?.filter;
+        const savedValues = presentedValues.filter((value) =>
+          savedFilter?.includes(toConfigLiteral(value)),
+        );
+        const savedTypeFilter = savedValues
+          .map((value) => `${quoteIfNeeded(typeColumn)} = ${toConfigLiteral(value)}`)
+          .join(' OR ');
+        const customFilter =
+          savedFilter !== undefined &&
+          normalizeFilterClause(savedFilter) !== normalizeFilterClause('FALSE') &&
+          normalizeFilterClause(savedFilter) !== normalizeFilterClause(savedTypeFilter);
         if (distinctTypeValues.length > presentedValues.length) {
           console.log(
             `\n"${typeColumn}" has more than ${IMAGE_TYPE_VALUE_PROMPT_LIMIT} distinct values. Offering the first ${presentedValues.length}; re-run setup after narrowing the column down if a customer-facing value is missing.`,
           );
         }
-        const includedValues = await checkbox({
-          message: `Which "${typeColumn}" values on ${suggestion.table} are customer-facing photos? (unchecked values — e.g. thumbnails, icons, invoices — are left out of images[])`,
-          choices: [
-            ...presentedValues.map((value) => ({
-              name: value,
-              value,
-              checked: existingRelation?.filter
-                ? existingRelation.filter.includes(toConfigLiteral(value))
-                : /gallery|featured|photo|primary|main|hero/i.test(value),
-            })),
-            {
-              name: 'Include every type (including thumbnails, icons, invoices, and values not shown)',
-              value: '\0all-image-types',
-              checked: false,
-            },
-          ],
-        });
-        // No checked types means no photos, including when clearing a saved
-        // filter. Only the explicit all-types choice may remove the predicate.
-        if (!includedValues.includes('\0all-image-types')) {
-          relation['filter'] =
-            includedValues.length > 0
-              ? includedValues
-                  .map((value) => `${quoteIfNeeded(typeColumn)} = ${toConfigLiteral(value)}`)
-                  .join(' OR ')
-              : 'FALSE';
+        if (customFilter) {
+          console.log(
+            `\nKeeping the existing custom filter on ${suggestion.table}: ${savedFilter}`,
+          );
+        } else {
+          const includedValues = await checkbox({
+            message: `Which "${typeColumn}" values on ${suggestion.table} are customer-facing photos? (unchecked values — e.g. thumbnails, icons, invoices — are left out of images[])`,
+            choices: [
+              ...presentedValues.map((value) => ({
+                name: value,
+                value,
+                checked: existingRelation?.filter
+                  ? existingRelation.filter.includes(toConfigLiteral(value))
+                  : /gallery|featured|photo|primary|main|hero/i.test(value),
+              })),
+              {
+                name: 'Include every type (including thumbnails, icons, invoices, and values not shown)',
+                value: '\0all-image-types',
+                checked: false,
+              },
+            ],
+          });
+          // No checked types means no photos, including when clearing a saved
+          // filter. Only the explicit all-types choice may remove the predicate.
+          if (!includedValues.includes('\0all-image-types')) {
+            relation['filter'] =
+              includedValues.length > 0
+                ? includedValues
+                    .map((value) => `${quoteIfNeeded(typeColumn)} = ${toConfigLiteral(value)}`)
+                    .join(' OR ')
+                : 'FALSE';
+          } else {
+            delete relation.filter;
+          }
         }
       }
     }
@@ -1474,17 +1502,58 @@ export async function runWizard(): Promise<void> {
     result.foreignKeys,
   );
   const relations: Record<string, RelationConfig> = {};
+  const askedRelationNames = new Set<string>();
+  const carriedRelations = new Map<string, RelationConfig>();
+  for (const [name, relation] of Object.entries(existingInventory?.relations ?? {})) {
+    const relTable = result.tables.find((table) => table.name === relation.table);
+    const sameRelationSchema = (relation.schema ?? selectedSchema) === selectedSchema;
+    if (
+      !relTable ||
+      !sameRelationSchema ||
+      !carriedColumnStillApplies(relation.referenceKey, sameTable, selectedTable.columns) ||
+      ![
+        relation.foreignKey,
+        ...Object.values(relation.fields),
+        ...(relation.orderBy ? [relation.orderBy.column] : []),
+      ].every((column) => carriedColumnStillApplies(column, sameTable, relTable.columns))
+    ) {
+      droppedStaleMappings.push(`relations.${name}`);
+      continue;
+    }
+    carriedRelations.set(name, relation);
+  }
   // Share the attribute namespace with row mappings and earlier relations.
   // A collision gets a `_2` suffix instead of replacing an existing value.
-  const usedPublishedNames = new Set(Object.keys(attributes));
+  const getUsedPublishedNames = (existingName?: string) =>
+    new Set([
+      ...Object.keys(attributes),
+      ...Object.entries(relations)
+        .filter(([, relation]) => !relation.imageUrlField)
+        .map(([name, relation]) => relation.publishAs ?? name),
+      ...[...carriedRelations]
+        .filter(
+          ([name, relation]) =>
+            name !== existingName &&
+            !askedRelationNames.has(name) &&
+            !relation.imageUrlField &&
+            !relationSuggestions.some(
+              (suggestion) =>
+                suggestion.table === relation.table &&
+                suggestion.foreignKeyColumn === unquoteIdentifier(relation.foreignKey),
+            ),
+        )
+        .map(([name, relation]) => relation.publishAs ?? name),
+    ]);
   const suggestedRelationTables = new Set(
     relationSuggestions.map((suggestion) => suggestion.table),
   );
 
   const findExistingRelation = (table: string, foreignKey: string) =>
-    Object.entries(existingConfig?.resources.inventory.relations ?? {}).find(
+    Object.entries(sameTable ? (existingInventory.relations ?? {}) : {}).find(
       ([, relation]) =>
-        relation.table === table && unquoteIdentifier(relation.foreignKey) === foreignKey,
+        (relation.schema ?? selectedSchema) === selectedSchema &&
+        relation.table === table &&
+        unquoteIdentifier(relation.foreignKey) === foreignKey,
     );
   for (const suggestion of relationSuggestions) {
     const relTable = result.tables.find((t) => t.name === suggestion.table);
@@ -1498,6 +1567,7 @@ export async function runWizard(): Promise<void> {
       suggestion.table,
       suggestion.foreignKeyColumn,
     );
+    if (existingRelationEntry) askedRelationNames.add(existingRelationEntry[0]);
 
     const addRelation = await confirm({
       message: `Add relation: ${suggestion.table} (${suggestion.relationType}, FK: ${suggestion.foreignKeyColumn})?`,
@@ -1515,7 +1585,7 @@ export async function runWizard(): Promise<void> {
         existingRelation: existingRelationEntry?.[1],
         existingRelationName: existingRelationEntry?.[0],
         db,
-        usedPublishedNames,
+        usedPublishedNames: getUsedPublishedNames(existingRelationEntry?.[0]),
       });
       if (configured) relations[configured.name] = configured.relation;
     }
@@ -1580,6 +1650,7 @@ export async function runWizard(): Promise<void> {
     });
 
     const existingRelationEntry = findExistingRelation(tableName, foreignKeyColumn);
+    if (existingRelationEntry) askedRelationNames.add(existingRelationEntry[0]);
 
     // The child column may join a non-id parent column (sku/permalink, #32166).
     const referenceColumn = await select({
@@ -1612,9 +1683,17 @@ export async function runWizard(): Promise<void> {
       existingRelation: existingRelationEntry?.[1],
       existingRelationName: existingRelationEntry?.[0],
       db,
-      usedPublishedNames,
+      usedPublishedNames: getUsedPublishedNames(existingRelationEntry?.[0]),
     });
     if (configured) relations[configured.name] = configured.relation;
+  }
+
+  // The manual picker is optional: declining to add another relation does not
+  // reject saved relations it never asked about. Carry those forward only when
+  // their parent, child, and referenced columns still exist in this schema.
+  for (const [name, relation] of carriedRelations) {
+    if (name in relations || askedRelationNames.has(name)) continue;
+    relations[name] = relation;
   }
 
   // A blob/bytea column can never become images[] (#28247) — if the operator

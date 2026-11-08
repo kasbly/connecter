@@ -44,6 +44,7 @@ import { mapRowToInventoryItem } from '../../mapping/field-mapper.js';
 import { introspectDatabase } from '../introspect.js';
 import { createDatabaseAdapter } from '../../db/adapter.factory.js';
 import { probeInventoryResource } from '../../routes/health.route.js';
+import type { RelationConfig } from '../../config/config.types.js';
 
 const promptMocks = vi.hoisted(() => ({
   checkbox: vi.fn(),
@@ -3822,18 +3823,25 @@ describe('runWizard', () => {
     }
   });
 
-  describe('hand-written baseFilter clauses on a rerun (#35253)', () => {
+  describe('hand-written inventory configuration on a rerun', () => {
     const rerunWithBaseFilter = async (
       baseFilter: string,
       extraColumns: Array<{ name: string; type: string }>,
       confirmAnswer: (message: string, fallback: boolean) => boolean = (_message, fallback) =>
         fallback,
-      options: { configTable?: string; extraYaml?: string[] } = {},
+      options: {
+        configTable?: string;
+        extraYaml?: string[];
+        relatedTables?: Awaited<ReturnType<typeof introspectDatabase>>['result']['tables'];
+        foreignKeys?: Awaited<ReturnType<typeof introspectDatabase>>['result']['foreignKeys'];
+        imageTypes?: string[];
+      } = {},
     ) => {
       const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
       const previousDirectory = process.cwd();
       const db = Object.assign(vi.fn(), {
         destroy: vi.fn().mockResolvedValue(undefined),
+        raw: vi.fn().mockResolvedValue({ rows: [{ value: 'gallery' }, { value: 'thumbnail' }] }),
         withSchema: vi.fn(() => ({
           table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
         })),
@@ -3887,7 +3895,11 @@ describe('runWizard', () => {
         promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
       }
       promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
-      promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
+      promptMocks.select.mockImplementation(({ message, default: answer, choices }) =>
+        Promise.resolve(
+          message.startsWith('Which reverse proxy') ? 'bundled' : (answer ?? choices[0]?.value),
+        ),
+      );
       for (const answer of [
         'database.example.com',
         '5432',
@@ -3905,9 +3917,19 @@ describe('runWizard', () => {
             confirmAnswer(message, answer ?? false),
         ),
       );
-      promptMocks.checkbox.mockImplementation(({ message }) => {
+      promptMocks.checkbox.mockImplementation(({ message, choices }) => {
+        if (message.startsWith('Which \"type\"') && options.imageTypes) {
+          return Promise.resolve(options.imageTypes);
+        }
         if (message.startsWith('Which filters should be available')) {
           return Promise.resolve(['minPrice', 'maxPrice', 'currency']);
+        }
+        if (message.startsWith('Select columns from') || message.startsWith('Which "')) {
+          return Promise.resolve(
+            choices
+              .filter((choice: { checked?: boolean }) => choice.checked)
+              .map((choice: { value: string }) => choice.value),
+          );
         }
         return Promise.resolve([]);
       });
@@ -3932,8 +3954,9 @@ describe('runWizard', () => {
                 })),
               ],
             },
+            ...(options.relatedTables ?? []),
           ],
-          foreignKeys: [],
+          foreignKeys: options.foreignKeys ?? [],
         },
         retriedWithTls: false,
       });
@@ -3949,6 +3972,7 @@ describe('runWizard', () => {
           baseFilter: config.resources.inventory.baseFilter,
           attributes: config.resources.inventory.attributes,
           filterableColumns: config.resources.inventory.filterableColumns,
+          relations: config.resources.inventory.relations,
           logs: consoleLog.mock.calls.map((call) => String(call[0])),
         };
       } finally {
@@ -4018,6 +4042,175 @@ describe('runWizard', () => {
         message.startsWith('Keep your existing custom filter') ? false : fallback,
       );
       expect(dropped.baseFilter).toBeUndefined();
+    });
+
+    describe('saved relations on a rerun', () => {
+      const savedRelations: Record<string, RelationConfig> = {
+        manual: {
+          table: 'details_view',
+          foreignKey: 'product_id',
+          referenceKey: 'id',
+          fields: { detail: 'name' },
+          publishAs: 'details',
+          filter: 'is_public = true',
+          orderBy: { column: 'name', direction: 'desc' },
+        },
+        features: {
+          table: 'product_features',
+          foreignKey: 'product_id',
+          referenceKey: 'id',
+          fields: { name: 'name' },
+          flatten: 'name',
+          publishAs: 'features',
+          filter: 'is_public = true',
+          orderBy: { column: 'name', direction: 'desc' },
+        },
+        photos: {
+          table: 'product_images',
+          foreignKey: 'product_id',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+          filter: '"type" = \'gallery\' AND is_public = true',
+          orderBy: { column: 'position', direction: 'desc' },
+        },
+      };
+      const relatedTables = Object.values(savedRelations).map((relation) => ({
+        name: relation.table,
+        kind: 'table' as const,
+        rowCount: 10,
+        columns: (relation.imageUrlField
+          ? ['product_id', 'url', 'type', 'position', 'is_public']
+          : ['product_id', 'name', 'is_public']
+        ).map((name) => ({
+          name,
+          type: name === 'position' ? 'integer' : 'text',
+          nullable: false,
+          isPrimaryKey: false,
+        })),
+      }));
+      const foreignKeys = ['product_features', 'product_images'].map((fromTable) => ({
+        constraintName: `${fromTable}_fk`,
+        fromTable,
+        fromColumn: 'product_id',
+        toTable: 'products',
+        toColumn: 'id',
+      }));
+      const relationYaml = (relations = savedRelations) =>
+        yaml
+          .dump({ relations })
+          .trimEnd()
+          .split('\n')
+          .map((line) => `    ${line}`);
+
+      it('keeps an unprompted manual relation and custom relation filters and ordering when accepting defaults', async () => {
+        const { relations } = await rerunWithBaseFilter('', [], undefined, {
+          extraYaml: relationYaml(),
+          relatedTables,
+          foreignKeys,
+        });
+        expect(relations?.manual).toEqual(savedRelations.manual);
+        expect(relations?.features).toMatchObject({
+          filter: 'is_public = true',
+          orderBy: { column: 'name', direction: 'desc' },
+        });
+        expect(relations?.photos).toMatchObject({
+          filter: savedRelations.photos!.filter,
+          orderBy: savedRelations.photos!.orderBy,
+        });
+        expect(promptMocks.checkbox).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: expect.stringContaining('values on product_images'),
+          }),
+        );
+      });
+
+      it('honors declining a saved relation or its order without dropping the manual relation', async () => {
+        const { relations } = await rerunWithBaseFilter(
+          '',
+          [],
+          (message, fallback) =>
+            message.startsWith('Add relation: product_features') ||
+            message.startsWith('Order images by position')
+              ? false
+              : fallback,
+          { extraYaml: relationYaml(), relatedTables, foreignKeys },
+        );
+        expect(relations).not.toHaveProperty('features');
+        expect(relations?.photos).not.toHaveProperty('orderBy');
+        expect(relations?.manual).toEqual(savedRelations.manual);
+      });
+
+      it('reserves an unprompted relation name before publishing a new suggested relation', async () => {
+        const manual = { ...savedRelations.manual!, publishAs: 'product_features' };
+        const { relations } = await rerunWithBaseFilter(
+          '',
+          [],
+          (message, fallback) =>
+            message.startsWith('Add relation: product_features') ? true : fallback,
+          { extraYaml: relationYaml({ manual }), relatedTables, foreignKeys },
+        );
+        expect(relations?.manual).toEqual(manual);
+        expect(relations?.product_features__product_id?.publishAs).toBe('product_features_2');
+      });
+
+      it('keeps an image filter without a type column and ordering outside the name heuristics', async () => {
+        const photos = {
+          ...savedRelations.photos!,
+          orderBy: { column: 'url', direction: 'desc' as const },
+        };
+        const { relations } = await rerunWithBaseFilter('', [], undefined, {
+          extraYaml: relationYaml({ photos }),
+          foreignKeys: [foreignKeys[1]!],
+          relatedTables: [
+            {
+              ...relatedTables[2]!,
+              columns: relatedTables[2]!.columns.filter((column) => column.name !== 'type'),
+            },
+          ],
+        });
+        expect(relations?.photos).toMatchObject({ filter: photos.filter, orderBy: photos.orderBy });
+      });
+
+      it('lets an explicit all-types selection clear a saved wizard-generated image filter', async () => {
+        const saved = { photos: { ...savedRelations.photos!, filter: '\"type\" = \'gallery\'' } };
+        const { relations } = await rerunWithBaseFilter('', [], undefined, {
+          extraYaml: relationYaml(saved),
+          relatedTables: [relatedTables[2]!],
+          foreignKeys: [foreignKeys[1]!],
+          imageTypes: ['\0all-image-types'],
+        });
+        expect(relations?.photos).not.toHaveProperty('filter');
+      });
+
+      it.each([
+        'parent table',
+        'parent schema',
+        'child table',
+        'child schema',
+        'foreign key',
+        'reference key',
+        'field',
+        'order column',
+      ])('drops an unprompted relation after its %s changes', async (changed) => {
+        const manual = { ...savedRelations.manual! };
+        if (changed === 'child table') manual.table = 'dropped_view';
+        if (changed === 'child schema') manual.schema = 'another_schema';
+        if (changed === 'foreign key') manual.foreignKey = 'gone';
+        if (changed === 'reference key') manual.referenceKey = 'gone';
+        if (changed === 'field') manual.fields = { detail: 'gone' };
+        if (changed === 'order column') manual.orderBy = { column: 'gone', direction: 'asc' };
+        const { relations, logs } = await rerunWithBaseFilter('', [], undefined, {
+          configTable: changed === 'parent table' ? 'old_products' : undefined,
+          extraYaml: [
+            ...(changed === 'parent schema' ? ['    schema: another_schema'] : []),
+            ...relationYaml({ manual }),
+          ],
+          relatedTables: [relatedTables[0]!],
+        });
+        expect(relations ?? {}).not.toHaveProperty('manual');
+        expect(logs.join('\n')).toContain('relations.manual');
+      });
     });
 
     describe('carried-forward attributes and filters whose column is gone (#35653)', () => {
