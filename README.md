@@ -114,8 +114,9 @@ falling back to `package.json`'s version (`1.0.0`) for a checkout that predates 
 
 Same liveness verdict as `GET /health`, plus the operator-facing detail behind it:
 `resourceError` (the driver error from a failed inventory probe), `auditError`,
-`auditLastSuccessfulAppendAt`, `unknownStatusValues`, `wireContractViolationIds`, and
-`unservableImageIds`. Requires an `X-API-Key` header like every other endpoint. Kasbly's
+`auditLastSuccessfulAppendAt`, `unknownStatusValues`, `wireContractViolationIds`,
+`unservableImageIds`, `unservableListingUrlIds`, `unsearchableRelations` (flattened relations
+served but left out of search), and `unreadableUpdatedAtIds`. Requires an `X-API-Key` header like every other endpoint. Kasbly's
 Test-connection and connectivity-health checks call this automatically when a read
 fails; use it yourself when troubleshooting a merchant's mapping.
 
