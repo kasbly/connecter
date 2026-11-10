@@ -5092,6 +5092,7 @@ describe('runWizard', () => {
       wireContractViolationIds: ['42'],
       unservableImageIds: ['43'],
       unservableListingUrlIds: ['44'],
+      unreadableUpdatedAtIds: ['7'],
     });
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
     promptMocks.select.mockImplementationOnce(() => Promise.resolve('available_products'));
@@ -5154,6 +5155,11 @@ describe('runWizard', () => {
 
     try {
       process.chdir(directory);
+      consoleWarn.mockImplementation((message) => {
+        if (String(message).includes('last-updated value')) {
+          expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
+        }
+      });
       await runWizard();
 
       expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('"42"'));
@@ -5161,6 +5167,11 @@ describe('runWizard', () => {
       // save — setup still writes the config (#25790).
       expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('"43"'));
       expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('"44"'));
+      expect(consoleWarn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Inventory sample rows have a last-updated value that is not an ISO date (for example DD/MM/YYYY text): "7"',
+        ),
+      );
       // The pre-save probe's unknownStatusValues must reach the operator the same
       // way `npm run validate` already surfaces it (cli.ts) — otherwise a status
       // value the probe found unmapped is saved and silently hidden under

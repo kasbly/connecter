@@ -54,6 +54,7 @@ import { createDatabaseAdapter } from '../db/adapter.factory.js';
 import {
   formatUnknownStatusWarning,
   formatUnservableImageWarning,
+  formatUnreadableUpdatedAtWarning,
   formatUnsearchableRelationWarning,
   formatUnservableListingUrlWarning,
   formatWireContractViolationWarning,
@@ -1994,6 +1995,7 @@ export async function runWizard(): Promise<void> {
       unservableImageIds,
       unservableListingUrlIds,
       unsearchableRelations,
+      unreadableUpdatedAtIds,
     } = await probeInventoryResource(validationAdapter, config.resources.inventory);
     // Mirrors `npm run validate` (cli.ts): an unmapped source status is silently
     // reported as unknownStatusPolicy and withheld from customers, so the
@@ -2005,6 +2007,8 @@ export async function runWizard(): Promise<void> {
     if (warning) console.warn(`Warning: ${warning}`);
     const imageWarning = formatUnservableImageWarning(unservableImageIds);
     if (imageWarning) console.warn(`Warning: ${imageWarning}`);
+    const updatedAtWarning = formatUnreadableUpdatedAtWarning(unreadableUpdatedAtIds);
+    if (updatedAtWarning) console.warn(`Warning: ${updatedAtWarning}`);
     const listingUrlWarning = formatUnservableListingUrlWarning(unservableListingUrlIds);
     if (listingUrlWarning) console.warn(`Warning: ${listingUrlWarning}`);
     const unsearchableRelationWarning = formatUnsearchableRelationWarning(unsearchableRelations);
