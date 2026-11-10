@@ -36,7 +36,7 @@ import {
   suggestFieldMappings,
   wrapCustomFilterClause,
 } from '../suggest.js';
-import { getUpdatedAtEpochPrompt } from '../updated-at-epoch.js';
+import { getUpdatedAtEpochPrompt, sampleUpdatedAtValue } from '../updated-at-epoch.js';
 import { runWizard } from '../wizard.js';
 import { loadConfig } from '../../config/config.loader.js';
 import { buildQuery } from '../../mapping/query-builder.js';
@@ -487,6 +487,43 @@ describe('verifyUniqueListingIdColumn', () => {
     await expect(
       verifyUniqueListingIdColumn(db as never, 'catalog', 'products', 'sku'),
     ).rejects.toThrow('statement timeout');
+  });
+});
+
+describe('a `?` in a column name reaches knex as a literal (#36834)', () => {
+  /** What the pg client sends once knex has expanded `??` and rewritten `?`. */
+  async function wireSql(call: [string, unknown[]]): Promise<{ sql: string; count: number }> {
+    const { default: realKnex } = await vi.importActual<typeof import('knex')>('knex');
+    const db = realKnex({ client: 'pg' });
+    const compiled = db.raw(call[0], call[1] as never).toSQL();
+    return {
+      sql: (db.client as unknown as { positionBindings: (s: string) => string }).positionBindings(
+        compiled.sql,
+      ),
+      count: compiled.bindings.length,
+    };
+  }
+
+  it('keeps the unique-id check on the named column', async () => {
+    const db = { raw: vi.fn().mockResolvedValue({ rows: [] }) };
+    await verifyUniqueListingIdColumn(db as never, 'catalog', 'products', 'Sku?');
+
+    const wire = await wireSql(db.raw.mock.calls[0] as [string, unknown[]]);
+    expect(wire.count).toBe(0);
+    expect(wire.sql).toContain('SELECT "Sku?" AS value FROM "catalog"."products" GROUP BY "Sku?"');
+    expect(wire.sql).toContain('HAVING COUNT(*) > 1 OR "Sku?" IS NULL OR BTRIM("Sku?"::text)');
+  });
+
+  it('keeps the last-updated sample on the named column', async () => {
+    const db = { raw: vi.fn().mockResolvedValue({ rows: [{ value: 1710000000 }] }) };
+    await expect(
+      sampleUpdatedAtValue(db as never, 'catalog', 'products', 'Updated?'),
+    ).resolves.toBe(1710000000);
+
+    const wire = await wireSql(db.raw.mock.calls[0] as [string, unknown[]]);
+    expect(wire.count).toBe(0);
+    expect(wire.sql).toContain('SELECT "Updated?" AS "value" FROM "catalog"."products"');
+    expect(wire.sql).toContain('WHERE "Updated?" IS NOT NULL LIMIT 1');
   });
 });
 

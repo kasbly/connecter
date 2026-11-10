@@ -88,9 +88,8 @@ export function getRelationSearchExpressions(
     const relationSchema = relation.schema ?? config.schema ?? 'public';
     const inventorySchema = config.schema ?? 'public';
 
-    const relationFilter = relation.filter
-      ? ` AND (${relation.filter.replaceAll('?', '\\?')})`
-      : '';
+    // Placeholder escaping happens once, in the adapter, for the whole expression.
+    const relationFilter = relation.filter ? ` AND (${relation.filter})` : '';
     const orderByClause = flattenedRelationSearchOrderBy(
       relation.foreignKey,
       flattenedColumn,

@@ -967,6 +967,7 @@ async function runListQuery(options: {
   schema?: string;
   sort?: SortOptions;
   skipCount?: boolean;
+  selectColumns?: string[];
 }) {
   const { db, captured } = createRecordingKnex({
     dataRows: options.dataRows ?? [],
@@ -988,7 +989,7 @@ async function runListQuery(options: {
     },
     options.sort ?? { column: 'price', direction: 'asc' },
     options.baseFilter ?? 'published = true',
-    ['id', 'price'],
+    options.selectColumns ?? ['id', 'price'],
     options.schema,
   );
 
@@ -1499,5 +1500,178 @@ describe('PostgresAdapter base filters', () => {
       'select * from "public"."Car" where id = ? and (metadata \\?| array[\'published\', \'featured\']) limit ?',
     );
     expect(query.bindings).toEqual(['123', 1]);
+  });
+});
+
+// #36834: knex rewrites every unescaped `?` in a raw fragment as a binding, so a
+// `?` inside a merchant-mapped column name (`"In Stock?"`) must be escaped
+// everywhere a config-derived column or alias enters raw SQL, not just in
+// `baseFilter` / relation `filter` (#28097).
+describe('PostgresAdapter `?` in a mapped column name (#36834)', () => {
+  beforeEach(() => {
+    knexMock.mockClear();
+    rawMock.mockClear();
+  });
+
+  /** What the pg client sends: the escaped SQL after knex's positional rewrite. */
+  function wireSql(sql: string, bindings?: readonly unknown[]): { sql: string; count: number } {
+    const db = realKnex({ client: 'pg' });
+    const compiled = db.raw(sql, bindings as never).toSQL();
+    return {
+      sql: (db.client as unknown as { positionBindings: (s: string) => string }).positionBindings(
+        compiled.sql,
+      ),
+      count: compiled.bindings.length,
+    };
+  }
+
+  it('escapes the column in the select list, conditions, search, and sort of a list query', async () => {
+    const { countQuery, dataQuery } = await runListQuery({
+      count: 1,
+      selectColumns: ['id', '"In Stock?"'],
+      conditions: [
+        { column: '"In Stock?"', operator: '=', value: 'yes' },
+        { column: '"Main?"', operator: 'IN', value: ['a'] as never },
+        { column: '"Has Power?"', operator: '>=', value: 3 },
+        { column: '"Title?"', operator: 'ILIKE', value: 'x' },
+      ],
+      sort: { column: '"In Stock?"', direction: 'asc', tiebreaker: '"Id?"' },
+    });
+
+    expect(dataQuery.sql).toContain('select id, "In Stock\\?" from');
+    expect(dataQuery.sql).toContain('"In Stock\\?"::text ILIKE ?');
+    expect(dataQuery.sql).toContain('lower(btrim("Main\\?"::text,');
+    expect(dataQuery.sql).toContain('"Has Power\\?" >= ?');
+    expect(dataQuery.sql).toContain('"Title\\?" ILIKE ?');
+    expect(dataQuery.sql).toContain('order by "In Stock\\?" ASC NULLS LAST, "Id\\?" DESC');
+    expect(dataQuery.bindings).toEqual(['yes', 'a', 3, '%x%', 20]);
+    expect(countQuery.sql).toContain('"In Stock\\?"::text ILIKE ?');
+    // Every remaining unescaped `?` is a real binding.
+    const unescaped = (sql: string) => (sql.match(/(?<!\\)\?/g) ?? []).length;
+    expect(unescaped(dataQuery.sql)).toBe(dataQuery.bindings.length);
+  });
+
+  it('escapes the id column and select list of queryById', async () => {
+    const { db, captured } = createRecordingKnex({ dataRows: [], count: 0 });
+    knexMock.mockReturnValueOnce(db as unknown as ReturnType<typeof knexMock>);
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    captured.length = 0;
+
+    await adapter.queryById('Car', '"Id?"', '7', undefined, ['"In Stock?"']);
+
+    expect(captured[0]?.sql).toBe(
+      'select "In Stock\\?" from "public"."Car" where "Id\\?" = ? limit ?',
+    );
+    expect(captured[0]?.bindings).toEqual(['7', 1]);
+  });
+
+  it('escapes relation fields, aliases, and keys so the binding count matches', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+    rawMock.mockResolvedValueOnce({ rows: [] });
+
+    await adapter.queryRelation({
+      table: 'photos',
+      foreignKey: '"Car?"',
+      parentIds: [1, 2],
+      fields: { 'Main?': '"Main?"' },
+    });
+
+    const [sql, bindings] = rawMock.mock.calls[0] as [string, number[]];
+    expect(sql).toContain('"Main\\?" as "Main\\?"');
+    expect(sql).toContain('"Car\\?" as "__fk"');
+    expect(sql).toContain('("Main\\?")::text ASC NULLS LAST');
+    const wire = wireSql(sql, bindings);
+    expect(wire.count).toBe(2);
+    expect(wire.sql).toContain('"Main?" as "Main?"');
+    expect(wire.sql).toContain('WHERE "Car?" IN ($1, $2)');
+  });
+
+  it('escapes relation columns on the zero-parent probe branch', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.queryRelation({
+      table: 'photos',
+      foreignKey: 'car_id',
+      parentIds: [],
+      fields: { 'Main?': '"Main?"' },
+    });
+
+    const [sql] = rawMock.mock.calls[0] as [string];
+    expect(wireSql(sql).sql).toContain('"Main?" as "Main?"');
+    expect(wireSql(sql).count).toBe(0);
+  });
+
+  it('escapes searchable, string-filter, and range columns in the startup probe', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+
+    await adapter.probeSearchableColumns({
+      table: 'cars',
+      columns: ['"Notes?"'],
+      filterColumns: ['"In Stock?"'],
+      rangeColumns: ['"Power?"'],
+      probeTerm: 'probe',
+    });
+
+    const [sql, bindings] = rawMock.mock.calls[0] as [string, string[]];
+    const wire = wireSql(sql, bindings);
+    expect(wire.count).toBe(2);
+    expect(wire.sql).toContain('"Notes?" ILIKE $1');
+    expect(wire.sql).toContain('"In Stock?"::text ILIKE $2');
+    expect(wire.sql).toContain('btrim("Power?"::text)');
+  });
+
+  it('escapes the column in the distinct-value scan', async () => {
+    const adapter = new PostgresAdapter(createDatabaseConfig());
+    await adapter.connect();
+    rawMock.mockClear();
+    rawMock.mockResolvedValueOnce({ rows: [] });
+
+    await adapter.distinctValues({
+      table: 'cars',
+      column: '"Status?"',
+      limit: 50,
+      scanLimit: 5000,
+      orderBy: { column: '"Updated?"', direction: 'desc' },
+    });
+
+    const [sql, bindings] = rawMock.mock.calls[0] as [string, number[]];
+    const wire = wireSql(sql, bindings);
+    expect(wire.count).toBe(2);
+    expect(wire.sql).toContain('SELECT "Status?" AS "value"');
+    expect(wire.sql).toContain('ORDER BY "Updated?" DESC');
+  });
+
+  it('keeps a flattened-relation search expression and its filter escaped exactly once', async () => {
+    const config: InventoryResourceConfig = {
+      table: 'cars',
+      idColumn: 'id',
+      fields: { title: 'title' },
+      searchableColumns: ['title'],
+      relations: {
+        features: {
+          table: 'features',
+          foreignKey: '"Car?"',
+          referenceKey: 'id',
+          fields: { 'Name?': '"Name?"' },
+          flatten: 'Name?',
+          filter: "metadata ? 'published'",
+        },
+      },
+    } as never;
+    const { dataQuery } = await runListQuery({
+      count: 0,
+      conditions: buildQuery({ search: 'abs' }, config).conditions,
+    });
+
+    expect(dataQuery.sql).toContain('"Name\\?"::text AS value');
+    expect(dataQuery.sql).toContain("metadata \\? 'published'");
+    expect(dataQuery.sql).not.toContain('\\\\?');
   });
 });

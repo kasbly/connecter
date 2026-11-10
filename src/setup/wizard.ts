@@ -60,7 +60,7 @@ import {
   isTransientProbeError,
   probeInventoryResource,
 } from '../routes/health.route.js';
-import { buildOrderByClause } from '../db/postgres.adapter.js';
+import { buildOrderByClause, escapeRawFragmentPlaceholders } from '../db/postgres.adapter.js';
 import { getDefaultSort } from '../mapping/query-builder.js';
 import { getUpdatedAtEpochPrompt, sampleUpdatedAtValue } from './updated-at-epoch.js';
 
@@ -193,7 +193,14 @@ async function collectStatusValues(
   // NULL and empty cells stay in the sample so an all-blank column is still offered.
   const result = await db.raw<{ rows: Array<{ value: unknown }> }>(
     `SELECT DISTINCT "value" FROM (SELECT ?? AS "value" FROM ??.?? ORDER BY ${orderByClause} LIMIT ?) AS "sampled_rows" LIMIT ?`,
-    [column, schema, table, STATUS_VALUE_SCAN_LIMIT, STATUS_VALUE_PROMPT_LIMIT + 1],
+    [
+      // Knex rewrites a `?` inside a `??` identifier into a binding, so escape it (#36834).
+      escapeRawFragmentPlaceholders(column),
+      schema,
+      table,
+      STATUS_VALUE_SCAN_LIMIT,
+      STATUS_VALUE_PROMPT_LIMIT + 1,
+    ],
   );
   const distinctValues = Array.from(
     new Set(result.rows.map((row) => toStatusValueToken(row.value))),
@@ -261,10 +268,19 @@ async function collectDistinctColumnValues(
   column: string,
   orderColumn?: string,
 ): Promise<string[]> {
-  const orderByClause = orderColumn ? `ORDER BY ${quoteIfNeeded(orderColumn)} DESC ` : '';
+  const orderByClause = orderColumn
+    ? `ORDER BY ${escapeRawFragmentPlaceholders(quoteIfNeeded(orderColumn))} DESC `
+    : '';
   const result = await db.raw<{ rows: Array<{ value: unknown }> }>(
     `SELECT DISTINCT "value" FROM (SELECT ?? AS "value" FROM ??.?? WHERE ?? IS NOT NULL ${orderByClause}LIMIT ?) AS "sampled_rows" LIMIT ?`,
-    [column, schema, table, column, IMAGE_TYPE_VALUE_SCAN_LIMIT, IMAGE_TYPE_VALUE_PROMPT_LIMIT + 1],
+    [
+      escapeRawFragmentPlaceholders(column),
+      schema,
+      table,
+      escapeRawFragmentPlaceholders(column),
+      IMAGE_TYPE_VALUE_SCAN_LIMIT,
+      IMAGE_TYPE_VALUE_PROMPT_LIMIT + 1,
+    ],
   );
   return Array.from(new Set(result.rows.map((row) => String(row.value)))).sort();
 }
@@ -385,7 +401,12 @@ export async function verifyUniqueListingIdColumn(
   const result = await db.raw<{ rows: Array<{ value: unknown }> }>(
     `SELECT ?? AS value FROM ??.?? GROUP BY ??
      HAVING COUNT(*) > 1 OR ?? IS NULL OR BTRIM(??::text) = '' LIMIT 1`,
-    [column, schema, table, column, column, column],
+    [
+      escapeRawFragmentPlaceholders(column),
+      schema,
+      table,
+      ...Array.from({ length: 3 }, () => escapeRawFragmentPlaceholders(column)),
+    ],
   );
   if (result.rows.length > 0) {
     throw new Error(

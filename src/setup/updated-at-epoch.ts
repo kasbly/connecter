@@ -1,5 +1,7 @@
 import type { Knex } from 'knex';
 
+import { escapeRawFragmentPlaceholders } from '../db/postgres.adapter.js';
+
 /** Unix seconds sit below 1e12; JavaScript/Java millisecond epochs do not. */
 function inferUpdatedAtEpoch(sample: number): 's' | 'ms' {
   return Math.abs(sample) < 1e12 ? 's' : 'ms';
@@ -55,7 +57,7 @@ export async function sampleUpdatedAtValue(
   try {
     const result = await db.raw<{ rows: Array<{ value: unknown }> }>(
       `SELECT ?? AS "value" FROM ??.?? WHERE ?? IS NOT NULL LIMIT 1`,
-      [column, schema, table, column],
+      [escapeRawFragmentPlaceholders(column), schema, table, escapeRawFragmentPlaceholders(column)],
     );
     return parseEpochSample(result.rows[0]?.value);
   } catch (error) {

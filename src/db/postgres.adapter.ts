@@ -63,7 +63,7 @@ export function buildOrderByClause(sort: SortOptions): string {
     throw new Error(`Refusing to sort by unsafe column expression: ${JSON.stringify(sort.column)}`);
   }
   const direction = sort.direction === 'asc' ? 'ASC' : 'DESC';
-  const clause = `${sort.column} ${direction} NULLS LAST`;
+  const clause = `${escapeRawFragmentPlaceholders(sort.column)} ${direction} NULLS LAST`;
 
   if (sort.tiebreaker === undefined || sort.tiebreaker === sort.column) {
     return clause;
@@ -73,7 +73,7 @@ export function buildOrderByClause(sort: SortOptions): string {
       `Refusing to sort by unsafe column expression: ${JSON.stringify(sort.tiebreaker)}`,
     );
   }
-  return `${clause}, ${sort.tiebreaker} DESC`;
+  return `${clause}, ${escapeRawFragmentPlaceholders(sort.tiebreaker)} DESC`;
 }
 
 /**
@@ -137,7 +137,7 @@ function escapeLikePattern(value: unknown): string {
  * SQL, so escape every `?` in the merchant's fragment before it reaches
  * `whereRaw`/`db.raw`.
  */
-function escapeRawFragmentPlaceholders(sql: string): string {
+export function escapeRawFragmentPlaceholders(sql: string): string {
   return sql.replaceAll('?', '\\?');
 }
 
@@ -254,9 +254,10 @@ export class PostgresAdapter implements DatabaseAdapter {
         // would stay invisible to customer search and Test connection.
         const matchesBlank = normalizedValues.some((value) => value === '');
         const placeholders = normalizedValues.map(() => '?').join(', ');
-        const comparison = `lower(btrim(${condition.column}::text, ${STATUS_VALUE_BTRIM_CHARS_SQL})) IN (${placeholders})`;
+        const column = escapeRawFragmentPlaceholders(condition.column);
+        const comparison = `lower(btrim(${column}::text, ${STATUS_VALUE_BTRIM_CHARS_SQL})) IN (${placeholders})`;
         queryBuilder = queryBuilder.whereRaw(
-          matchesBlank ? `(${comparison} OR ${condition.column} IS NULL)` : comparison,
+          matchesBlank ? `(${comparison} OR ${column} IS NULL)` : comparison,
           normalizedValues,
         );
         continue;
@@ -269,13 +270,14 @@ export class PostgresAdapter implements DatabaseAdapter {
       // `filterableColumns` entry of `type: string` mapped to one 500s with
       // `42883` (#26694).
       if (condition.operator === '=' && typeof condition.value === 'string') {
-        queryBuilder = queryBuilder.whereRaw(`${condition.column}::text ILIKE ? ESCAPE '\\'`, [
-          escapeLikePattern(condition.value),
-        ]);
+        queryBuilder = queryBuilder.whereRaw(
+          `${escapeRawFragmentPlaceholders(condition.column)}::text ILIKE ? ESCAPE '\\'`,
+          [escapeLikePattern(condition.value)],
+        );
         continue;
       }
       queryBuilder = queryBuilder.where(
-        db.raw(condition.column),
+        db.raw(escapeRawFragmentPlaceholders(condition.column)),
         condition.operator,
         condition.value,
       );
@@ -299,7 +301,9 @@ export class PostgresAdapter implements DatabaseAdapter {
           for (let i = 0; i < groupConditions.length; i++) {
             const sc = groupConditions[i]!;
             const method = i === 0 ? 'whereRaw' : 'orWhereRaw';
-            this[method](`${sc.column} ILIKE ? ESCAPE '\\'`, [`%${escapeLikePattern(sc.value)}%`]);
+            this[method](`${escapeRawFragmentPlaceholders(sc.column)} ILIKE ? ESCAPE '\\'`, [
+              `%${escapeLikePattern(sc.value)}%`,
+            ]);
           }
         });
       }
@@ -323,7 +327,9 @@ export class PostgresAdapter implements DatabaseAdapter {
     // Build data query with specific columns
     let dataQuery: Knex.QueryBuilder = db.withSchema(schema ?? 'public').from(table);
     if (selectColumns?.length) {
-      dataQuery = dataQuery.select(selectColumns.map((col) => db.raw(col)));
+      dataQuery = dataQuery.select(
+        selectColumns.map((col) => db.raw(escapeRawFragmentPlaceholders(col))),
+      );
     }
 
     dataQuery = this.applyBaseFilterAndConditions(dataQuery, db, conditions, baseFilter);
@@ -374,10 +380,12 @@ export class PostgresAdapter implements DatabaseAdapter {
     let queryBuilder: Knex.QueryBuilder = db.withSchema(schema ?? 'public').from(table);
 
     if (selectColumns?.length) {
-      queryBuilder = queryBuilder.select(selectColumns.map((col) => db.raw(col)));
+      queryBuilder = queryBuilder.select(
+        selectColumns.map((col) => db.raw(escapeRawFragmentPlaceholders(col))),
+      );
     }
 
-    queryBuilder = queryBuilder.whereRaw(`${idColumn} = ?`, [id]);
+    queryBuilder = queryBuilder.whereRaw(`${escapeRawFragmentPlaceholders(idColumn)} = ?`, [id]);
 
     if (baseFilter) {
       queryBuilder = queryBuilder.andWhereRaw(`(${escapeRawFragmentPlaceholders(baseFilter)})`);
@@ -392,10 +400,15 @@ export class PostgresAdapter implements DatabaseAdapter {
     const result = new Map<string, Record<string, unknown>[]>();
 
     // Use a single raw query for maximum performance — avoids Knex builder overhead
+    // Column expressions and aliases come from the merchant's config too, so a
+    // `?` in a mapped column name (`"Main?"`) needs the same escape (#36834).
+    const foreignKey = escapeRawFragmentPlaceholders(query.foreignKey);
+    const quoteAlias = (alias: string): string =>
+      `"${escapeRawFragmentPlaceholders(alias.replaceAll('"', '""'))}"`;
     const selectParts = Object.entries(query.fields).map(
-      ([alias, col]) => `${col} as "${alias.replaceAll('"', '""')}"`,
+      ([alias, col]) => `${escapeRawFragmentPlaceholders(col)} as ${quoteAlias(alias)}`,
     );
-    selectParts.push(`${query.foreignKey} as "__fk"`);
+    selectParts.push(`${foreignKey} as "__fk"`);
 
     // Relation `filter` is raw merchant SQL, same as `baseFilter` — escape any
     // literal `?` (e.g. a jsonb key-exists operator) so it survives knex's
@@ -418,7 +431,9 @@ export class PostgresAdapter implements DatabaseAdapter {
       orderBy = fallbackSorts
         .map((sort, index) => {
           const clause = buildOrderByClause(sort);
-          return index === 0 ? clause : `(${sort.column})::text ASC NULLS LAST`;
+          return index === 0
+            ? clause
+            : `(${escapeRawFragmentPlaceholders(sort.column)})::text ASC NULLS LAST`;
         })
         .join(', ');
     }
@@ -443,7 +458,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     // return (or buffer) the whole child table.
     const boundedSql = (fkExpression: string): string =>
       `SELECT ${[...Object.keys(query.fields), '__fk']
-        .map((alias) => `"${alias.replaceAll('"', '""')}"`)
+        .map(quoteAlias)
         .join(', ')} FROM (SELECT ${selectParts.join(', ')}, ` +
       `ROW_NUMBER() OVER (PARTITION BY ${fkExpression} ORDER BY ${orderBy}) as "__rn" ` +
       `FROM ${qualifiedTable(query.schema, query.table)} WHERE ${fkExpression} IN (${placeholders})` +
@@ -453,7 +468,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     let rawResult: { rows: Record<string, unknown>[] };
     try {
       rawResult = await db.raw<{ rows: Record<string, unknown>[] }>(
-        boundedSql(query.foreignKey),
+        boundedSql(foreignKey),
         query.parentIds,
       );
     } catch (error) {
@@ -464,7 +479,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       // rows. The indexed comparison above stays the fast path (#32165).
       if (!isUncoercibleValueError(error)) throw error;
       rawResult = await db.raw<{ rows: Record<string, unknown>[] }>(
-        boundedSql(`${query.foreignKey}::text`),
+        boundedSql(`${foreignKey}::text`),
         query.parentIds.map(String),
       );
     }
@@ -515,9 +530,16 @@ export class PostgresAdapter implements DatabaseAdapter {
     // Range columns use the same CASE expression as the live path, ensuring
     // placeholders such as `N/A` never reach a numeric cast (#29552).
     const searchClause = [
-      ...query.columns.map((column) => `${column} ILIKE ? ESCAPE '\\'`),
-      ...filterColumns.map((column) => `${column}::text ILIKE ? ESCAPE '\\'`),
-      ...rangeColumns.map((column) => `${safeNumericRangeExpression(column)} IS NOT NULL`),
+      ...query.columns.map(
+        (column) => `${escapeRawFragmentPlaceholders(column)} ILIKE ? ESCAPE '\\'`,
+      ),
+      ...filterColumns.map(
+        (column) => `${escapeRawFragmentPlaceholders(column)}::text ILIKE ? ESCAPE '\\'`,
+      ),
+      ...rangeColumns.map(
+        (column) =>
+          `${escapeRawFragmentPlaceholders(safeNumericRangeExpression(column))} IS NOT NULL`,
+      ),
     ].join(' OR ');
     const bindings = [...query.columns, ...filterColumns].map(
       () => `%${escapeLikePattern(query.probeTerm)}%`,
@@ -560,7 +582,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       : '';
     const orderBy = query.orderBy ? ` ORDER BY ${buildOrderByClause(query.orderBy)}` : '';
     const sampled =
-      `SELECT ${query.column} AS "value" ` +
+      `SELECT ${escapeRawFragmentPlaceholders(query.column)} AS "value" ` +
       `FROM ${qualifiedTable(query.schema, query.table)}${where}${orderBy} LIMIT ?`;
     const result = await db.raw<{ rows: { value: unknown }[] }>(
       `SELECT DISTINCT "value" FROM (${sampled}) AS "sampled_rows" LIMIT ?`,
