@@ -418,9 +418,42 @@ than comparing the Kasbly token against your status column.
 | `DB_PASSWORD`                 | Yes      | Database password                                                                                                                               |
 | `DB_SSL_CA`                   | No       | PEM CA bundle referenced by `database.sslCa` for a private CA                                                                                   |
 | `CONNECTOR_API_KEY`           | Yes      | API key shared with Kasbly                                                                                                                      |
+| `CONNECTOR_API_KEY_PENDING`   | No       | Staged replacement key during rotation; setup writes and removes it (see "Rotating the API key")                                                |
 | `CONNECTOR_DOMAIN`            | Docker   | Public DNS name used by the bundled HTTPS proxy                                                                                                 |
 | `CONNECTOR_BIND`              | No       | Host interface Docker publishes port 4000 on (default `127.0.0.1`; `npm run setup` writes `0.0.0.0` for the "None" reverse-proxy topology)      |
 | `CONFIG_PATH`                 | No       | Config file path (default: `./connector.config.yml`)                                                                                            |
+
+## Rotating the API key
+
+Rotate the key without downtime by staging a second key: the connector accepts both keys while Kasbly tests and switches to the new one. Do not overwrite `CONNECTOR_API_KEY` in place — Kasbly would keep sending the old key and every request would fail with 401.
+
+**With the setup wizard (recommended):**
+
+1. On the connector host, run `npm run setup`. Answer Yes to "Existing connector configuration was found. Continue and create timestamped backups before saving?" (the default is No).
+2. Steps 1–5 (database, table, field mapping, search, filters and relations) ask every question again, because the wizard rebuilds the mapping from your answers. Each prompt defaults to your saved value, so press Enter through them after checking the defaults. The saved database password is reused automatically while the host, port, database and user are unchanged.
+3. In Step 6, answer Yes to "Generate and stage a replacement API key for zero-downtime rotation?". When setup finishes, it prints `New staged API key: kc_...` once. Copy it then.
+4. Answer the reverse-proxy (and public DNS name) prompts; they default to your saved values. Then recreate the connector with the command the wizard prints, for example `docker compose up -d --force-recreate connector` for the bundled Docker deployment, or restart your `npm start` process. A plain `docker compose restart connector` does not reload `.env`.
+5. In Kasbly, open the source, paste the key under **Stage replacement API key**, then **Test staged key**, then **Switch to staged key**.
+6. Once Kasbly has switched, run `npm run setup` again and answer Yes to "Retire the previous API key?" (the default is No). The staged key becomes `CONNECTOR_API_KEY` and `CONNECTOR_API_KEY_PENDING` is removed. Recreate the connector again with the printed command. This time the wizard does not print a key.
+
+Setup saves timestamped `.bak` copies of `.env` and `connector.config.yml` next to the originals. They still contain the old key, so delete them once the rotation is finished.
+
+**By hand:**
+
+1. Add the new key to `.env` as `CONNECTOR_API_KEY_PENDING=<new key>`.
+2. Add a second entry to `auth.apiKeys` in `connector.config.yml`:
+
+   ```yaml
+   auth:
+     apiKeys:
+       - key: '${CONNECTOR_API_KEY}'
+         label: 'kasbly-current'
+       - key: '${CONNECTOR_API_KEY_PENDING}'
+         label: 'kasbly-pending'
+   ```
+
+3. Recreate the connector so it reads the new `.env` (`docker compose up -d --force-recreate connector`, or restart `npm start`), then stage, test and switch the key in Kasbly as above.
+4. After Kasbly has switched, set `CONNECTOR_API_KEY` to the new key, delete `CONNECTOR_API_KEY_PENDING` from `.env`, remove the `kasbly-pending` entry from `auth.apiKeys`, and recreate the connector again.
 
 ## Docker HTTPS Deployment
 
