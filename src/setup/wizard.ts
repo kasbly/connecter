@@ -1,6 +1,13 @@
 import { randomBytes } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { input, select, confirm, checkbox, password } from '@inquirer/prompts';
 import { parse } from 'dotenv';
 import * as yaml from 'js-yaml';
@@ -856,10 +863,15 @@ function printInventorySortIndexHint(
 export async function runWizard(): Promise<void> {
   console.log('\n🔧 Kasbly Connector Setup\n');
 
-  const configPath = resolve('connector.config.yml');
   const envPath = resolve('.env');
-  const hasExistingConfig = existsSync(configPath);
   const hasExistingEnv = existsSync(envPath);
+  const existingEnv = hasExistingEnv ? parse(readFileSync(envPath, 'utf-8')) : {};
+  // Same target `npm start` and `npm run validate` read: CONFIG_PATH from the
+  // process environment, else from the .env the CLI loads, else the default.
+  const configPathSetting = process.env['CONFIG_PATH'] ?? existingEnv['CONFIG_PATH'];
+  const configPath = resolve(configPathSetting ?? 'connector.config.yml');
+  const hasCustomConfigPath = configPathSetting !== undefined;
+  const hasExistingConfig = existsSync(configPath);
   if (hasExistingConfig || hasExistingEnv) {
     const overwriteExisting = await confirm({
       message:
@@ -883,7 +895,6 @@ export async function runWizard(): Promise<void> {
       );
     }
   }
-  const existingEnv = hasExistingEnv ? parse(readFileSync(envPath, 'utf-8')) : {};
   const existingApiKey = existingEnv['CONNECTOR_API_KEY']?.trim() || undefined;
   const existingPendingApiKey = existingEnv['CONNECTOR_API_KEY_PENDING']?.trim() || undefined;
 
@@ -2090,8 +2101,12 @@ export async function runWizard(): Promise<void> {
   }
   if (hasExistingConfig) backupPrivateFile(configPath);
   if (hasExistingEnv) backupPrivateFile(envPath);
+  if (hasCustomConfigPath) mkdirSync(dirname(configPath), { recursive: true });
   writePrivateFile(configPath, yamlContent);
-  console.log(`✅ Configuration saved to ${configPath}`);
+  console.log(
+    `✅ Configuration saved to ${configPath}` +
+      (hasCustomConfigPath ? ' (the CONFIG_PATH that start and validate read)' : ''),
+  );
   writePrivateFile(envPath, envContent);
   console.log(`✅ Environment saved to ${envPath}`);
 

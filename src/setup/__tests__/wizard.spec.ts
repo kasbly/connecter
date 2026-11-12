@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'dotenv';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as yaml from 'js-yaml';
@@ -6834,6 +6842,200 @@ describe('runWizard', () => {
         process.chdir(previousDirectory);
         rmSync(directory, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('CONFIG_PATH target (#37165)', () => {
+    const baseConfigYaml = [
+      'version: 1',
+      'auth:',
+      '  apiKeys:',
+      '    - key: key',
+      '      label: test',
+      'database:',
+      '  type: postgres',
+      '  host: database.example.com',
+      '  port: 5432',
+      '  database: catalog',
+      '  user: reader',
+      '  password: secret',
+      '  ssl: false',
+      'resources:',
+      '  inventory:',
+      '    table: products',
+      '    idColumn: id',
+      '    fields:',
+      '      title: old_title',
+      '      price: price',
+      '      currency: currency',
+      '',
+    ].join('\n');
+
+    /** Runs the wizard in a scratch directory, choosing `new_title` as the title column. */
+    const runSetupInScratchDirectory = async (
+      prepare: (directory: string) => void,
+      after: (directory: string, consoleLog: ReturnType<typeof vi.spyOn>) => void,
+    ) => {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const previousConfigPath = process.env['CONFIG_PATH'];
+      delete process.env['CONFIG_PATH'];
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      const db = Object.assign(vi.fn(), {
+        destroy: vi.fn().mockResolvedValue(undefined),
+        raw: vi.fn().mockResolvedValue({ rows: [] }),
+      });
+      vi.clearAllMocks();
+      promptMocks.select.mockImplementation(
+        (prompt: { message: string; default?: string; choices: Array<{ value: string }> }) => {
+          if (prompt.message.startsWith('Database type')) return Promise.resolve('postgres');
+          if (prompt.message.startsWith('Which table contains')) return Promise.resolve('products');
+          if (prompt.message.startsWith('Which column is the unique listing id'))
+            return Promise.resolve('id');
+          if (prompt.message.startsWith('Which reverse proxy')) return Promise.resolve('none');
+          const field = /^Which column contains the (\w+)\?$/.exec(prompt.message)?.[1];
+          if (field === 'title') return Promise.resolve('new_title');
+          if (field && ['price', 'currency'].includes(field)) return Promise.resolve(field);
+          return Promise.resolve(UNMAPPED_FIELD_VALUE);
+        },
+      );
+      promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+        if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+        if (message.startsWith('Port')) return Promise.resolve('5432');
+        if (message.startsWith('Database name')) return Promise.resolve('catalog');
+        if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+        return Promise.resolve('reader');
+      });
+      promptMocks.password.mockResolvedValue('password');
+      promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+        Promise.resolve(!message.startsWith('Does this database require TLS')),
+      );
+      promptMocks.checkbox.mockImplementation(({ message }: { message: string }) =>
+        Promise.resolve(
+          message.startsWith('Which columns should be searchable') ? ['new_title'] : [],
+        ),
+      );
+      vi.mocked(introspectDatabase).mockResolvedValue({
+        db: db as never,
+        result: {
+          tables: [
+            {
+              name: 'products',
+              kind: 'table',
+              rowCount: 2,
+              columns: [
+                { name: 'id', type: 'integer', nullable: false, isPrimaryKey: true },
+                { name: 'old_title', type: 'text', nullable: false, isPrimaryKey: false },
+                { name: 'new_title', type: 'text', nullable: false, isPrimaryKey: false },
+                { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+                { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              ],
+            },
+          ],
+          foreignKeys: [],
+        },
+        retriedWithTls: false,
+      });
+      try {
+        prepare(directory);
+        process.chdir(directory);
+        await runWizard();
+        after(directory, consoleLog);
+      } finally {
+        consoleLog.mockRestore();
+        if (previousConfigPath === undefined) delete process.env['CONFIG_PATH'];
+        else process.env['CONFIG_PATH'] = previousConfigPath;
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    };
+
+    /** The path `npm start` and `npm run validate` select after the CLI loads `.env`. */
+    const selectedRuntimePath = (directory: string) =>
+      join(
+        directory,
+        parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONFIG_PATH'] ??
+          'connector.config.yml',
+      );
+
+    it('rewrites an existing CONFIG_PATH file from .env, backs it up and leaves the default alone', async () => {
+      await runSetupInScratchDirectory(
+        (directory) => {
+          writeFileSync(
+            join(directory, '.env'),
+            'CONFIG_PATH=./live.config.yml\nCONNECTOR_API_KEY=existing-key\n',
+          );
+          writeFileSync(join(directory, 'live.config.yml'), baseConfigYaml);
+        },
+        (directory, consoleLog) => {
+          const target = selectedRuntimePath(directory);
+          expect(target).toBe(join(directory, 'live.config.yml'));
+          expect(
+            loadExistingSetupConfig(target, join(directory, '.env')).resources.inventory.fields,
+          ).toMatchObject({ title: '"new_title"' });
+          expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
+          expect(
+            readdirSync(directory).filter(
+              (name) => name.startsWith('live.config.yml.') && name.endsWith('.bak'),
+            ),
+          ).toHaveLength(1);
+          expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONFIG_PATH']).toBe(
+            './live.config.yml',
+          );
+          expect(consoleLog).toHaveBeenCalledWith(
+            expect.stringContaining(`Configuration saved to ${join(directory, 'live.config.yml')}`),
+          );
+        },
+      );
+    });
+
+    it('creates a missing CONFIG_PATH file, including its directory, from .env', async () => {
+      await runSetupInScratchDirectory(
+        (directory) => {
+          writeFileSync(join(directory, '.env'), 'CONFIG_PATH=./config/live.config.yml\n');
+        },
+        (directory, consoleLog) => {
+          const target = selectedRuntimePath(directory);
+          expect(target).toBe(join(directory, 'config', 'live.config.yml'));
+          expect(
+            loadExistingSetupConfig(target, join(directory, '.env')).resources.inventory.fields,
+          ).toMatchObject({ title: '"new_title"' });
+          expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
+          expect(consoleLog).toHaveBeenCalledWith(
+            expect.stringContaining(`Configuration saved to ${target}`),
+          );
+        },
+      );
+    });
+
+    it('prefers CONFIG_PATH from the process environment over .env, as start does', async () => {
+      await runSetupInScratchDirectory(
+        (directory) => {
+          writeFileSync(join(directory, '.env'), 'CONFIG_PATH=./from-dotenv.yml\n');
+          writeFileSync(join(directory, 'from-env.yml'), baseConfigYaml);
+          process.env['CONFIG_PATH'] = './from-env.yml';
+        },
+        (directory) => {
+          expect(
+            loadExistingSetupConfig(join(directory, 'from-env.yml'), join(directory, '.env'))
+              .resources.inventory.fields,
+          ).toMatchObject({ title: '"new_title"' });
+          expect(existsSync(join(directory, 'from-dotenv.yml'))).toBe(false);
+        },
+      );
+    });
+
+    it('still writes connector.config.yml when CONFIG_PATH is not set', async () => {
+      await runSetupInScratchDirectory(
+        () => undefined,
+        (directory) => {
+          expect(selectedRuntimePath(directory)).toBe(join(directory, 'connector.config.yml'));
+          expect(
+            loadExistingSetupConfig(selectedRuntimePath(directory), join(directory, '.env'))
+              .resources.inventory.fields,
+          ).toMatchObject({ title: '"new_title"' });
+        },
+      );
     });
   });
 });
