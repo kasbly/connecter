@@ -409,19 +409,19 @@ than comparing the Kasbly token against your status column.
 
 ## Environment Variables
 
-| Variable                      | Required | Description                                                                                                                                     |
-| ----------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DB_HOST`                     | Yes      | Database hostname                                                                                                                               |
-| `CONNECTOR_CONTAINER_DB_HOST` | No       | Hostname used only inside the Docker connector container; setup writes `host.docker.internal` for a bundled deployment with a loopback database |
-| `DB_NAME`                     | Yes      | Database name                                                                                                                                   |
-| `DB_USER`                     | Yes      | Database username                                                                                                                               |
-| `DB_PASSWORD`                 | Yes      | Database password                                                                                                                               |
-| `DB_SSL_CA`                   | No       | PEM CA bundle referenced by `database.sslCa` for a private CA                                                                                   |
-| `CONNECTOR_API_KEY`           | Yes      | API key shared with Kasbly                                                                                                                      |
-| `CONNECTOR_API_KEY_PENDING`   | No       | Staged replacement key during rotation; setup writes and removes it (see "Rotating the API key")                                                |
-| `CONNECTOR_DOMAIN`            | Docker   | Public DNS name used by the bundled HTTPS proxy                                                                                                 |
-| `CONNECTOR_BIND`              | No       | Host interface Docker publishes port 4000 on (default `127.0.0.1`; `npm run setup` writes `0.0.0.0` for the "None" reverse-proxy topology)      |
-| `CONFIG_PATH`                 | No       | Config file path (default: `./connector.config.yml`)                                                                                            |
+| Variable                      | Required | Description                                                                                                                                |
+| ----------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DB_HOST`                     | Yes      | Database hostname                                                                                                                          |
+| `CONNECTOR_CONTAINER_DB_HOST` | No       | Hostname used only inside the Docker connector container; setup writes `host.docker.internal` for bundled or none with a loopback database |
+| `DB_NAME`                     | Yes      | Database name                                                                                                                              |
+| `DB_USER`                     | Yes      | Database username                                                                                                                          |
+| `DB_PASSWORD`                 | Yes      | Database password                                                                                                                          |
+| `DB_SSL_CA`                   | No       | PEM CA bundle referenced by `database.sslCa` for a private CA                                                                              |
+| `CONNECTOR_API_KEY`           | Yes      | API key shared with Kasbly                                                                                                                 |
+| `CONNECTOR_API_KEY_PENDING`   | No       | Staged replacement key during rotation; setup writes and removes it (see "Rotating the API key")                                           |
+| `CONNECTOR_DOMAIN`            | Docker   | Public DNS name used by the bundled HTTPS proxy                                                                                            |
+| `CONNECTOR_BIND`              | No       | Host interface Docker publishes port 4000 on (default `127.0.0.1`; `npm run setup` writes `0.0.0.0` for the "None" reverse-proxy topology) |
+| `CONFIG_PATH`                 | No       | Config file path (default: `./connector.config.yml`)                                                                                       |
 
 ## Rotating the API key
 
@@ -433,7 +433,7 @@ Rotate the key without downtime by staging a second key: the connector accepts b
 2. Steps 1–5 (database, table, field mapping, search, filters and relations) ask every question again, because the wizard rebuilds the mapping from your answers. Each prompt defaults to your saved value, so press Enter through them after checking the defaults. The saved database password is reused automatically while the host, port, database and user are unchanged.
 3. In Step 6, answer Yes to "Generate and stage a replacement API key for zero-downtime rotation?". When setup finishes, it prints `New staged API key: kc_...` once. Copy it then.
 4. Answer the reverse-proxy (and public DNS name) prompts; they default to your saved values. Then recreate the connector with the command the wizard prints, for example `docker compose up -d --force-recreate connector` for the bundled Docker deployment, or restart your `npm start` process. A plain `docker compose restart connector` does not reload `.env`.
-5. In Kasbly, open the source, paste the key under **Stage replacement API key**, then **Test staged key**, then **Switch to staged key**.
+5. In Kasbly, open the source’s **Edit** dialog, paste the key under **Stage replacement API key**, and click **Save**. Reopen **Edit**, click **Test staged key**, then **Switch to staged key**. To cancel before switching, click **Discard staged key**; Kasbly continues using the current key.
 6. Once Kasbly has switched, run `npm run setup` again and answer Yes to "Retire the previous API key?" (the default is No). The staged key becomes `CONNECTOR_API_KEY` and `CONNECTOR_API_KEY_PENDING` is removed. Recreate the connector again with the printed command. This time the wizard does not print a key.
 
 Setup saves timestamped `.bak` copies of `.env` and `connector.config.yml` next to the originals. They still contain the old key, so delete them once the rotation is finished.

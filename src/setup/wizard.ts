@@ -455,9 +455,9 @@ const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '::1'];
 
 /**
  * True for a host that only ever means "this machine" — `localhost`,
- * `127.0.0.1`, `::1`. Inside the bundled Compose deployment that machine is
- * the connector's own container, not the operator's host, so this is also
- * what flags the `bundled` + loopback DB_HOST trap (#28245).
+ * `127.0.0.1`, `::1`. Inside a Compose deployment that machine is the
+ * connector's own container, not the operator's host, so this is also
+ * what flags the Docker + loopback DB_HOST trap (#28245, #37400).
  */
 export function isLoopbackHost(host: string): boolean {
   return LOOPBACK_HOSTS.includes(host.trim().toLowerCase());
@@ -474,6 +474,23 @@ export function shouldDefaultToTls(host: string): boolean {
  * trail — honest for the deployment the wizard tells the operator to run.
  */
 const BUNDLED_PROXY_ADDRESS = '172.30.0.2';
+
+/**
+ * The sample values `.env.example` ships, which `cp .env.example .env` copies
+ * into a merchant's real `.env`. They are public (the example file is mirrored),
+ * so setup must treat them as "not configured yet" instead of keeping them.
+ */
+export const PLACEHOLDER_DOMAIN = 'connector.example.com';
+
+/** True for the published `.env.example` API key (`kc_change_me_…`) or any other `change_me` stand-in. */
+export function isPlaceholderApiKey(value: string | undefined): boolean {
+  return /change_me/i.test(value?.trim() ?? '');
+}
+
+/** True for the published `.env.example` domain. */
+export function isPlaceholderDomain(value: string | undefined): boolean {
+  return value?.trim().toLowerCase() === PLACEHOLDER_DOMAIN;
+}
 
 /** Reject a value that is a URL or a host:port rather than a bare DNS name. */
 export function isPublicHostname(value: string): boolean {
@@ -501,6 +518,7 @@ interface ProxyTopologySelection {
  */
 async function collectTrustedProxies(
   existing: string | undefined,
+  existingBind?: string,
 ): Promise<ProxyTopologySelection> {
   const topology = await select({
     message: 'Which reverse proxy will sit in front of the connector?',
@@ -512,10 +530,17 @@ async function collectTrustedProxies(
       { name: 'A different proxy (enter its IPs/CIDRs)', value: 'custom' as const },
       { name: 'None — the connector is exposed directly', value: 'none' as const },
     ],
+    // "None" saves no trustedProxies; its only marker is CONNECTOR_BIND=0.0.0.0
+    // in the existing .env, so a None install must not rerun defaulting to
+    // bundled (which would drop CONNECTOR_BIND and strand the connector).
     default:
-      existing === undefined || existing === BUNDLED_PROXY_ADDRESS
-        ? ('bundled' as const)
-        : ('custom' as const),
+      existing === undefined
+        ? existingBind === '0.0.0.0'
+          ? ('none' as const)
+          : ('bundled' as const)
+        : existing === BUNDLED_PROXY_ADDRESS
+          ? ('bundled' as const)
+          : ('custom' as const),
   });
 
   if (topology === 'none') return { topology, trustedProxies: undefined };
@@ -895,7 +920,11 @@ export async function runWizard(): Promise<void> {
       );
     }
   }
-  const existingApiKey = existingEnv['CONNECTOR_API_KEY']?.trim() || undefined;
+  // `cp .env.example .env` leaves the public placeholder key in place; keeping it
+  // as the live key (and skipping the first-run "Generate API key?") would hand
+  // out a secret anyone can read in the repository.
+  const savedApiKey = existingEnv['CONNECTOR_API_KEY']?.trim() || undefined;
+  const existingApiKey = isPlaceholderApiKey(savedApiKey) ? undefined : savedApiKey;
   const existingPendingApiKey = existingEnv['CONNECTOR_API_KEY_PENDING']?.trim() || undefined;
 
   // Step 1: Database Connection
@@ -959,7 +988,15 @@ export async function runWizard(): Promise<void> {
     message: 'Does this database require TLS?',
     default: existingConfig?.database.ssl ?? shouldDefaultToTls(dbHost),
   });
-  const tls = await collectTlsSettings(requiresTls);
+  const tls = await collectTlsSettings(
+    requiresTls,
+    existingConfig?.database.ssl
+      ? {
+          ca: existingConfig.database.sslCa,
+          rejectUnauthorized: existingConfig.database.sslRejectUnauthorized,
+        }
+      : undefined,
+  );
   const dbSchema = await input({
     message: 'PostgreSQL schema:',
     default: existingConfig?.resources.inventory.schema ?? 'public',
@@ -1399,7 +1436,7 @@ export async function runWizard(): Promise<void> {
     detectedClauseKeys.add(normalizeFilterClause(publishedFilterExpression));
     const usePublished = await confirm({
       message: `Only expose published items? (detected column: ${publishedFilter.column})`,
-      default: existingBaseFilter === undefined || existingHasClause(publishedFilterExpression),
+      default: existingConfig === undefined || existingHasClause(publishedFilterExpression),
     });
     if (usePublished) {
       baseFilterParts.push(publishedFilterExpression);
@@ -1432,7 +1469,7 @@ export async function runWizard(): Promise<void> {
     const excludeDeleted = await confirm({
       message: `Exclude soft-deleted items? (detected column: ${softDeleteColumn})`,
       default:
-        existingBaseFilter === undefined ||
+        existingConfig === undefined ||
         existingHasClause(`${quoteIfNeeded(softDeleteColumn)} IS NULL`),
     });
     if (excludeDeleted) {
@@ -1800,6 +1837,7 @@ export async function runWizard(): Promise<void> {
   // than demanding a domain the printed instructions never use.
   const { topology: proxyTopology, trustedProxies } = await collectTrustedProxies(
     existingConfig?.server.trustedProxies,
+    existingEnv['CONNECTOR_BIND']?.trim(),
   );
   const connectorDomain =
     proxyTopology === 'bundled'
@@ -1807,7 +1845,9 @@ export async function runWizard(): Promise<void> {
           await input({
             message:
               'Public DNS name for this connector (its A/AAAA record must point at this host):',
-            default: existingEnv['CONNECTOR_DOMAIN'],
+            default: isPlaceholderDomain(existingEnv['CONNECTOR_DOMAIN'])
+              ? undefined
+              : existingEnv['CONNECTOR_DOMAIN'],
             validate: (value) =>
               isPublicHostname(value) ||
               'Enter a DNS name such as connector.merchant.example — no scheme, port, or path.',
@@ -2050,8 +2090,9 @@ export async function runWizard(): Promise<void> {
   const yamlContent = yaml.dump(config, { lineWidth: 120, quoteStyle: 'double' });
   // The wizard and `npm run validate` run on the host, while Compose runs the
   // connector in a container. Keep the host address in .env and let Compose
-  // use its container-only override for loopback databases (#28984).
-  const bundledLoopbackDbTrap = proxyTopology === 'bundled' && isLoopbackHost(dbHost);
+  // use its container-only override for loopback databases (#28984, #37400).
+  // `custom` never recommends Docker, so it keeps DB_HOST as-is.
+  const dockerLoopbackDbTrap = proxyTopology !== 'custom' && isLoopbackHost(dbHost);
   // Build the .env content BEFORE writing connector.config.yml. mergeEnvironmentFile
   // (via serializeEnvValue) can still throw here for a rerun that reuses an
   // existingConfig password never run through the prompt's own validate — building
@@ -2078,7 +2119,7 @@ export async function runWizard(): Promise<void> {
     CONNECTOR_BIND: proxyTopology === 'none' ? '0.0.0.0' : null,
     // docker-compose.yml applies this only inside the connector container;
     // retain DB_HOST for host-side setup and validation commands.
-    CONNECTOR_CONTAINER_DB_HOST: bundledLoopbackDbTrap ? 'host.docker.internal' : null,
+    CONNECTOR_CONTAINER_DB_HOST: dockerLoopbackDbTrap ? 'host.docker.internal' : null,
   });
   // The inventory probe uses a directly constructed adapter, so it never
   // parses auth with the entered secret. Refuse to write if loadConfig would
@@ -2150,17 +2191,6 @@ export async function runWizard(): Promise<void> {
     );
     console.log(`   Verify the public endpoint: curl -fsS https://${connectorDomain}/health`);
     console.log(`   Give Kasbly this URL: https://${connectorDomain}`);
-    if (bundledLoopbackDbTrap) {
-      console.log(
-        `\n   ℹ DB_HOST remains ${dbHost} for host-side setup and validation; Docker uses ` +
-          'CONNECTOR_CONTAINER_DB_HOST=host.docker.internal inside the connector container (#28984).',
-      );
-      console.log(
-        '   Make sure PostgreSQL accepts connections from the Docker bridge network ' +
-          '(172.30.0.0/24), not only 127.0.0.1 — set listen_addresses in postgresql.conf and add ' +
-          'a matching pg_hba.conf entry, then restart PostgreSQL.',
-      );
-    }
   } else if (proxyTopology === 'custom') {
     console.log(
       (hasExistingConfig || hasExistingEnv
@@ -2180,6 +2210,17 @@ export async function runWizard(): Promise<void> {
     );
     console.log('   Verify locally: curl -fsS http://localhost:4000/health');
     console.log('   Give Kasbly this URL: http://<this-host>:4000 (no public DNS name needed)');
+  }
+  if (dockerLoopbackDbTrap) {
+    console.log(
+      `\n   ℹ DB_HOST remains ${dbHost} for host-side setup and validation; Docker uses ` +
+        'CONNECTOR_CONTAINER_DB_HOST=host.docker.internal inside the connector container (#28984).',
+    );
+    console.log(
+      '   Make sure PostgreSQL accepts connections from the Docker bridge network ' +
+        '(172.30.0.0/24), not only 127.0.0.1 — set listen_addresses in postgresql.conf and add ' +
+        'a matching pg_hba.conf entry, then restart PostgreSQL.',
+    );
   }
   // Without one of these, every AI inventory card ends with a dead 🔗 after a
   // successful Test connection — Kasbly only builds a customer link from one
@@ -2405,16 +2446,34 @@ export function validateCaCertificatePath(value: string): true | string {
   return true;
 }
 
-async function collectTlsSettings(requiresTls: boolean): Promise<DatabaseTlsSettings> {
+async function collectTlsSettings(
+  requiresTls: boolean,
+  saved?: { ca?: string; rejectUnauthorized?: boolean },
+): Promise<DatabaseTlsSettings> {
   if (!requiresTls) return { enabled: false, rejectUnauthorized: true };
 
+  // A rerun (the README's key rotation) defaults to the saved choice, so
+  // pressing Enter does not fall back to the system CA store and fail against
+  // a private-CA database. The wizard only stores the PEM contents, not the
+  // path, hence the "keep" choice instead of a path default.
+  const savedCa = saved?.ca;
+  const defaultMode =
+    savedCa !== undefined
+      ? ('saved-ca' as const)
+      : saved?.rejectUnauthorized === false
+        ? ('insecure' as const)
+        : ('system-ca' as const);
   const tlsMode = await select({
     message: 'TLS certificate verification:',
+    default: defaultMode,
     choices: [
       {
         name: 'Verify with the system CA store (recommended)',
         value: 'system-ca',
       },
+      ...(savedCa !== undefined
+        ? [{ name: 'Keep the saved CA bundle', value: 'saved-ca' as const }]
+        : []),
       {
         name: 'Supply a PEM CA certificate/bundle',
         value: 'custom-ca',
@@ -2425,6 +2484,10 @@ async function collectTlsSettings(requiresTls: boolean): Promise<DatabaseTlsSett
       },
     ],
   });
+
+  if (tlsMode === 'saved-ca' && savedCa !== undefined) {
+    return { enabled: true, ca: savedCa, rejectUnauthorized: true };
+  }
 
   if (tlsMode === 'custom-ca') {
     const caPath = await input({

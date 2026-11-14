@@ -24,6 +24,8 @@ import {
   getSetupHostDefault,
   getStatusValueDefault,
   getUpdatedAtColumnPrompt,
+  isPlaceholderApiKey,
+  isPlaceholderDomain,
   isPublicHostname,
   loadExistingSetupConfig,
   mergeEnvironmentFile,
@@ -677,6 +679,25 @@ describe('shouldDefaultToTls', () => {
 
   it('defaults to TLS for a remote database host', () => {
     expect(shouldDefaultToTls('postgres.example.com')).toBe(true);
+  });
+});
+
+describe('isPlaceholderApiKey / isPlaceholderDomain', () => {
+  it.each(['kc_change_me_to_a_secure_key', ' kc_change_me_to_a_secure_key ', 'my_CHANGE_ME_key'])(
+    'flags %j as a placeholder API key',
+    (value) => {
+      expect(isPlaceholderApiKey(value)).toBe(true);
+    },
+  );
+
+  it.each([undefined, '', 'kc_0123456789abcdef'])('keeps %j as a real API key', (value) => {
+    expect(isPlaceholderApiKey(value)).toBe(false);
+  });
+
+  it('flags only the .env.example domain', () => {
+    expect(isPlaceholderDomain('Connector.Example.com ')).toBe(true);
+    expect(isPlaceholderDomain('connector.merchant.example')).toBe(false);
+    expect(isPlaceholderDomain(undefined)).toBe(false);
   });
 });
 
@@ -4038,6 +4059,29 @@ describe('runWizard', () => {
       expect(logs.join('\n')).toContain('Row filter (baseFilter) changed');
     });
 
+    it('keeps the published and soft-delete filters declined when Enter is pressed on a rerun', async () => {
+      // Declined once, so there is no saved baseFilter; the prompts must still
+      // default to the saved answer (No), not back to Yes.
+      const { baseFilter } = await rerunWithBaseFilter('', [
+        { name: 'is_published', type: 'boolean' },
+        { name: 'deleted_at', type: 'timestamp' },
+      ]);
+
+      expect(promptMocks.confirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining('Only expose published items?'),
+          default: false,
+        }),
+      );
+      expect(promptMocks.confirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining('Exclude soft-deleted items?'),
+          default: false,
+        }),
+      );
+      expect(baseFilter).toBeUndefined();
+    });
+
     it('keeps the hand-written filter on a table with no published, stock or soft-delete column', async () => {
       const { baseFilter } = await rerunWithBaseFilter(
         'visibility = \'public\' AND "isTest" = false',
@@ -4624,82 +4668,105 @@ describe('runWizard', () => {
     }
   });
 
-  it('keeps a loopback DB_HOST for host-side commands and sets a Compose-only override for bundled Docker (#28984)', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
-    const previousDirectory = process.cwd();
-    const db = Object.assign(vi.fn(), {
-      destroy: vi.fn().mockResolvedValue(undefined),
-      withSchema: vi.fn(() => ({
-        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
-      })),
-    });
-    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  it.each(['bundled', 'none', 'custom'] as const)(
+    'keeps a loopback DB_HOST for host-side commands and writes CONNECTOR_CONTAINER_DB_HOST only when %s offers Docker (#28984, #37400)',
+    async (topology) => {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const db = Object.assign(vi.fn(), {
+        destroy: vi.fn().mockResolvedValue(undefined),
+        withSchema: vi.fn(() => ({
+          table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+        })),
+      });
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      const writesContainerDbHost = topology !== 'custom';
 
-    vi.clearAllMocks();
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('postgres'));
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('products'));
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('id'));
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
-    for (const answer of ['title', 'price', 'currency', '\0unmapped', '\0unmapped']) {
-      promptMocks.select.mockImplementationOnce(() => Promise.resolve(answer));
-    }
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('\0unmapped'));
-    // Accepts the recommended bundled Docker proxy and default "localhost" Host.
-    promptMocks.select.mockImplementationOnce(() => Promise.resolve('bundled'));
-    for (const answer of ['localhost', '5432', 'catalog', 'reader', 'merchant_data', 'x.example']) {
-      promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
-    }
-    promptMocks.password.mockResolvedValueOnce('p@ss#word');
-    promptMocks.confirm.mockImplementation(({ message }) =>
-      Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
-    );
-    promptMocks.checkbox.mockImplementation(() => Promise.resolve([]));
-    vi.mocked(introspectDatabase).mockResolvedValueOnce({
-      db: db as never,
-      result: {
-        tables: [
-          {
-            name: 'products',
-            kind: 'table',
-            rowCount: 40,
-            columns: [
-              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
-              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
-              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
-              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
-            ],
-          },
-        ],
-        foreignKeys: [],
-      },
-      retriedWithTls: false,
-    });
+      vi.clearAllMocks();
+      promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+        if (message.startsWith('Database type')) return Promise.resolve('postgres');
+        if (message.startsWith('Which table contains')) return Promise.resolve('products');
+        if (message.startsWith('Which column is the unique listing id')) {
+          return Promise.resolve('id');
+        }
+        if (message.startsWith('Which reverse proxy')) return Promise.resolve(topology);
+        const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+        if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
+          return Promise.resolve(fieldMatch[1]);
+        }
+        return Promise.resolve('\0unmapped');
+      });
+      promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+        if (message.startsWith('Host')) return Promise.resolve('localhost');
+        if (message.startsWith('Port')) return Promise.resolve('5432');
+        if (message.startsWith('Database name')) return Promise.resolve('catalog');
+        if (message.startsWith('PostgreSQL schema')) return Promise.resolve('merchant_data');
+        if (message.startsWith('Public DNS name')) return Promise.resolve('x.example');
+        if (message.startsWith('Trusted proxy')) return Promise.resolve('203.0.113.5');
+        return Promise.resolve('reader');
+      });
+      promptMocks.password.mockResolvedValue('p@ss#word');
+      promptMocks.confirm.mockImplementation(({ message }) =>
+        Promise.resolve(message.startsWith('Does this database require TLS') ? false : true),
+      );
+      promptMocks.checkbox.mockImplementation(() => Promise.resolve([]));
+      vi.mocked(introspectDatabase).mockResolvedValueOnce({
+        db: db as never,
+        result: {
+          tables: [
+            {
+              name: 'products',
+              kind: 'table',
+              rowCount: 40,
+              columns: [
+                { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+                { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+                { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+                { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              ],
+            },
+          ],
+          foreignKeys: [],
+        },
+        retriedWithTls: false,
+      });
 
-    try {
-      process.chdir(directory);
-      await runWizard();
+      try {
+        process.chdir(directory);
+        await runWizard();
 
-      // The pre-save probe and host-side validation both use the loopback
-      // address. Compose consumes the separate container-only override.
-      expect(createDatabaseAdapter).toHaveBeenCalledWith(
-        expect.objectContaining({ host: 'localhost' }),
-      );
-      expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['DB_HOST']).toBe('localhost');
-      expect(
-        parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_CONTAINER_DB_HOST'],
-      ).toBe('host.docker.internal');
-      expect(consoleLog).toHaveBeenCalledWith(
-        expect.stringContaining('DB_HOST remains localhost for host-side setup and validation'),
-      );
-      expect(consoleLog).toHaveBeenCalledWith(
-        expect.stringContaining('accepts connections from the Docker bridge network'),
-      );
-    } finally {
-      consoleLog.mockRestore();
-      process.chdir(previousDirectory);
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
+        // The pre-save probe and host-side validation both use the loopback
+        // address. Compose consumes the separate container-only override.
+        expect(createDatabaseAdapter).toHaveBeenCalledWith(
+          expect.objectContaining({ host: 'localhost' }),
+        );
+        const env = parse(readFileSync(join(directory, '.env'), 'utf-8'));
+        expect(env['DB_HOST']).toBe('localhost');
+        expect(env['CONNECTOR_CONTAINER_DB_HOST']).toBe(
+          writesContainerDbHost ? 'host.docker.internal' : undefined,
+        );
+        if (writesContainerDbHost) {
+          expect(consoleLog).toHaveBeenCalledWith(
+            expect.stringContaining('DB_HOST remains localhost for host-side setup and validation'),
+          );
+          expect(consoleLog).toHaveBeenCalledWith(
+            expect.stringContaining('accepts connections from the Docker bridge network'),
+          );
+        } else {
+          expect(consoleLog).not.toHaveBeenCalledWith(
+            expect.stringContaining('CONNECTOR_CONTAINER_DB_HOST=host.docker.internal'),
+          );
+          expect(consoleLog).not.toHaveBeenCalledWith(
+            expect.stringContaining('accepts connections from the Docker bridge network'),
+          );
+        }
+      } finally {
+        consoleLog.mockRestore();
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('offers a dedicated listing-URL prompt next to the field mappings, wiring a Woo/WordPress-shaped `permalink` column onto attributes.url (#28246)', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
@@ -6716,6 +6783,120 @@ describe('runWizard', () => {
       }
     });
 
+    describe('rerun defaults for TLS and the proxy topology', () => {
+      const PEM = '-----BEGIN CERTIFICATE-----\nmerchant-ca\n-----END CERTIFICATE-----';
+
+      /** First run with `topology`, optional config edit, then a rerun that accepts every default. */
+      async function rerunAcceptingDefaults(
+        topology: 'bundled' | 'custom' | 'none',
+        editConfig?: (config: { database: Record<string, unknown> }) => void,
+      ): Promise<{ env: Record<string, string> }> {
+        const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+        const previousDirectory = process.cwd();
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        vi.clearAllMocks();
+        mockMinimalRunPrompts(topology);
+        try {
+          process.chdir(directory);
+          await runWizard();
+          const configPath = join(directory, 'connector.config.yml');
+          if (editConfig) {
+            const config = yaml.load(readFileSync(configPath, 'utf-8')) as {
+              database: Record<string, unknown>;
+            };
+            editConfig(config);
+            writeFileSync(configPath, yaml.dump(config));
+          }
+          vi.clearAllMocks();
+          mockMinimalRunPrompts(topology);
+          const select = promptMocks.select.getMockImplementation()!;
+          promptMocks.select.mockImplementation((prompt) =>
+            prompt.message.startsWith('TLS certificate verification') ||
+            prompt.message.startsWith('Which reverse proxy')
+              ? Promise.resolve(prompt.default)
+              : select(prompt),
+          );
+          promptMocks.confirm.mockImplementation(
+            ({ message, default: answer }: { message: string; default?: boolean }) =>
+              Promise.resolve(
+                message.startsWith('Existing connector configuration') ||
+                  (answer ?? !message.startsWith('Does this database require TLS')),
+              ),
+          );
+          await runWizard();
+          return { env: parse(readFileSync(join(directory, '.env'), 'utf-8')) };
+        } finally {
+          consoleLog.mockRestore();
+          process.chdir(previousDirectory);
+          rmSync(directory, { recursive: true, force: true });
+        }
+      }
+
+      it('offers to keep the saved CA bundle and defaults to it', async () => {
+        const { env } = await rerunAcceptingDefaults('bundled', (config) => {
+          config.database['ssl'] = true;
+          config.database['sslCa'] = PEM;
+        });
+
+        expect(promptMocks.select).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: 'TLS certificate verification:',
+            default: 'saved-ca',
+            choices: expect.arrayContaining([
+              expect.objectContaining({ value: 'saved-ca', name: 'Keep the saved CA bundle' }),
+            ]),
+          }),
+        );
+        expect(env['DB_SSL_CA']).toContain('merchant-ca');
+      });
+
+      it('defaults to disabled verification only when the saved config has it', async () => {
+        await rerunAcceptingDefaults('bundled', (config) => {
+          config.database['ssl'] = true;
+          config.database['sslRejectUnauthorized'] = false;
+        });
+
+        expect(promptMocks.select).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: 'TLS certificate verification:',
+            default: 'insecure',
+          }),
+        );
+      });
+
+      it('defaults to the system CA store, with no saved-CA choice, for a verifying config without a CA', async () => {
+        await rerunAcceptingDefaults('bundled', (config) => {
+          config.database['ssl'] = true;
+        });
+
+        const tlsPrompt = promptMocks.select.mock.calls
+          .map(([prompt]) => prompt)
+          .find((prompt) => prompt.message.startsWith('TLS certificate verification'));
+        expect(tlsPrompt.default).toBe('system-ca');
+        expect(tlsPrompt.choices.map((choice: { value: string }) => choice.value)).not.toContain(
+          'saved-ca',
+        );
+      });
+
+      it.each([
+        ['none', 'none', '0.0.0.0'],
+        ['bundled', 'bundled', undefined],
+      ] as const)(
+        'defaults a rerun of a %s install to %s and keeps CONNECTOR_BIND',
+        async (topology, expectedDefault, bind) => {
+          const { env } = await rerunAcceptingDefaults(topology);
+
+          expect(promptMocks.select).toHaveBeenCalledWith(
+            expect.objectContaining({
+              message: expect.stringContaining('Which reverse proxy'),
+              default: expectedDefault,
+            }),
+          );
+          expect(env['CONNECTOR_BIND']).toBe(bind);
+        },
+      );
+    });
+
     it('recommends `docker compose up -d` and the HTTPS domain only for the bundled Caddy proxy', async () => {
       const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
       const previousDirectory = process.cwd();
@@ -6744,6 +6925,43 @@ describe('runWizard', () => {
         expect(
           parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_BIND'],
         ).toBeUndefined();
+      } finally {
+        consoleLog.mockRestore();
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it('treats the .env.example placeholder API key and domain as unset, so the first-run key is generated', async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      vi.clearAllMocks();
+      mockMinimalRunPrompts('bundled');
+      writeFileSync(
+        join(directory, '.env'),
+        'DB_HOST=localhost\nCONNECTOR_API_KEY=kc_change_me_to_a_secure_key\nCONNECTOR_DOMAIN=connector.example.com\n',
+      );
+      const input = promptMocks.input.getMockImplementation()!;
+      const domainDefaults: Array<string | undefined> = [];
+      promptMocks.input.mockImplementation((prompt) => {
+        if (prompt.message.startsWith('Public DNS name')) domainDefaults.push(prompt.default);
+        return input(prompt);
+      });
+
+      try {
+        process.chdir(directory);
+        await runWizard();
+
+        const asked = promptMocks.confirm.mock.calls.map(([prompt]) => prompt.message);
+        expect(asked).toContain('Generate API key?');
+        expect(asked.some((message: string) => message.startsWith('Generate and stage'))).toBe(
+          false,
+        );
+        const env = parse(readFileSync(join(directory, '.env'), 'utf-8'));
+        expect(env['CONNECTOR_API_KEY']).toMatch(/^kc_[0-9a-f]{48}$/);
+        expect(env['CONNECTOR_API_KEY_PENDING']).toBeUndefined();
+        expect(domainDefaults).toEqual([undefined]);
       } finally {
         consoleLog.mockRestore();
         process.chdir(previousDirectory);
@@ -6837,6 +7055,10 @@ describe('runWizard', () => {
         expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_BIND']).toBe(
           '0.0.0.0',
         );
+        // Remote DB_HOST is reachable from the container as-is; do not rewrite it.
+        expect(
+          parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_CONTAINER_DB_HOST'],
+        ).toBeUndefined();
       } finally {
         consoleLog.mockRestore();
         process.chdir(previousDirectory);
