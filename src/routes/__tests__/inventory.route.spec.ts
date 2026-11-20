@@ -5,6 +5,7 @@ import Fastify from 'fastify';
 import type { DatabaseAdapter, QueryCondition, QueryResult } from '../../db/adapter.interface.js';
 import type { InventoryResourceConfig } from '../../config/config.types.js';
 import { registerInventoryRoutes } from '../inventory.route.js';
+import { suggestFilterableColumns } from '../../setup/suggest.js';
 
 function createMockDbAdapter(overrides: Partial<DatabaseAdapter> = {}): DatabaseAdapter {
   return {
@@ -257,6 +258,81 @@ describe('inventory routes', () => {
     );
     await app.close();
   });
+
+  it.each(['true', 'false'])(
+    'GET /inventory honors a setup-generated boolean filter of %s',
+    async (value) => {
+      const suggestions = suggestFilterableColumns(
+        ['waterproof', 'color', 'wattage'].map((name, index) => ({
+          name,
+          type: ['boolean', 'text', 'integer'][index]!,
+          nullable: false,
+          isPrimaryKey: false,
+        })),
+        [],
+        ['waterproof', 'color', 'wattage'],
+      );
+      const rows = [true, false].map((waterproof) => ({
+        id: String(waterproof),
+        name: 'Widget',
+        price: 9.99,
+        waterproof,
+        color: 'blue',
+        wattage: 100,
+      }));
+      const mockAdapter = createMockDbAdapter({
+        query: vi.fn().mockImplementation(async (_table: string, conditions: QueryCondition[]) => {
+          const filter = conditions.find((condition) => condition.column === 'waterproof');
+          const matches = filter
+            ? rows.filter((row) => String(row.waterproof) === filter.value)
+            : rows;
+          return { rows: matches, total: matches.length };
+        }),
+      });
+      const app = Fastify();
+      registerInventoryRoutes(app, {
+        dbAdapter: mockAdapter,
+        resourceConfig: {
+          ...testConfig,
+          attributes: { waterproof: 'waterproof', color: 'color', wattage: 'wattage' },
+          filterableColumns: Object.fromEntries(
+            suggestions.map((suggestion) => [
+              suggestion.filterName,
+              { column: suggestion.columnName, type: suggestion.filterType },
+            ]),
+          ),
+        },
+      });
+
+      try {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/inventory?filter.waterproof=${value}&filter.color=blue&filter.minWattage=50`,
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({
+          total: 1,
+          items: [{ attributes: { waterproof: value === 'true' } }],
+        });
+        expect(response.json()).not.toHaveProperty('ignoredFilters');
+        expect(mockAdapter.query).toHaveBeenCalledWith(
+          'Product',
+          expect.arrayContaining([
+            { column: 'waterproof', operator: '=', value },
+            { column: 'color', operator: '=', value: 'blue' },
+            { column: expect.stringContaining('wattage::text'), operator: '>=', value: 50 },
+          ]),
+          expect.anything(),
+          expect.anything(),
+          undefined,
+          expect.anything(),
+        );
+      } finally {
+        await app.close();
+      }
+    },
+  );
 
   it('GET /inventory reports unsupported filters and still queries configured filters', async () => {
     const mockAdapter = createMockDbAdapter();

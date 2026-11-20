@@ -791,6 +791,7 @@ export function suggestFilterableColumns(
 
     const isNumeric = NUMERIC_TYPES.has(col.type.toLowerCase());
     const isText = isTextColumn(col);
+    const isBoolean = ['boolean', 'bool'].includes(col.type.trim().toLowerCase());
     // PostgreSQL reports enums as USER-DEFINED (citext is already `isText`).
     // The live `=` branch casts these with `::text ILIKE`, so color / fuelType
     // / transmission enums should be string-filterable the way status already is.
@@ -842,7 +843,7 @@ export function suggestFilterableColumns(
         });
         usedFilterNames.add(maxFilterName);
       }
-    } else if (isText || isEnum) {
+    } else if (isText || isEnum || isBoolean) {
       // Only suggest string filters for columns with bounded domains (make, fuelType, etc.)
       // Skip very free-text columns like title, description
       const FREE_TEXT = new Set(['title', 'description', 'desc', 'details', 'body']);

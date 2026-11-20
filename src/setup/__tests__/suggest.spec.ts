@@ -1059,6 +1059,27 @@ describe('suggestFilterableColumns', () => {
     expect(filterNames).not.toContain('description');
   });
 
+  it.each(['boolean', 'bool', ' BOOLEAN '])(
+    'suggests selected %s attributes as exact-match filters alongside text and numeric attributes',
+    (type) => {
+      const columns = [
+        col('waterproof', type),
+        col('fragile', 'boolean'),
+        col('color', 'text'),
+        col('wattage', 'integer'),
+      ];
+
+      const suggestions = suggestFilterableColumns(columns, [], ['waterproof', 'color', 'wattage']);
+
+      expect(suggestions.map(({ filterName, filterType }) => [filterName, filterType])).toEqual([
+        ['waterproof', 'string'],
+        ['color', 'string'],
+        ['minWattage', 'gte'],
+        ['maxWattage', 'lte'],
+      ]);
+    },
+  );
+
   it('includes additional attributes', () => {
     const columns = [col('id', 'integer', true), col('color', 'character varying')];
 

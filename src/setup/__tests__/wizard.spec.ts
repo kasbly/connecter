@@ -6399,127 +6399,157 @@ describe('runWizard', () => {
     }
   });
 
-  it('writes a mileage odometer column onto attributes.kilometers and filterableColumns.min/maxKilometers, not mileage', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
-    const previousDirectory = process.cwd();
-    const db = Object.assign(vi.fn(), {
-      destroy: vi.fn().mockResolvedValue(undefined),
-      withSchema: vi.fn(() => ({
-        table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
-      })),
-    });
-    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  it.each([true, false])(
+    'writes filters with boolean opt-out (%s)',
+    async (enableBooleanFilter) => {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const db = Object.assign(vi.fn(), {
+        destroy: vi.fn().mockResolvedValue(undefined),
+        withSchema: vi.fn(() => ({
+          table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+        })),
+      });
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
-    vi.clearAllMocks();
-    promptMocks.select.mockImplementation(({ message }: { message: string }) => {
-      if (message.startsWith('Database type')) return Promise.resolve('postgres');
-      if (message.startsWith('Which table contains')) return Promise.resolve('cars');
-      if (message.startsWith('Which column is the unique listing id')) {
-        return Promise.resolve('id');
-      }
-      if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
-      const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
-      if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
-        return Promise.resolve(fieldMatch[1]);
-      }
-      return Promise.resolve('\0unmapped');
-    });
-    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
-      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
-      if (message.startsWith('Port')) return Promise.resolve('5432');
-      if (message.startsWith('Database name')) return Promise.resolve('catalog');
-      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
-      if (message.startsWith('Public DNS name')) {
-        return Promise.resolve('connector.merchant.example');
-      }
-      return Promise.resolve('reader');
-    });
-    promptMocks.password.mockResolvedValue('p@ss#word');
-    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
-      Promise.resolve(!message.startsWith('Does this database require TLS')),
-    );
-    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
-      if (message.startsWith('Select additional')) return Promise.resolve(['mileage']);
-      if (message.startsWith('Which columns should be searchable'))
-        return Promise.resolve(['title']);
-      // Regression coverage (issue #25601): the mapped-attribute column 'mileage'
-      // resolves to the canonical filter names minKilometers/maxKilometers, not
-      // the raw column name (minMileage/maxMileage). Select them here so the
-      // generated config's filterableColumns block can be asserted below.
-      if (message.startsWith('Which filters should be available'))
-        return Promise.resolve(['minKilometers', 'maxKilometers']);
-      return Promise.resolve([]);
-    });
-    vi.mocked(introspectDatabase).mockResolvedValueOnce({
-      db: db as never,
-      result: {
-        tables: [
-          {
-            name: 'cars',
-            kind: 'table',
-            rowCount: 40,
-            columns: [
-              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
-              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
-              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
-              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
-              { name: 'mileage', type: 'integer', nullable: true, isPrimaryKey: false },
-            ],
-          },
-        ],
-        foreignKeys: [],
-      },
-      retriedWithTls: false,
-    });
+      vi.clearAllMocks();
+      promptMocks.select.mockImplementation(({ message }: { message: string }) => {
+        if (message.startsWith('Database type')) return Promise.resolve('postgres');
+        if (message.startsWith('Which table contains')) return Promise.resolve('cars');
+        if (message.startsWith('Which column is the unique listing id')) {
+          return Promise.resolve('id');
+        }
+        if (message.startsWith('Which reverse proxy')) return Promise.resolve('bundled');
+        const fieldMatch = /^Which column contains the (\w+)\?$/.exec(message);
+        if (fieldMatch && ['title', 'price', 'currency'].includes(fieldMatch[1]!)) {
+          return Promise.resolve(fieldMatch[1]);
+        }
+        return Promise.resolve('\0unmapped');
+      });
+      promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+        if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+        if (message.startsWith('Port')) return Promise.resolve('5432');
+        if (message.startsWith('Database name')) return Promise.resolve('catalog');
+        if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+        if (message.startsWith('Public DNS name')) {
+          return Promise.resolve('connector.merchant.example');
+        }
+        return Promise.resolve('reader');
+      });
+      promptMocks.password.mockResolvedValue('p@ss#word');
+      promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+        Promise.resolve(!message.startsWith('Does this database require TLS')),
+      );
+      promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
+        if (message.startsWith('Select additional'))
+          return Promise.resolve(['mileage', 'waterproof', 'color']);
+        if (message.startsWith('Which columns should be searchable'))
+          return Promise.resolve(['title']);
+        // Regression coverage (issue #25601): the mapped-attribute column 'mileage'
+        // resolves to the canonical filter names minKilometers/maxKilometers, not
+        // the raw column name (minMileage/maxMileage). Select them here so the
+        // generated config's filterableColumns block can be asserted below.
+        if (message.startsWith('Which filters should be available'))
+          return Promise.resolve([
+            'minKilometers',
+            'maxKilometers',
+            'color',
+            ...(enableBooleanFilter ? ['waterproof'] : []),
+          ]);
+        return Promise.resolve([]);
+      });
+      vi.mocked(introspectDatabase).mockResolvedValueOnce({
+        db: db as never,
+        result: {
+          tables: [
+            {
+              name: 'cars',
+              kind: 'table',
+              rowCount: 40,
+              columns: [
+                { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+                { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+                { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+                { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+                { name: 'mileage', type: 'integer', nullable: true, isPrimaryKey: false },
+                { name: 'waterproof', type: 'boolean', nullable: true, isPrimaryKey: false },
+                { name: 'color', type: 'text', nullable: true, isPrimaryKey: false },
+              ],
+            },
+          ],
+          foreignKeys: [],
+        },
+        retriedWithTls: false,
+      });
 
-    try {
-      process.chdir(directory);
-      await runWizard();
+      try {
+        process.chdir(directory);
+        await runWizard();
 
-      const generated = yaml.load(
-        readFileSync(join(directory, 'connector.config.yml'), 'utf-8'),
-      ) as {
-        resources: {
-          inventory: {
-            attributes?: Record<string, string>;
-            filterableColumns?: Record<string, { column: string; type: string }>;
+        const generated = yaml.load(
+          readFileSync(join(directory, 'connector.config.yml'), 'utf-8'),
+        ) as {
+          resources: {
+            inventory: {
+              attributes?: Record<string, string>;
+              filterableColumns?: Record<string, { column: string; type: string }>;
+            };
           };
         };
-      };
-      expect(generated.resources.inventory.attributes).toEqual({
-        kilometers: '"mileage"',
-      });
-      expect(generated.resources.inventory.attributes).not.toHaveProperty('mileage');
-      expect(promptMocks.checkbox).toHaveBeenCalledWith(
-        expect.objectContaining({
-          message: expect.stringContaining('Select additional columns'),
-          choices: expect.arrayContaining([
-            expect.objectContaining({
-              name: 'mileage (integer)',
-              value: 'mileage',
-              checked: true,
-            }),
-          ]),
-        }),
-      );
-      // The bug (#25601): the additionalAttributes loop overwrote the canonical
-      // mapping ('kilometers') with the raw column name ('mileage'), so the
-      // generated filterableColumns keys were minMileage/maxMileage instead of
-      // minKilometers/maxKilometers — which Kasbly's API never sends.
-      expect(generated.resources.inventory.filterableColumns).toEqual(
-        expect.objectContaining({
-          minKilometers: { column: '"mileage"', type: 'gte' },
-          maxKilometers: { column: '"mileage"', type: 'lte' },
-        }),
-      );
-      expect(generated.resources.inventory.filterableColumns).not.toHaveProperty('minMileage');
-      expect(generated.resources.inventory.filterableColumns).not.toHaveProperty('maxMileage');
-    } finally {
-      consoleLog.mockRestore();
-      process.chdir(previousDirectory);
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
+        expect(generated.resources.inventory.attributes).toEqual({
+          kilometers: '"mileage"',
+          waterproof: '"waterproof"',
+          color: '"color"',
+        });
+        expect(generated.resources.inventory.attributes).not.toHaveProperty('mileage');
+        expect(promptMocks.checkbox).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: expect.stringContaining('Select additional columns'),
+            choices: expect.arrayContaining([
+              expect.objectContaining({
+                name: 'mileage (integer)',
+                value: 'mileage',
+                checked: true,
+              }),
+            ]),
+          }),
+        );
+        // The bug (#25601): the additionalAttributes loop overwrote the canonical
+        // mapping ('kilometers') with the raw column name ('mileage'), so the
+        // generated filterableColumns keys were minMileage/maxMileage instead of
+        // minKilometers/maxKilometers — which Kasbly's API never sends.
+        expect(generated.resources.inventory.filterableColumns).toEqual(
+          expect.objectContaining({
+            minKilometers: { column: '"mileage"', type: 'gte' },
+            maxKilometers: { column: '"mileage"', type: 'lte' },
+            color: { column: '"color"', type: 'string' },
+          }),
+        );
+        expect(promptMocks.checkbox).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: expect.stringContaining('Which filters should be available'),
+            choices: expect.arrayContaining([
+              expect.objectContaining({ value: 'waterproof', checked: true }),
+            ]),
+          }),
+        );
+        if (enableBooleanFilter) {
+          expect(generated.resources.inventory.filterableColumns).toHaveProperty('waterproof', {
+            column: '"waterproof"',
+            type: 'string',
+          });
+        } else {
+          expect(generated.resources.inventory.filterableColumns).not.toHaveProperty('waterproof');
+        }
+        expect(generated.resources.inventory.filterableColumns).not.toHaveProperty('minMileage');
+        expect(generated.resources.inventory.filterableColumns).not.toHaveProperty('maxMileage');
+      } finally {
+        consoleLog.mockRestore();
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('rejects a blank manual API key and writes a config loadConfig can start', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
