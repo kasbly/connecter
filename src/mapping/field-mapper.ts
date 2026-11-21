@@ -4,6 +4,7 @@ import {
   type InventoryStatus,
   type RelationConfig,
   type StatusValuesConfig,
+  type UnknownStatusPolicy,
 } from '../config/config.types.js';
 import { z } from 'zod';
 
@@ -349,6 +350,45 @@ export function getSourceStatusValues(
     ? statusValues[inventoryStatus]
     : DEFAULT_STATUS_VALUES[inventoryStatus];
   return sourceValues?.length ? sourceValues : undefined;
+}
+
+/**
+ * How `filter.status` should match the same effective status list/detail
+ * publish via {@link resolveInventoryStatus} and `unknownStatusPolicy`.
+ *
+ * Explicit mappings stay an `IN` of those source values. The configured
+ * fallback also has to include every source value that is not in any
+ * `statusValues` list — those rows read as the policy, but an `IN` of only
+ * the explicit tokens hides them. `NOT IN` the other statuses' source values
+ * matches both the explicit fallback tokens and the unmapped remainder
+ * without sending the Kasbly token (or an unknown spelling) to an enum or
+ * integer column (#25114, #38179).
+ */
+export type StatusFilterPredicate =
+  | { kind: 'all' }
+  | { kind: 'none' }
+  | { kind: 'in'; values: string[] }
+  | { kind: 'not-in'; values: string[] };
+
+export function getStatusFilterPredicate(
+  status: string,
+  statusValues: StatusValuesConfig | undefined,
+  unknownStatusPolicy: UnknownStatusPolicy | undefined,
+): StatusFilterPredicate {
+  if (!INVENTORY_STATUSES.includes(status as InventoryStatus)) return { kind: 'none' };
+
+  const inventoryStatus = status as InventoryStatus;
+  const fallback: UnknownStatusPolicy = unknownStatusPolicy ?? 'DRAFT';
+  if (inventoryStatus === fallback) {
+    const mappings = statusValues ?? DEFAULT_STATUS_VALUES;
+    const otherValues = INVENTORY_STATUSES.flatMap((candidate) =>
+      candidate === inventoryStatus ? [] : (mappings[candidate] ?? []),
+    );
+    return otherValues.length === 0 ? { kind: 'all' } : { kind: 'not-in', values: otherValues };
+  }
+
+  const sourceValues = getSourceStatusValues(status, statusValues);
+  return sourceValues ? { kind: 'in', values: sourceValues } : { kind: 'none' };
 }
 
 /** Match PostgreSQL character(n) keys without stripping significant non-space characters. */

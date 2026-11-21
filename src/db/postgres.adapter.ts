@@ -233,7 +233,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     const filterConditions = conditions.filter((c) => c.operator !== 'ILIKE');
 
     for (const condition of filterConditions) {
-      if (condition.operator === 'IN') {
+      if (condition.operator === 'IN' || condition.operator === 'NOT IN') {
         const sourceValues = condition.value as string[];
         // Case-insensitive like the `=` branch below (#25604) and like the
         // read-side `resolveInventoryStatus`, which also does
@@ -247,17 +247,24 @@ export class PostgresAdapter implements DatabaseAdapter {
         // `trimStatusValue`: one-arg `btrim` only strips space, so a stored
         // 'active\r', NBSP-padded, or tab-only cell read as ACTIVE (or blank)
         // everywhere else but was silently excluded here (#28392 leftover
-        // #35432).
+        // #35432). `NOT IN` is the fallback-status form of the same
+        // comparison: exclude every source value mapped to a different
+        // Kasbly token so unmapped spellings (and unmapped NULL) still
+        // match the policy list/detail already published (#38179).
         const normalizedValues = sourceValues.map((value) => trimStatusValue(value).toLowerCase());
         // `''` is the blank status token. `IN ('')` matches an empty string but
         // never SQL NULL (`btrim(NULL)` is NULL), so a blank mapped to ACTIVE
         // would stay invisible to customer search and Test connection.
+        // `NOT IN` inverts that: unmapped NULL must match the fallback, while
+        // a blank mapped to another status must stay excluded (`NULL NOT IN`
+        // is unknown, so it already fails the WHERE when blank is in the set).
         const matchesBlank = normalizedValues.some((value) => value === '');
         const placeholders = normalizedValues.map(() => '?').join(', ');
         const column = escapeRawFragmentPlaceholders(condition.column);
-        const comparison = `lower(btrim(${column}::text, ${STATUS_VALUE_BTRIM_CHARS_SQL})) IN (${placeholders})`;
+        const comparison = `lower(btrim(${column}::text, ${STATUS_VALUE_BTRIM_CHARS_SQL})) ${condition.operator} (${placeholders})`;
+        const includeNull = condition.operator === 'IN' ? matchesBlank : !matchesBlank;
         queryBuilder = queryBuilder.whereRaw(
-          matchesBlank ? `(${comparison} OR ${column} IS NULL)` : comparison,
+          includeNull ? `(${comparison} OR ${column} IS NULL)` : comparison,
           normalizedValues,
         );
         continue;

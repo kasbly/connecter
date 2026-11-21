@@ -1,6 +1,6 @@
 export interface QueryCondition {
   column: string;
-  operator: '=' | '>' | '<' | '>=' | '<=' | 'ILIKE' | 'IN';
+  operator: '=' | '>' | '<' | '>=' | '<=' | 'ILIKE' | 'IN' | 'NOT IN';
   value: string | number | string[];
   /** Optional group key — search conditions with the same group are OR'd, different groups are AND'd */
   _group?: string;

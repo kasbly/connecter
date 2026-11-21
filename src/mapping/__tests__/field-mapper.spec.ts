@@ -5,6 +5,7 @@ import {
   getRelationConfigs,
   getRequiredColumns,
   getSourceStatusValues,
+  getStatusFilterPredicate,
   hasUnreadableUpdatedAtText,
   mapRowToInventoryItem,
   normalizeImageUrls,
@@ -431,10 +432,71 @@ describe('mapRowToInventoryItem', () => {
 
     expect(resolveInventoryStatus('active', partialStatusValues)).toBeUndefined();
     expect(getSourceStatusValues('ACTIVE', partialStatusValues)).toBeUndefined();
+    expect(getStatusFilterPredicate('ACTIVE', partialStatusValues, 'DRAFT')).toEqual({
+      kind: 'none',
+    });
 
     // Keys the block does provide still resolve normally.
     expect(resolveInventoryStatus('sold', partialStatusValues)).toBe('SOLD');
     expect(getSourceStatusValues('SOLD', partialStatusValues)).toEqual(['sold']);
+    expect(getStatusFilterPredicate('SOLD', partialStatusValues, 'DRAFT')).toEqual({
+      kind: 'in',
+      values: ['sold'],
+    });
+  });
+
+  it('selects fallback-mapped rows with the same effective status list and detail publish', () => {
+    // Operator maps `held` → RESERVED, `available` → ACTIVE, and chooses
+    // RESERVED for newly observed statuses. Item 3 (`pending_review`) reads as
+    // RESERVED; `filter.status=RESERVED` must keep it alongside the explicit
+    // `held` rows, while ACTIVE stays only the mapped `available` row (#38179).
+    const config: InventoryResourceConfig = {
+      ...baseConfig,
+      fields: { ...baseConfig.fields, status: 'availability' },
+      statusValues: { ACTIVE: ['available'], RESERVED: ['held'] },
+      unknownStatusPolicy: 'RESERVED',
+    };
+    const fixture = [
+      { id: '1', title: 'Live', price: 100, availability: 'available' },
+      { id: '2', title: 'Held', price: 100, availability: 'held' },
+      { id: '3', title: 'Review', price: 100, availability: 'pending_review' },
+      { id: '4', title: 'Held too', price: 100, availability: 'held' },
+    ];
+
+    expect(fixture.map((row) => mapRowToInventoryItem(row, config, new Map()).status)).toEqual([
+      'ACTIVE',
+      'RESERVED',
+      'RESERVED',
+      'RESERVED',
+    ]);
+    expect(getStatusFilterPredicate('RESERVED', config.statusValues, 'RESERVED')).toEqual({
+      kind: 'not-in',
+      values: ['available'],
+    });
+    expect(getStatusFilterPredicate('ACTIVE', config.statusValues, 'RESERVED')).toEqual({
+      kind: 'in',
+      values: ['available'],
+    });
+    expect(getStatusFilterPredicate('SOLD', config.statusValues, 'RESERVED')).toEqual({
+      kind: 'none',
+    });
+    expect(getStatusFilterPredicate('DRAFT', config.statusValues, 'RESERVED')).toEqual({
+      kind: 'none',
+    });
+  });
+
+  it('treats every unmapped row as the fallback when no other status has source values', () => {
+    expect(getStatusFilterPredicate('DRAFT', {}, 'DRAFT')).toEqual({ kind: 'all' });
+    expect(getStatusFilterPredicate('ACTIVE', {}, 'DRAFT')).toEqual({ kind: 'none' });
+    expect(getStatusFilterPredicate('RESERVED', { ACTIVE: ['available'] }, 'DRAFT')).toEqual({
+      kind: 'none',
+    });
+    expect(
+      getStatusFilterPredicate('DRAFT', { ACTIVE: ['available'], DRAFT: ['draft'] }, 'DRAFT'),
+    ).toEqual({
+      kind: 'not-in',
+      values: ['available'],
+    });
   });
 
   it('maps a blank cell to the status the merchant assigned to blank', () => {

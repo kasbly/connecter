@@ -1335,6 +1335,70 @@ describe('PostgresAdapter list count (#17420)', () => {
     expect(countQuery.bindings.slice(0, 2)).toEqual(['', 'for_sale']);
   });
 
+  it('compiles the Reserved fallback filter as NOT IN the other mapped statuses (#38179)', async () => {
+    const config = {
+      table: 'cars',
+      idColumn: 'id',
+      fields: { title: 'title', price: 'price', status: 'availability' },
+      filterableColumns: {
+        status: { column: 'availability', type: 'string' },
+      },
+      statusValues: { ACTIVE: ['available'], RESERVED: ['held'] },
+      unknownStatusPolicy: 'RESERVED',
+    } satisfies InventoryResourceConfig;
+
+    const reserved = buildQuery({ 'filter.status': 'RESERVED' }, config).conditions;
+    const {
+      countQuery,
+      dataQuery,
+      result: reservedResult,
+    } = await runListQuery({
+      count: 3,
+      conditions: reserved,
+      dataRows: [
+        { id: '4', price: 10, availability: 'held' },
+        { id: '2', price: 10, availability: 'held' },
+        { id: '3', price: 10, availability: 'pending_review' },
+      ],
+    });
+
+    const fallbackPredicate = `(lower(btrim(availability::text, ${STATUS_BTRIM_CHARS_SQL})) NOT IN (?) OR availability IS NULL)`;
+    expect(dataQuery.sql).toContain(fallbackPredicate);
+    expect(countQuery.sql).toContain(fallbackPredicate);
+    expect(dataQuery.bindings[0]).toBe('available');
+    expect(countQuery.bindings[0]).toBe('available');
+    expect(reservedResult.rows.map((row) => row['id'])).toEqual(['4', '2', '3']);
+
+    const active = buildQuery({ 'filter.status': 'ACTIVE' }, config).conditions;
+    const { dataQuery: activeQuery, result: activeResult } = await runListQuery({
+      count: 1,
+      conditions: active,
+      dataRows: [{ id: '1', price: 10, availability: 'available' }],
+    });
+    expect(activeQuery.sql).toContain(
+      `lower(btrim(availability::text, ${STATUS_BTRIM_CHARS_SQL})) IN (?)`,
+    );
+    expect(activeResult.rows.map((row) => row['id'])).toEqual(['1']);
+  });
+
+  it('excludes unmapped NULL from a fallback filter when blank is mapped to another status', async () => {
+    const conditions: QueryCondition[] = [
+      { column: 'availability', operator: 'NOT IN', value: ['available', ''] },
+    ];
+
+    const { countQuery, dataQuery } = await runListQuery({
+      count: 1,
+      conditions,
+      dataRows: [{ id: '2', price: 10, availability: 'held' }],
+    });
+
+    const excludedBlank = `lower(btrim(availability::text, ${STATUS_BTRIM_CHARS_SQL})) NOT IN (?, ?)`;
+    expect(dataQuery.sql).toContain(excludedBlank);
+    expect(dataQuery.sql).not.toContain(`${excludedBlank} OR availability IS NULL`);
+    expect(countQuery.sql).toContain(excludedBlank);
+    expect(dataQuery.bindings.slice(0, 2)).toEqual(['available', '']);
+  });
+
   it('escapes LIKE metacharacters in search values for data and count queries', async () => {
     const conditions: QueryCondition[] = [
       { column: 'title', operator: 'ILIKE', value: String.raw`50%_off\sale`, _group: 'term' },

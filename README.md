@@ -394,9 +394,11 @@ when an empty status means the listing is still for sale: inventory reads and `f
 (including Test connection) then match both `NULL` and an empty string. Until you map it, every
 blank row is reported as `unknownStatusPolicy`, so an all-blank column is not an empty catalog.
 
-Status filters use the same mapping: `filter.status=SOLD` queries every source value configured
-under `statusValues.SOLD`. A token with no configured source values returns an empty page rather
-than comparing the Kasbly token against your status column.
+Status filters use the same mapping as reads: `filter.status=SOLD` matches every source value
+configured under `statusValues.SOLD`, and filtering by `unknownStatusPolicy` also matches source
+values that mapping does not recognize — the same rows list and detail already report as that
+policy. A token with no configured source values and that is not the policy returns an empty page
+rather than comparing the Kasbly token against your status column.
 
 ### Filter Types
 

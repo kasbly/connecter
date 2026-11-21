@@ -440,6 +440,67 @@ describe('buildQuery', () => {
     expect(result.ignoredFilters).not.toContain('status');
   });
 
+  it('includes fallback-mapped statuses in the operator Reserved filter (#38179)', () => {
+    const config: InventoryResourceConfig = {
+      ...baseConfig,
+      fields: { ...baseConfig.fields, status: 'availability' },
+      filterableColumns: {
+        ...baseConfig.filterableColumns,
+        status: { column: 'availability', type: 'string' },
+      },
+      statusValues: { ACTIVE: ['available'], RESERVED: ['held'] },
+      unknownStatusPolicy: 'RESERVED',
+    };
+
+    const reserved = buildQuery({ 'filter.status': 'RESERVED' }, config);
+    expect(reserved.conditions).toContainEqual({
+      column: 'availability',
+      operator: 'NOT IN',
+      value: ['available'],
+    });
+    expect(reserved.conditions).not.toContainEqual({ column: '1', operator: '=', value: 0 });
+
+    const active = buildQuery({ 'filter.status': 'ACTIVE' }, config);
+    expect(active.conditions).toContainEqual({
+      column: 'availability',
+      operator: 'IN',
+      value: ['available'],
+    });
+  });
+
+  it('matches every row when the fallback status has no other mapped source values', () => {
+    const result = buildQuery(
+      { 'filter.status': 'DRAFT' },
+      {
+        ...baseConfig,
+        fields: { ...baseConfig.fields, status: 'availability' },
+        statusValues: {},
+        unknownStatusPolicy: 'DRAFT',
+      },
+    );
+
+    expect(result.conditions).toEqual([]);
+    expect(result.ignoredFilters).not.toContain('status');
+  });
+
+  it('includes unmapped source values in an explicit DRAFT fallback filter', () => {
+    const result = buildQuery(
+      { 'filter.status': 'DRAFT' },
+      {
+        ...baseConfig,
+        fields: { ...baseConfig.fields, status: 'availability' },
+        statusValues: { ACTIVE: ['available'], DRAFT: ['draft'] },
+        unknownStatusPolicy: 'DRAFT',
+      },
+    );
+
+    expect(result.conditions).toContainEqual({
+      column: 'availability',
+      operator: 'NOT IN',
+      value: ['available'],
+    });
+  });
+
   it('keeps a mapped status filterable when the wizard left filterableColumns.status out (#32903)', () => {
     const result = buildQuery(
       { 'filter.status': 'ACTIVE' },
