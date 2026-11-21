@@ -283,6 +283,20 @@ export class PostgresAdapter implements DatabaseAdapter {
         );
         continue;
       }
+      // ISO `updatedSince` against a PostgreSQL DATE column used to coerce the
+      // bound timestamp to a date and drop the time, so a noon cutoff still
+      // matched that day's midnight listing (#38180). Promote DATE to midnight
+      // UTC — the same instant field-mapper publishes — and leave timestamp /
+      // timestamptz on the untyped bind so their inference is unchanged.
+      // Integer-epoch `updatedSince` stays on the numeric `>=` path below.
+      if (condition.operator === '>=' && typeof condition.value === 'string') {
+        const column = escapeRawFragmentPlaceholders(condition.column);
+        queryBuilder = queryBuilder.whereRaw(
+          `(CASE WHEN pg_typeof(${column}) = 'date'::regtype THEN (${column}::timestamp AT TIME ZONE 'UTC') >= ?::timestamptz ELSE ${column} >= ? END)`,
+          [condition.value, condition.value],
+        );
+        continue;
+      }
       queryBuilder = queryBuilder.where(
         db.raw(escapeRawFragmentPlaceholders(condition.column)),
         condition.operator,

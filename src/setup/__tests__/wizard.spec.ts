@@ -19,11 +19,13 @@ import {
   backupPrivateFile,
   derivePublishedRelationName,
   EMPTY_RELATION_FK_HINT,
+  formatInventoryDiff,
   getFieldMappingPrompt,
   getIdColumnPrompt,
   getSetupHostDefault,
   getStatusValueDefault,
   getUpdatedAtColumnPrompt,
+  mergeUnpromptedStatusValues,
   isPlaceholderApiKey,
   isPlaceholderDomain,
   isPublicHostname,
@@ -54,7 +56,7 @@ import { mapRowToInventoryItem } from '../../mapping/field-mapper.js';
 import { introspectDatabase } from '../introspect.js';
 import { createDatabaseAdapter } from '../../db/adapter.factory.js';
 import { probeInventoryResource } from '../../routes/health.route.js';
-import type { RelationConfig } from '../../config/config.types.js';
+import type { InventoryResourceConfig, RelationConfig } from '../../config/config.types.js';
 
 const promptMocks = vi.hoisted(() => ({
   checkbox: vi.fn(),
@@ -200,10 +202,80 @@ describe('getStatusValueDefault', () => {
   });
 });
 
+describe('mergeUnpromptedStatusValues', () => {
+  const saved = { ACTIVE: ['for_sale', 'available'], SOLD: ['sold'] };
+
+  it('carries a saved token this run never offered', () => {
+    expect(mergeUnpromptedStatusValues({ ACTIVE: ['available'] }, ['available'], saved)).toEqual({
+      ACTIVE: ['available', 'for_sale'],
+      SOLD: ['sold'],
+    });
+  });
+
+  it('does not restore a presented token the merchant left unmapped', () => {
+    expect(mergeUnpromptedStatusValues({}, ['for_sale'], saved)).toEqual({
+      ACTIVE: ['available'],
+      SOLD: ['sold'],
+    });
+  });
+
+  it('uses the new status for a remapped presented token and drops the old parent', () => {
+    expect(mergeUnpromptedStatusValues({ SOLD: ['for_sale'] }, ['for_sale'], saved)).toEqual({
+      SOLD: ['for_sale', 'sold'],
+      ACTIVE: ['available'],
+    });
+  });
+
+  it('returns the prompted mapping unchanged when nothing was saved', () => {
+    expect(mergeUnpromptedStatusValues({ ACTIVE: ['available'] }, ['available'])).toEqual({
+      ACTIVE: ['available'],
+    });
+  });
+});
+
 describe('getSetupHostDefault', () => {
   it('uses localhost when a legacy bundled setup stored its container-only host', () => {
     expect(getSetupHostDefault('host.docker.internal')).toBe('localhost');
     expect(getSetupHostDefault('database.example.com')).toBe('database.example.com');
+  });
+});
+
+describe('formatInventoryDiff', () => {
+  const inventory = (
+    overrides: Partial<InventoryResourceConfig> = {},
+  ): InventoryResourceConfig => ({
+    table: 'listings',
+    idColumn: 'id',
+    fields: { title: 'title', status: 'status' },
+    statusValues: { ACTIVE: ['ready'], RESERVED: ['on_hold'] },
+    ...overrides,
+  });
+
+  it('reports both tokens and their old and new statuses when ACTIVE and RESERVED swap', () => {
+    const diff = formatInventoryDiff(
+      inventory({ statusValues: { ACTIVE: ['ready'], RESERVED: ['on_hold'] } }),
+      inventory({ statusValues: { ACTIVE: ['on_hold'], RESERVED: ['ready'] } }),
+    );
+    expect(diff).not.toContain('(no changes)');
+    expect(diff).toMatch(/- .*ACTIVE.*\bready\b/);
+    expect(diff).toMatch(/\+ .*RESERVED.*\bready\b/);
+    expect(diff).toMatch(/- .*RESERVED.*on_hold/);
+    expect(diff).toMatch(/\+ .*ACTIVE.*on_hold/);
+  });
+
+  it('still reports no changes for an identical rerun', () => {
+    const current = inventory();
+    expect(formatInventoryDiff(current, { ...current })).toBe('  (no changes)');
+  });
+
+  it('still surfaces unrelated real changes such as a table rename', () => {
+    const diff = formatInventoryDiff(
+      inventory({ table: 'listings' }),
+      inventory({ table: 'vehicles' }),
+    );
+    expect(diff).not.toContain('(no changes)');
+    expect(diff).toMatch(/- .*listings/);
+    expect(diff).toMatch(/\+ .*vehicles/);
   });
 });
 
@@ -6397,6 +6469,219 @@ describe('runWizard', () => {
       process.chdir(previousDirectory);
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  async function rerunStatusMappingSetup(options: {
+    sampleValues: unknown[];
+    statusAnswers?: Record<string, string>;
+    statusColumn?: string;
+    extraColumns?: Array<{
+      name: string;
+      type: string;
+      nullable: boolean;
+      isPrimaryKey: boolean;
+    }>;
+  }) {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const statusColumn = options.statusColumn ?? 'status';
+    vi.clearAllMocks();
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    writeFileSync(
+      join(directory, 'connector.config.yml'),
+      [
+        'version: 1',
+        'auth:',
+        '  apiKeys:',
+        '    - key: ${CONNECTOR_API_KEY}',
+        '      label: kasbly-production',
+        'database:',
+        '  type: postgres',
+        '  host: database.example.com',
+        '  port: 5432',
+        '  database: catalog',
+        '  user: reader',
+        '  password: ${DB_PASSWORD}',
+        '  ssl: false',
+        'resources:',
+        '  inventory:',
+        '    schema: public',
+        '    table: products',
+        '    idColumn: id',
+        '    fields:',
+        '      title: title',
+        '      price: price',
+        '      currency: currency',
+        '      status: status',
+        '    statusValues:',
+        '      ACTIVE: [for_sale, available]',
+        '      SOLD: [sold]',
+        '    unknownStatusPolicy: DRAFT',
+        '    filterableColumns:',
+        '      status: { column: status, type: string }',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(directory, '.env'),
+      'DB_PASSWORD=p@ss#word\nCONNECTOR_API_KEY=kc_existing\n',
+    );
+    promptMocks.select.mockImplementation((prompt: { message: string; default?: string }) => {
+      const { message } = prompt;
+      if (message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (message.startsWith('Which table contains')) return Promise.resolve('products');
+      if (message.startsWith('Which column is the unique listing id')) {
+        return Promise.resolve('id');
+      }
+      if (message.startsWith('How should newly observed')) {
+        return Promise.resolve(prompt.default ?? 'DRAFT');
+      }
+      if (message.startsWith('Which reverse proxy')) return Promise.resolve('none');
+      const statusMatch = /^Which Kasbly status matches (?:"(.+)"|blank)\?$/.exec(message);
+      if (statusMatch) {
+        const token = message.includes('blank') ? '' : statusMatch[1]!;
+        return Promise.resolve(
+          options.statusAnswers?.[token] ?? prompt.default ?? UNMAPPED_FIELD_VALUE,
+        );
+      }
+      const field = /^Which column contains the (\w+)\?$/.exec(message)?.[1];
+      if (field === 'status') return Promise.resolve(statusColumn);
+      if (field && ['title', 'price', 'currency'].includes(field)) {
+        return Promise.resolve(field);
+      }
+      return Promise.resolve(UNMAPPED_FIELD_VALUE);
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Which columns should be searchable'))
+        return Promise.resolve(['title']);
+      if (message.startsWith('Which filters should be available'))
+        return Promise.resolve(['status']);
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValue({
+      db: Object.assign(vi.fn(), {
+        destroy: vi.fn().mockResolvedValue(undefined),
+        raw: vi.fn().mockResolvedValue({
+          rows: options.sampleValues.map((value) => ({ value })),
+        }),
+        withSchema: vi.fn(() => ({
+          table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
+        })),
+      }) as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 3,
+            columns: [
+              { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+              { name: 'status', type: 'varchar', nullable: false, isPrimaryKey: false },
+              ...(options.extraColumns ?? []),
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+    try {
+      process.chdir(directory);
+      await runWizard();
+      return loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      ).resources.inventory;
+    } finally {
+      consoleLog.mockRestore();
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
+  function listingStatus(
+    inventory: ReturnType<typeof loadExistingSetupConfig>['resources']['inventory'],
+    status: string,
+    statusColumn = 'status',
+  ) {
+    return mapRowToInventoryItem(
+      { id: status, title: 'Listing', price: 100, currency: 'SAR', [statusColumn]: status },
+      inventory,
+      new Map(),
+    ).status;
+  }
+
+  it('keeps a saved status mapping when that token is absent from the current sample', async () => {
+    const inventory = await rerunStatusMappingSetup({ sampleValues: ['available'] });
+
+    expect(inventory.statusValues).toEqual({
+      ACTIVE: ['available', 'for_sale'],
+      SOLD: ['sold'],
+    });
+    expect(listingStatus(inventory, 'for_sale')).toBe('ACTIVE');
+    expect(listingStatus(inventory, 'available')).toBe('ACTIVE');
+    expect(buildQuery({ 'filter.status': 'ACTIVE' }, inventory).conditions).toEqual([
+      { column: '"status"', operator: 'IN', value: ['available', 'for_sale'] },
+    ]);
+  });
+
+  it('honors an explicit Leave-unmapped answer instead of restoring the saved mapping', async () => {
+    const inventory = await rerunStatusMappingSetup({
+      sampleValues: ['for_sale'],
+      statusAnswers: { for_sale: UNMAPPED_FIELD_VALUE },
+    });
+
+    expect(inventory.statusValues).toEqual({
+      ACTIVE: ['available'],
+      SOLD: ['sold'],
+    });
+    expect(listingStatus(inventory, 'for_sale')).toBe('DRAFT');
+    expect(listingStatus(inventory, 'available')).toBe('ACTIVE');
+  });
+
+  it('uses the new status for a remapped presented token and keeps unprompted siblings', async () => {
+    const inventory = await rerunStatusMappingSetup({
+      sampleValues: ['for_sale'],
+      statusAnswers: { for_sale: 'SOLD' },
+    });
+
+    expect(inventory.statusValues).toEqual({
+      SOLD: ['for_sale', 'sold'],
+      ACTIVE: ['available'],
+    });
+    expect(listingStatus(inventory, 'for_sale')).toBe('SOLD');
+    expect(listingStatus(inventory, 'available')).toBe('ACTIVE');
+    expect(buildQuery({ 'filter.status': 'ACTIVE' }, inventory).conditions).toEqual([
+      { column: '"status"', operator: 'IN', value: ['available'] },
+    ]);
+  });
+
+  it('does not carry saved status mappings when the status column changed', async () => {
+    const inventory = await rerunStatusMappingSetup({
+      sampleValues: ['in_stock'],
+      statusColumn: 'availability',
+      extraColumns: [
+        { name: 'availability', type: 'varchar', nullable: false, isPrimaryKey: false },
+      ],
+    });
+
+    expect(inventory.statusValues).toEqual({});
+    expect(listingStatus(inventory, 'for_sale', 'availability')).toBe('DRAFT');
+    expect(listingStatus(inventory, 'in_stock', 'availability')).toBe('DRAFT');
   });
 
   it.each([true, false])(

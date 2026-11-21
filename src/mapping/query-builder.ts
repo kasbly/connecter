@@ -403,6 +403,9 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
       operator: '>=',
       // Round up for integer epochs so a fractional cutoff never returns an
       // older row or sends a decimal parameter to a PostgreSQL bigint column.
+      // DATE columns keep this ISO string (time included): the adapter promotes
+      // DATE to midnight UTC so PostgreSQL does not drop the cutoff's time
+      // (#38180). Timestamp / timestamptz keep the same ISO bind.
       value: config.updatedAtEpoch
         ? Math.ceil(Date.parse(updatedSince) / (config.updatedAtEpoch === 's' ? 1000 : 1))
         : new Date(updatedSince).toISOString(),

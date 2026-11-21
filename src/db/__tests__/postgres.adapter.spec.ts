@@ -1227,6 +1227,87 @@ describe('PostgresAdapter list count (#17420)', () => {
     expect(dataQuery.bindings).toContain(2020);
   });
 
+  const dateAwareUpdatedSince = (column: string) =>
+    `(CASE WHEN pg_typeof(${column}) = 'date'::regtype THEN (${column}::timestamp AT TIME ZONE 'UTC') >= ?::timestamptz ELSE ${column} >= ? END)`;
+
+  it("promotes DATE updatedAt to midnight UTC so a noon cutoff excludes that day's listing (#38180)", async () => {
+    const { conditions } = buildQuery(
+      { updatedSince: '2026-10-03T12:00:00Z' },
+      {
+        table: 'Car',
+        idColumn: 'id',
+        updatedAtColumn: 'updatedAt',
+        fields: { title: 'title', price: 'price' },
+      },
+    );
+
+    const { countQuery, dataQuery } = await runListQuery({ count: 1, conditions });
+
+    const comparison = dateAwareUpdatedSince('updatedAt');
+    expect(dataQuery.sql).toContain(comparison);
+    expect(countQuery.sql).toContain(comparison);
+    expect(dataQuery.bindings.slice(0, 2)).toEqual([
+      '2026-10-03T12:00:00.000Z',
+      '2026-10-03T12:00:00.000Z',
+    ]);
+    expect(countQuery.bindings.slice(0, 2)).toEqual(dataQuery.bindings.slice(0, 2));
+  });
+
+  it("keeps an exact-midnight updatedSince bound so that day's DATE listing is included (#38180)", async () => {
+    const { conditions } = buildQuery(
+      { updatedSince: '2026-10-03T00:00:00Z' },
+      {
+        table: 'Car',
+        idColumn: 'id',
+        updatedAtColumn: 'updatedAt',
+        fields: { title: 'title', price: 'price' },
+      },
+    );
+
+    const { countQuery, dataQuery } = await runListQuery({ count: 1, conditions });
+
+    expect(dataQuery.sql).toContain(dateAwareUpdatedSince('updatedAt'));
+    expect(dataQuery.bindings.slice(0, 2)).toEqual([
+      '2026-10-03T00:00:00.000Z',
+      '2026-10-03T00:00:00.000Z',
+    ]);
+    expect(countQuery.bindings.slice(0, 2)).toEqual(dataQuery.bindings.slice(0, 2));
+  });
+
+  it('leaves integer-epoch updatedSince on the numeric comparison (#38180)', async () => {
+    const { conditions } = buildQuery(
+      { updatedSince: '2024-03-09T16:00:00.123Z' },
+      {
+        table: 'Car',
+        idColumn: 'id',
+        updatedAtColumn: 'updatedAt',
+        updatedAtEpoch: 's',
+        fields: { title: 'title', price: 'price' },
+      },
+    );
+
+    const { countQuery, dataQuery } = await runListQuery({ count: 1, conditions });
+
+    expect(dataQuery.sql).toContain('updatedAt >= ?');
+    expect(dataQuery.sql).not.toContain('pg_typeof');
+    expect(countQuery.sql).not.toContain('pg_typeof');
+    expect(dataQuery.bindings[0]).toBe(1710000001);
+    expect(countQuery.bindings[0]).toBe(1710000001);
+  });
+
+  it('escapes `?` in a DATE-aware updatedSince comparison (#38180)', async () => {
+    const { dataQuery } = await runListQuery({
+      count: 1,
+      conditions: [{ column: '"Updated?"', operator: '>=', value: '2026-10-03T12:00:00.000Z' }],
+    });
+
+    expect(dataQuery.sql).toContain(dateAwareUpdatedSince('"Updated\\?"'));
+    expect(dataQuery.bindings.slice(0, 2)).toEqual([
+      '2026-10-03T12:00:00.000Z',
+      '2026-10-03T12:00:00.000Z',
+    ]);
+  });
+
   it('applies IN filters with their bindings to both data and bounded count queries', async () => {
     const conditions: QueryCondition[] = [
       { column: 'availability', operator: 'IN', value: ['sold', 'closed'] },
@@ -1607,6 +1688,7 @@ describe('PostgresAdapter `?` in a mapped column name (#36834)', () => {
     expect(dataQuery.sql).toContain('lower(btrim("Main\\?"::text,');
     expect(dataQuery.sql).toContain('"Has Power\\?" >= ?');
     expect(dataQuery.sql).toContain('"Title\\?" ILIKE ?');
+    expect(dataQuery.sql).not.toContain('pg_typeof("Has Power\\?")');
     expect(dataQuery.sql).toContain('order by "In Stock\\?" ASC NULLS LAST, "Id\\?" DESC');
     expect(dataQuery.bindings).toEqual(['yes', 'a', 3, '%x%', 20]);
     expect(countQuery.sql).toContain('"In Stock\\?"::text ILIKE ?');

@@ -218,7 +218,18 @@ Single item by ID with all relations.
 
 ### `GET /audit-log`
 
-Query the NDJSON audit log (paginated, filterable by `since`).
+Query the NDJSON audit log (newest first, filterable by `since`). Each completed
+read is itself recorded. Offset `page` values therefore shift as those rows
+append; follow the `continuation` token from the previous response instead.
+That walk returns each entry from the first page's history once and then
+`null`, even while the review generates more events.
+
+| Parameter      | Description                                                      |
+| -------------- | ---------------------------------------------------------------- |
+| `pageSize`     | Entries per page (1-100, default 50)                             |
+| `page`         | Page number (default 1). Ignored when `continuation` is present. |
+| `since`        | Inclusive lower bound timestamp                                  |
+| `continuation` | Opaque cursor from the previous response's `continuation` field  |
 
 ## Configuration
 

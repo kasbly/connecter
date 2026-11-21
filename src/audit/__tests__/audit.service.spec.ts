@@ -10,7 +10,12 @@ import {
 } from 'node:fs';
 import { open, rename } from 'node:fs/promises';
 import { join } from 'node:path';
-import { AUDIT_QUERY_COUNT_LIMIT, AuditService, type AuditEntry } from '../audit.service.js';
+import {
+  AUDIT_QUERY_COUNT_LIMIT,
+  AuditService,
+  parseAuditContinuation,
+  type AuditEntry,
+} from '../audit.service.js';
 
 // Only `open` and `rename` are wrapped. The latter lets one test force a
 // one-off failure of the write+rename pair in `pruneActiveFile`
@@ -352,7 +357,7 @@ describe('AuditService', () => {
     });
 
     const result = await svc.query({ page: 1, pageSize: 10 });
-    expect(result).toEqual({ entries: [], total: 0, totalIsCapped: false });
+    expect(result).toEqual({ entries: [], total: 0, totalIsCapped: false, continuation: null });
   });
 
   it('filters by since parameter', async () => {
@@ -468,7 +473,128 @@ describe('AuditService', () => {
       since: '9999-01-01T00:00:00Z',
     });
 
-    expect(result).toEqual({ entries: [], total: 0, totalIsCapped: false });
+    expect(result).toEqual({ entries: [], total: 0, totalIsCapped: false, continuation: null });
+  });
+
+  it('follows a continuation through original entries while newer reads append (#38178)', async () => {
+    const svc = new AuditService({
+      enabled: true,
+      filePath: TEST_FILE,
+      maxFileSizeMB: 50,
+      maxFiles: 10,
+      retentionDays: 90,
+    });
+
+    for (let items = 0; items < 6; items++) {
+      svc.log(
+        makeEntry({
+          items,
+          path: '/inventory',
+          query: { q: String(items) },
+          ts: `2026-01-01T00:00:0${items}.000Z`,
+        }),
+      );
+    }
+
+    const seen: number[] = [];
+    let continuation: string | null = null;
+    for (let page = 0; page < 10; page++) {
+      const result = await svc.query({
+        page: 1,
+        pageSize: 1,
+        continuation: continuation ? parseAuditContinuation(continuation) : undefined,
+      });
+      svc.log(
+        makeEntry({
+          path: '/audit-log',
+          ts: `2026-01-01T01:00:0${page}.000Z`,
+          query: { pageSize: '1' },
+        }),
+      );
+
+      if (result.entries.length === 0) {
+        expect(result.continuation).toBeNull();
+        break;
+      }
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0]?.path).toBe('/inventory');
+      seen.push(result.entries[0]!.items);
+      continuation = result.continuation;
+      if (!continuation) break;
+    }
+
+    expect(seen).toEqual([5, 4, 3, 2, 1, 0]);
+    expect(continuation).toBeNull();
+    await svc.flush();
+  });
+
+  it('returns each same-timestamp original entry once when following a continuation', async () => {
+    const svc = new AuditService({
+      enabled: true,
+      filePath: TEST_FILE,
+      maxFileSizeMB: 50,
+      maxFiles: 10,
+      retentionDays: 90,
+    });
+    const ts = '2026-01-01T00:00:00.000Z';
+    for (let items = 0; items < 3; items++) {
+      svc.log(makeEntry({ items, ts, path: `/inventory/${items}` }));
+    }
+
+    const seen: string[] = [];
+    let continuation: string | null = null;
+    for (let page = 0; page < 6; page++) {
+      const result = await svc.query({
+        page: 1,
+        pageSize: 1,
+        continuation: continuation ? parseAuditContinuation(continuation) : undefined,
+      });
+      svc.log(makeEntry({ path: '/audit-log', ts: `2026-01-01T01:00:0${page}.000Z` }));
+      if (result.entries.length === 0) break;
+      seen.push(result.entries[0]!.path);
+      continuation = result.continuation;
+      if (!continuation) break;
+    }
+
+    expect(seen).toEqual(['/inventory/2', '/inventory/1', '/inventory/0']);
+    expect(continuation).toBeNull();
+    await svc.flush();
+  });
+
+  it('does not overlap larger continuation pages when newer rows append', async () => {
+    const svc = new AuditService({
+      enabled: true,
+      filePath: TEST_FILE,
+      maxFileSizeMB: 50,
+      maxFiles: 10,
+      retentionDays: 90,
+    });
+    for (let items = 0; items < 6; items++) {
+      svc.log(makeEntry({ items, ts: `2026-01-01T00:00:0${items}.000Z` }));
+    }
+
+    const seen: number[] = [];
+    let continuation: string | null = null;
+    for (let page = 0; page < 6; page++) {
+      const result = await svc.query({
+        page: 1,
+        pageSize: 2,
+        continuation: continuation ? parseAuditContinuation(continuation) : undefined,
+      });
+      svc.log(makeEntry({ path: '/audit-log', ts: `2026-01-01T01:00:0${page}.000Z` }));
+      seen.push(...result.entries.map((entry) => entry.items));
+      continuation = result.continuation;
+      if (!continuation) break;
+    }
+
+    expect(seen).toEqual([5, 4, 3, 2, 1, 0]);
+    expect(continuation).toBeNull();
+    await svc.flush();
+  });
+
+  it('rejects an unparseable continuation token', () => {
+    expect(parseAuditContinuation('not-a-cursor')).toBeUndefined();
+    expect(parseAuditContinuation('')).toBeUndefined();
   });
 
   it('caps scans across chunks and rotated logs without hiding the requested page', async () => {

@@ -405,6 +405,68 @@ describe('onResponse audit hook', () => {
     expect(existsSync(auditFile)).toBe(false);
     await rm(auditDir, { recursive: true, force: true });
   });
+
+  it('pages original requests once via continuation even as each audit read appends a newer row (#38178)', async () => {
+    const auditDir = await mkdtemp(join(tmpdir(), 'kasbly-connector-audit-'));
+    const auditFile = join(auditDir, 'audit.log');
+    const app = await buildApp({
+      config: buildConfig(auditFile),
+      dbAdapter: buildHealthyAdapter(),
+    });
+    try {
+      for (let request = 0; request < 6; request++) {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/inventory?q=${request}`,
+          headers: { 'x-api-key': 'test-key' },
+        });
+        expect(response.statusCode).toBe(200);
+      }
+
+      const originalQueries: unknown[] = [];
+      let continuation: string | undefined;
+      for (let page = 0; page < 12; page++) {
+        const query = new URLSearchParams({ pageSize: '1' });
+        if (continuation) query.set('continuation', continuation);
+        const response = await app.inject({
+          method: 'GET',
+          url: `/audit-log?${query.toString()}`,
+          headers: { 'x-api-key': 'test-key' },
+        });
+        expect(response.statusCode).toBe(200);
+        const body = response.json() as {
+          entries: AuditEntry[];
+          continuation: string | null;
+        };
+        if (body.entries.length === 0) {
+          expect(body.continuation).toBeNull();
+          break;
+        }
+        expect(body.entries).toHaveLength(1);
+        originalQueries.push(body.entries[0]?.query);
+        continuation = body.continuation ?? undefined;
+        if (!continuation) break;
+      }
+
+      expect(originalQueries).toEqual(
+        Array.from({ length: 6 }, (_, request) => ({ q: String(5 - request) })),
+      );
+      expect(continuation).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+
+    try {
+      const entries = (await readFile(auditFile, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as AuditEntry);
+      expect(entries.filter((entry) => entry.path === '/inventory')).toHaveLength(6);
+      expect(entries.some((entry) => entry.path === '/audit-log')).toBe(true);
+    } finally {
+      await rm(auditDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // #26697: `/health` is the one route the API-key guard deliberately skips

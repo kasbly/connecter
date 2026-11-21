@@ -729,6 +729,7 @@ describe('buildQuery', () => {
 
   it.each([
     ['2026-01-01T00:00:00Z', '2026-01-01T00:00:00.000Z'],
+    ['2026-10-03T12:00:00Z', '2026-10-03T12:00:00.000Z'],
     ['2020', '2020-01-01T00:00:00.000Z'],
     ['Sat Aug 01 2026 10:00:00 GMT+0300 (Arabia Standard Time)', '2026-08-01T07:00:00.000Z'],
   ])('normalizes updatedSince %j before building the condition', (updatedSince, expected) => {

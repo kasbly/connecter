@@ -1,5 +1,9 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { AuditService } from '../audit/audit.service.js';
+import {
+  parseAuditContinuation,
+  type AuditContinuation,
+  type AuditService,
+} from '../audit/audit.service.js';
 import { QueryValidationError } from '../mapping/query-builder.js';
 
 const ISO_DATE_OR_TIMESTAMP =
@@ -15,9 +19,20 @@ export function registerAuditLogRoute(app: FastifyInstance, auditService: AuditS
         page?: string;
         pageSize?: string;
         since?: string;
+        continuation?: string;
       };
 
-      const page = Math.max(1, parseInt(params.page ?? '1', 10) || 1);
+      let continuation: AuditContinuation | undefined;
+      if (params.continuation !== undefined && params.continuation !== '') {
+        continuation = parseAuditContinuation(params.continuation);
+        if (!continuation) {
+          throw new QueryValidationError(
+            'Query parameter "continuation" must be a valid audit-log cursor',
+          );
+        }
+      }
+
+      const page = continuation ? 1 : Math.max(1, parseInt(params.page ?? '1', 10) || 1);
       const pageSize = Math.min(100, Math.max(1, parseInt(params.pageSize ?? '50', 10) || 50));
       if ((page - 1) * pageSize > MAX_PAGE_OFFSET) {
         throw new QueryValidationError(
@@ -35,10 +50,16 @@ export function registerAuditLogRoute(app: FastifyInstance, auditService: AuditS
         since = new Date(parsed).toISOString();
       }
 
-      const { entries, total, totalIsCapped } = await auditService.query({
+      const {
+        entries,
+        total,
+        totalIsCapped,
+        continuation: nextContinuation,
+      } = await auditService.query({
         page,
         pageSize,
         since,
+        continuation,
       });
 
       return {
@@ -48,6 +69,7 @@ export function registerAuditLogRoute(app: FastifyInstance, auditService: AuditS
         page,
         pageSize,
         totalPages: Math.ceil(total / pageSize),
+        continuation: nextContinuation,
       };
     },
   );

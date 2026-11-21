@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import {
   appendFile,
@@ -28,11 +29,64 @@ const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
  */
 const PRUNE_RETRY_INTERVAL_MS = 60 * 1000;
 
+function resolveAuditQueryOffset(options: AuditQueryOptions): number {
+  // A continuation is a keyset from the previous page, so page offsets would
+  // double-skip and are ignored (#38178).
+  if (options.continuation) return 0;
+  return (options.page - 1) * options.pageSize;
+}
+
 function resolveAuditQueryCountLimit(options: AuditQueryOptions): number {
-  const offset = (options.page - 1) * options.pageSize;
+  const offset = resolveAuditQueryOffset(options);
   // Do not let the count cap hide the requested page, and retain one more entry
   // so a capped total still advertises that there may be a following page.
   return Math.max(AUDIT_QUERY_COUNT_LIMIT, offset + options.pageSize + 1);
+}
+
+const CONTINUATION_FINGERPRINT_LENGTH = 22;
+const MAX_CONTINUATION_TOKEN_LENGTH = 512;
+
+export interface AuditContinuation {
+  ts: string;
+  fp: string;
+  n: number;
+}
+
+function fingerprintAuditEntry(entry: AuditEntry): string {
+  return createHash('sha256')
+    .update(JSON.stringify(entry))
+    .digest('base64url')
+    .slice(0, CONTINUATION_FINGERPRINT_LENGTH);
+}
+
+function continuationKey(entry: AuditEntry): string {
+  return `${entry.ts}:${fingerprintAuditEntry(entry)}`;
+}
+
+export function encodeAuditContinuation(entry: AuditEntry, n = 1): string {
+  return Buffer.from(
+    JSON.stringify({ ts: entry.ts, fp: fingerprintAuditEntry(entry), n }),
+    'utf8',
+  ).toString('base64url');
+}
+
+export function parseAuditContinuation(token: string): AuditContinuation | undefined {
+  if (token.length === 0 || token.length > MAX_CONTINUATION_TOKEN_LENGTH) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(token, 'base64url').toString('utf8')) as {
+      ts?: unknown;
+      fp?: unknown;
+      n?: unknown;
+    };
+    if (typeof parsed.ts !== 'string' || parsed.ts.length === 0) return undefined;
+    if (typeof parsed.fp !== 'string' || parsed.fp.length === 0) return undefined;
+    if (typeof parsed.n !== 'number' || !Number.isSafeInteger(parsed.n) || parsed.n < 1) {
+      return undefined;
+    }
+    return { ts: parsed.ts, fp: parsed.fp, n: parsed.n };
+  } catch {
+    return undefined;
+  }
 }
 
 export interface AuditEntry {
@@ -51,6 +105,14 @@ export interface AuditQueryOptions {
   page: number;
   pageSize: number;
   since?: string;
+  continuation?: AuditContinuation;
+}
+
+export interface AuditQueryResult {
+  entries: AuditEntry[];
+  total: number;
+  totalIsCapped: boolean;
+  continuation: string | null;
 }
 
 export interface AuditHealth {
@@ -120,11 +182,9 @@ export class AuditService {
     };
   }
 
-  async query(
-    options: AuditQueryOptions,
-  ): Promise<{ entries: AuditEntry[]; total: number; totalIsCapped: boolean }> {
+  async query(options: AuditQueryOptions): Promise<AuditQueryResult> {
     if (!this.config.enabled) {
-      return { entries: [], total: 0, totalIsCapped: false };
+      return { entries: [], total: 0, totalIsCapped: false, continuation: null };
     }
 
     // Reserve the write queue for the complete snapshot, not merely for the
@@ -141,30 +201,47 @@ export class AuditService {
     return query;
   }
 
-  private async readEntries(
-    options: AuditQueryOptions,
-  ): Promise<{ entries: AuditEntry[]; total: number; totalIsCapped: boolean }> {
-    const offset = (options.page - 1) * options.pageSize;
+  private async readEntries(options: AuditQueryOptions): Promise<AuditQueryResult> {
+    const offset = resolveAuditQueryOffset(options);
     const countLimit = resolveAuditQueryCountLimit(options);
     const entries: AuditEntry[] = [];
     let total = 0;
     let scanned = 0;
     let totalIsCapped = false;
+    let remainingCursorSkips = options.continuation?.n ?? 0;
+    const seenByKey = new Map<string, number>();
+    const bump = (entry: AuditEntry): void => {
+      const key = continuationKey(entry);
+      seenByKey.set(key, (seenByKey.get(key) ?? 0) + 1);
+    };
 
     const collect = (line: Buffer): boolean => {
       if (line.length === 0) return false;
-      scanned++;
       try {
         const entry = JSON.parse(line.toString('utf8')) as AuditEntry;
         if (options.since && entry.ts < options.since) return true;
+
+        const cursor = options.continuation;
+        if (cursor && remainingCursorSkips > 0) {
+          if (entry.ts > cursor.ts) return false;
+          if (entry.ts === cursor.ts && fingerprintAuditEntry(entry) === cursor.fp) {
+            remainingCursorSkips--;
+            bump(entry);
+            return false;
+          }
+          if (entry.ts >= cursor.ts) return false;
+          remainingCursorSkips = 0;
+        }
 
         if (total >= offset && entries.length < options.pageSize) {
           entries.push(entry);
         }
         total++;
+        bump(entry);
       } catch {
         // Skip malformed lines
       }
+      scanned++;
       if (scanned >= countLimit) totalIsCapped = true;
       return totalIsCapped;
     };
@@ -235,7 +312,13 @@ export class AuditService {
       if (shouldStop) break;
     }
 
-    return { entries, total, totalIsCapped };
+    const last = entries[entries.length - 1];
+    const continuation =
+      last && total > offset + entries.length
+        ? encodeAuditContinuation(last, seenByKey.get(continuationKey(last)) ?? 1)
+        : null;
+
+    return { entries, total, totalIsCapped, continuation };
   }
 
   private async rotateIfNeeded(): Promise<void> {

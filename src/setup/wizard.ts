@@ -170,6 +170,28 @@ export function getStatusValueDefault(
   return byName ?? UNMAPPED_FIELD_VALUE;
 }
 
+/**
+ * Keep saved mappings this run never offered a prompt for. Presented tokens
+ * stay as answered — including an explicit "Leave unmapped" — so a remap does
+ * not also keep the old parent, and a stock-gap rerun does not drop a token
+ * that only the previous sample saw.
+ */
+export function mergeUnpromptedStatusValues(
+  prompted: StatusValuesConfig,
+  presentedValues: readonly string[],
+  existingStatusValues?: StatusValuesConfig,
+): StatusValuesConfig {
+  if (!existingStatusValues) return prompted;
+  const presented = new Set(presentedValues);
+  const merged: StatusValuesConfig = { ...prompted };
+  for (const status of INVENTORY_STATUSES) {
+    const carried = (existingStatusValues[status] ?? []).filter((value) => !presented.has(value));
+    if (carried.length === 0) continue;
+    merged[status] = [...(merged[status] ?? []), ...carried];
+  }
+  return merged;
+}
+
 async function collectStatusValues(
   db: Awaited<ReturnType<typeof introspectDatabase>>['db'],
   schema: string,
@@ -242,7 +264,7 @@ async function collectStatusValues(
     (statusValues[status] ??= []).push(value);
   }
 
-  return statusValues;
+  return mergeUnpromptedStatusValues(statusValues, presentedValues, existingStatusValues);
 }
 
 /**
@@ -1191,6 +1213,12 @@ export async function runWizard(): Promise<void> {
     fieldMappings[field] = quoteIfNeeded(selectedValue);
     mappedColumnNames.add(selectedValue);
     if (field === 'status') {
+      const sameStatusColumn =
+        existingInventory !== undefined &&
+        existingInventory.table === selectedTableName &&
+        (existingInventory.schema ?? selectedSchema) === selectedSchema &&
+        getExistingMappingSelection(existingInventory.fields.status, [selectedValue]) ===
+          selectedValue;
       const collected = await collectStatusValues(
         db,
         selectedSchema,
@@ -1198,7 +1226,7 @@ export async function runWizard(): Promise<void> {
         selectedValue,
         idColumn,
         updatedAtColumn,
-        existingInventory?.statusValues,
+        sameStatusColumn ? existingInventory.statusValues : undefined,
       );
       // A present empty block records the choice to leave every value unmapped.
       // Omitting it restores the English defaults when the config is loaded.
@@ -2353,11 +2381,8 @@ export function formatInventoryDiff(
   previous: ConnectorConfig['resources']['inventory'],
   next: ConnectorConfig['resources']['inventory'],
 ): string {
-  const previousLines = yaml
-    .dump(previous, { lineWidth: 120, quoteStyle: 'double' })
-    .trimEnd()
-    .split('\n');
-  const nextLines = yaml.dump(next, { lineWidth: 120, quoteStyle: 'double' }).trimEnd().split('\n');
+  const previousLines = dumpInventoryDiffLines(previous);
+  const nextLines = dumpInventoryDiffLines(next);
   const nextLineSet = new Set(nextLines);
   const previousLineSet = new Set(previousLines);
   const changes = [
@@ -2366,6 +2391,18 @@ export function formatInventoryDiff(
   ];
 
   return changes.length > 0 ? changes.join('\n') : '  (no changes)';
+}
+
+/**
+ * YAML lines for the inventory diff. Nested lists dump on the same line as
+ * their parent key so a token that only swaps status buckets is not invisible
+ * to the set-diff (`- ready` under ACTIVE vs RESERVED is otherwise identical).
+ */
+function dumpInventoryDiffLines(value: ConnectorConfig['resources']['inventory']): string[] {
+  return yaml
+    .dump(value, { lineWidth: 120, quoteStyle: 'double', flowLevel: 2 })
+    .trimEnd()
+    .split('\n');
 }
 
 function getExistingMappingSelection(
