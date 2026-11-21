@@ -7,7 +7,8 @@ COPY src/ src/
 # complete build context so that file reaches this stage when it exists; a
 # checkout from before stamping still builds with an empty fallback file.
 COPY . ./
-RUN npx tsc && { test -f version.json || printf '{}' > version.json; }
+# Runtime copies node_modules from this stage; drop compiler/test tools after tsc.
+RUN npx tsc && { test -f version.json || printf '{}' > version.json; } && npm prune --omit=dev
 
 FROM node:22-alpine
 WORKDIR /app
