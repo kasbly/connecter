@@ -237,6 +237,21 @@ describe('mapRowToInventoryItem', () => {
     expect(() => validateInventoryItemWireContract(missingPrice)).toThrow(/price/);
   });
 
+  it('parses a numeric-looking text price instead of leaving it unusable (#38635)', () => {
+    const result = mapRowToInventoryItem(
+      { id: 42, title: 'Desk lamp', price: '149', currency: 'SAR' },
+      {
+        ...baseConfig,
+        fields: { ...baseConfig.fields, currency: 'currency' },
+      },
+      new Map(),
+    );
+
+    expect(result.price).toBe(149);
+    expect(result.currency).toBe('SAR');
+    expect(() => validateInventoryItemWireContract(result)).not.toThrow();
+  });
+
   it.each(['', '   ', '\t\n'])('does not coerce a blank price string %j to 0', (blank) => {
     const result = mapRowToInventoryItem(
       { id: '1', title: 'Test', price: blank },

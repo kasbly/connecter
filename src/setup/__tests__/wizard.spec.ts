@@ -20,6 +20,7 @@ import {
   derivePublishedRelationName,
   EMPTY_RELATION_FK_HINT,
   formatInventoryDiff,
+  formatMissingRequiredMappingsError,
   getFieldMappingPrompt,
   getIdColumnPrompt,
   getSetupHostDefault,
@@ -360,6 +361,37 @@ describe('getFieldMappingPrompt', () => {
     expect(prompt.choices.map((choice) => choice.value)).not.toContain('legacy_price');
   });
 
+  it('offers a text column named price and never defaults the mapping to the listing id (#38635)', () => {
+    const prompt = getFieldMappingPrompt(
+      'price',
+      [
+        { name: 'id', type: 'integer', isPrimaryKey: true },
+        { name: 'title', type: 'text' },
+        { name: 'price', type: 'text' },
+        { name: 'currency', type: 'text' },
+      ],
+      'price',
+    );
+
+    expect(prompt.default).toBe('price');
+    expect(prompt.choices.map((choice) => choice.value)).toContain('price');
+    expect(prompt.choices.map((choice) => choice.value)).not.toContain('id');
+    expect(prompt.choices.map((choice) => choice.value)).not.toContain('title');
+  });
+
+  it('does not fall back to the integer primary key when no price column is compatible (#38635)', () => {
+    const prompt = getFieldMappingPrompt('price', [
+      { name: 'id', type: 'integer', isPrimaryKey: true },
+      { name: 'title', type: 'text' },
+      { name: 'currency', type: 'varchar' },
+    ]);
+
+    expect(prompt.choices).toEqual([
+      { name: 'Do not map this field', value: UNMAPPED_FIELD_VALUE },
+    ]);
+    expect(prompt.default).toBe(UNMAPPED_FIELD_VALUE);
+  });
+
   it('offers boolean columns for status mappings', () => {
     const prompt = getFieldMappingPrompt('status', [
       { name: 'name', type: 'text' },
@@ -476,6 +508,18 @@ describe('getFieldMappingPrompt', () => {
     expect(prompt.message).toContain('bare filenames such as "car-123.jpg" work');
     expect(prompt.message).toContain('public site origin in Step 6a');
     expect(prompt.message).not.toContain('are dropped');
+  });
+});
+
+describe('formatMissingRequiredMappingsError', () => {
+  it('explains how to map a numeric-text price instead of substituting the listing id', () => {
+    expect(formatMissingRequiredMappingsError(['price'])).toContain(
+      'The listing id cannot be used as the price',
+    );
+    expect(formatMissingRequiredMappingsError(['price'])).toContain('CAST(price AS numeric)');
+    expect(formatMissingRequiredMappingsError(['title', 'currency'])).toBe(
+      'Cannot save configuration: map title and currency before continuing.',
+    );
   });
 });
 
@@ -5609,6 +5653,155 @@ describe('runWizard', () => {
       await expect(runWizard()).rejects.toThrow(
         'Cannot save configuration: map title and currency before continuing.',
       );
+      expect(db.destroy).toHaveBeenCalledOnce();
+      expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('maps a text price column on Enter instead of substituting the listing id (#38635)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = Object.assign(vi.fn(), {
+      destroy: vi.fn().mockResolvedValue(undefined),
+      raw: vi.fn().mockResolvedValue({ rows: [] }),
+    });
+
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementation(
+      (prompt: { message: string; default?: string; choices: Array<{ value: string }> }) => {
+        if (prompt.message.startsWith('Database type')) return Promise.resolve('postgres');
+        if (prompt.message.startsWith('Which table contains')) return Promise.resolve('products');
+        if (prompt.message.startsWith('Which column is the unique listing id'))
+          return Promise.resolve('id');
+        if (prompt.message.startsWith('Which reverse proxy')) return Promise.resolve('none');
+        const field = /^Which column contains the (\w+)\?$/.exec(prompt.message)?.[1];
+        if (field === 'price') {
+          expect(prompt.default).toBe('price');
+          expect(prompt.choices.map((choice) => choice.value)).toContain('price');
+          expect(prompt.choices.map((choice) => choice.value)).not.toContain('id');
+          return Promise.resolve(prompt.default);
+        }
+        if (field && ['title', 'currency'].includes(field)) {
+          return Promise.resolve(prompt.default);
+        }
+        return Promise.resolve(UNMAPPED_FIELD_VALUE);
+      },
+    );
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('public');
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('password');
+    promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+      Promise.resolve(!message.startsWith('Does this database require TLS')),
+    );
+    promptMocks.checkbox.mockImplementation(({ message }) => {
+      if (message.startsWith('Which columns should be searchable'))
+        return Promise.resolve(['title']);
+      return Promise.resolve([]);
+    });
+    vi.mocked(introspectDatabase).mockResolvedValue({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'products',
+            kind: 'table',
+            rowCount: 1,
+            columns: [
+              { name: 'id', type: 'integer', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'price', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'text', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await runWizard();
+      const inventory = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      ).resources.inventory;
+      expect(inventory.fields.price).toBe('"price"');
+      expect(inventory.fields.price).not.toBe('"id"');
+      expect(
+        mapRowToInventoryItem(
+          { id: 42, title: 'Desk lamp', price: '149', currency: 'SAR' },
+          inventory,
+          new Map(),
+        ),
+      ).toMatchObject({ externalId: '42', title: 'Desk lamp', price: 149, currency: 'SAR' });
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to finish setup when the only numeric column is the listing id (#38635)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = { destroy: vi.fn().mockResolvedValue(undefined) };
+
+    vi.clearAllMocks();
+    promptMocks.select.mockImplementation((prompt: { message: string; default?: string }) => {
+      if (prompt.message.startsWith('Database type')) return Promise.resolve('postgres');
+      if (prompt.message.startsWith('Which table contains')) return Promise.resolve('inventory');
+      if (prompt.message.startsWith('Which column is the unique listing id'))
+        return Promise.resolve('id');
+      if (prompt.message.startsWith('Which column contains the price')) {
+        expect(prompt.default).toBe(UNMAPPED_FIELD_VALUE);
+        return Promise.resolve(prompt.default);
+      }
+      if (prompt.message.startsWith('Which column contains the title'))
+        return Promise.resolve('title');
+      if (prompt.message.startsWith('Which column contains the currency'))
+        return Promise.resolve('currency');
+      return Promise.resolve(UNMAPPED_FIELD_VALUE);
+    });
+    promptMocks.input.mockImplementation(({ message }: { message: string }) => {
+      if (message.startsWith('Host')) return Promise.resolve('database.example.com');
+      if (message.startsWith('Port')) return Promise.resolve('5432');
+      if (message.startsWith('Database name')) return Promise.resolve('catalog');
+      if (message.startsWith('PostgreSQL schema')) return Promise.resolve('catalog');
+      return Promise.resolve('reader');
+    });
+    promptMocks.password.mockResolvedValue('p@ss#word');
+    promptMocks.confirm.mockResolvedValue(false);
+    vi.mocked(introspectDatabase).mockResolvedValueOnce({
+      db: db as never,
+      result: {
+        tables: [
+          {
+            name: 'inventory',
+            kind: 'table',
+            rowCount: 1,
+            columns: [
+              { name: 'id', type: 'integer', nullable: false, isPrimaryKey: true },
+              { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
+              { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+            ],
+          },
+        ],
+        foreignKeys: [],
+      },
+      retriedWithTls: false,
+    });
+
+    try {
+      process.chdir(directory);
+      await expect(runWizard()).rejects.toThrow(/listing id cannot be used as the price/);
       expect(db.destroy).toHaveBeenCalledOnce();
       expect(existsSync(join(directory, 'connector.config.yml'))).toBe(false);
     } finally {

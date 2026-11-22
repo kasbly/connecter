@@ -21,6 +21,7 @@ import {
   classifyRelationType,
   suggestJoinColumn,
   isListingUrlColumn,
+  isPriceColumnName,
 } from '../suggest.js';
 import type { IntrospectedColumn, IntrospectedTable, ForeignKeyInfo } from '../introspect.js';
 
@@ -45,6 +46,31 @@ describe('suggestFieldMappings', () => {
     expect(mapped.get('price')).toBe('price');
     expect(mapped.get('description')).toBe('description');
     expect(mapped.get('category')).toBe('category');
+  });
+
+  it('still suggests a text column named price (#38635)', () => {
+    const suggestions = suggestFieldMappings([
+      col('id', 'integer', true),
+      col('title', 'text'),
+      col('price', 'text'),
+      col('currency', 'text'),
+    ]);
+
+    expect(suggestions).toContainEqual(
+      expect.objectContaining({ columnName: 'price', suggestedMapping: 'price' }),
+    );
+  });
+
+  it.each(['price', 'cost', 'amount', 'sale_price', 'saleprice', 'salePrice'])(
+    'recognizes %s as a price column name',
+    (columnName) => {
+      expect(isPriceColumnName(columnName)).toBe(true);
+    },
+  );
+
+  it('does not treat formatted_price or the listing id as a price column name', () => {
+    expect(isPriceColumnName('formatted_price')).toBe(false);
+    expect(isPriceColumnName('id')).toBe(false);
   });
 
   it('suggests a row-level image column as the images field', () => {
@@ -882,6 +908,27 @@ describe('suggestFilterableColumns', () => {
 
     expect(filterNames).toContain('minPrice');
     expect(filterNames).toContain('maxPrice');
+    expect(suggestions.find((s) => s.filterName === 'minPrice')!.filterType).toBe('gte');
+    expect(suggestions.find((s) => s.filterName === 'maxPrice')!.filterType).toBe('lte');
+  });
+
+  it('suggests minPrice/maxPrice for a text price column rather than a string filter (#38635)', () => {
+    const columns = [col('id', 'integer', true), col('price', 'text')];
+    const fieldMappings = [
+      {
+        columnName: 'price',
+        suggestedMapping: 'price',
+        confidence: 'high' as const,
+        mappingType: 'field' as const,
+      },
+    ];
+
+    const suggestions = suggestFilterableColumns(columns, fieldMappings, []);
+    const filterNames = suggestions.map((s) => s.filterName);
+
+    expect(filterNames).toContain('minPrice');
+    expect(filterNames).toContain('maxPrice');
+    expect(filterNames).not.toContain('price');
     expect(suggestions.find((s) => s.filterName === 'minPrice')!.filterType).toBe('gte');
     expect(suggestions.find((s) => s.filterName === 'maxPrice')!.filterType).toBe('lte');
   });

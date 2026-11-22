@@ -112,6 +112,12 @@ export function isListingUrlColumn(columnName: string): boolean {
   return urlPatterns.some((pattern) => pattern.test(columnName));
 }
 
+/** True for a column name the wizard already suggests as `fields.price`. */
+export function isPriceColumnName(columnName: string): boolean {
+  const pricePatterns = FIELD_PATTERNS.find((entry) => entry.target === 'price')?.patterns ?? [];
+  return pricePatterns.some((pattern) => pattern.test(columnName));
+}
+
 // Columns to suggest as published filter
 const PUBLISHED_PATTERNS = [
   /^published$/i,
@@ -821,7 +827,10 @@ export function suggestFilterableColumns(
     // never sends, leaving every year-bounded search silently ignored
     // (#28985). The query-builder casts the column to `::numeric` for gte/lte
     // so a text column still compares correctly.
-    if (isNumeric || (mappedName === 'year' && (isText || isEnum))) {
+    // Imported catalogues store `price` the same way ('149' as text). Those
+    // columns must still publish minPrice/maxPrice rather than a string filter
+    // the AI never sends (#38635).
+    if (isNumeric || ((mappedName === 'year' || mappedName === 'price') && (isText || isEnum))) {
       const filterNameSuffix = mappedName.charAt(0).toUpperCase() + mappedName.slice(1);
       const minFilterName = `min${filterNameSuffix}`;
       const maxFilterName = `max${filterNameSuffix}`;

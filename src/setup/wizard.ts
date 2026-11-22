@@ -52,6 +52,7 @@ import {
   getSearchableColumnDefault,
   isAttributeEligibleColumn,
   isListingUrlColumn,
+  isPriceColumnName,
   IMAGE_TYPE_COLUMN_PATTERNS,
   type FilterableColumnSuggestion,
   type RelationSuggestion,
@@ -96,6 +97,17 @@ const FIXED_VALUE_FIELDS = new Set<FieldMappingTarget>(['currency', 'category', 
 // The wizard cannot save without these, so their prompt never offers "Do not map".
 const REQUIRED_FIELDS: readonly FieldMappingTarget[] = ['title', 'price', 'currency'];
 
+/** Fail-closed copy when a required mapping is still missing at save time. */
+export function formatMissingRequiredMappingsError(fields: readonly string[]): string {
+  const mapped = `Cannot save configuration: map ${fields.join(' and ')} before continuing.`;
+  if (!fields.includes('price')) return mapped;
+  return (
+    `${mapped} The listing id cannot be used as the price. Map a numeric price column ` +
+    `or a text column of numeric prices (for example '149'), or expose one through a view ` +
+    `(for example CAST(price AS numeric)).`
+  );
+}
+
 interface FieldMappingPrompt {
   message: string;
   choices: Array<{ name: string; value: string }>;
@@ -107,14 +119,31 @@ interface MappingColumn {
   type: string;
   udtName?: string;
   isEnum?: boolean;
+  isPrimaryKey?: boolean;
+}
+
+function isListingIdLikeColumn(column: string | MappingColumn): boolean {
+  const name = typeof column === 'string' ? column : column.name;
+  if (/^id$/i.test(name) || /_id$/i.test(name)) return true;
+  return typeof column !== 'string' && column.isPrimaryKey === true;
 }
 
 function isCompatibleFieldColumn(field: FieldMappingTarget, column: MappingColumn): boolean {
   const normalizedType = column.type.trim().toLowerCase();
   if (field === 'price') {
-    return /^(smallint|integer|bigint|decimal|numeric|real|double precision|float)/.test(
-      normalizedType,
-    );
+    // The listing id is a finite number, but quoting it as the price is never
+    // a valid default — setup used to pick the integer PK when a text `price`
+    // column was filtered out (#38635).
+    if (isListingIdLikeColumn(column)) return false;
+    if (
+      /^(smallint|integer|bigint|decimal|numeric|real|double precision|float)/.test(normalizedType)
+    ) {
+      return true;
+    }
+    // Imported catalogues store prices as text ('149'). mapRowToInventoryItem
+    // already parses those with Number(); excluding them made the required-field
+    // fallback substitute the primary key.
+    return isTextColumn(column) && isPriceColumnName(column.name);
   }
 
   if (field === 'images') {
@@ -353,10 +382,12 @@ export function getFieldMappingPrompt(
   keepFixedValue = false,
 ): FieldMappingPrompt {
   const columnNames = columns
-    .filter(
-      (column): column is string | MappingColumn =>
-        typeof column === 'string' || isCompatibleFieldColumn(field, column),
-    )
+    .filter((column): column is string | MappingColumn => {
+      if (typeof column === 'string') {
+        return field !== 'price' || !isListingIdLikeColumn(column);
+      }
+      return isCompatibleFieldColumn(field, column);
+    })
     .map((column) => (typeof column === 'string' ? column : column.name));
   const choices: FieldMappingPrompt['choices'] = [
     // With no compatible column at all (and no fixed-value choice) the prompt would
@@ -373,6 +404,12 @@ export function getFieldMappingPrompt(
     })),
   ];
 
+  const requiredFallback =
+    field === 'price'
+      ? (columnNames.find((columnName) => !isListingIdLikeColumn(columnName)) ??
+        UNMAPPED_FIELD_VALUE)
+      : (columnNames[0] ?? UNMAPPED_FIELD_VALUE);
+
   return {
     message:
       field === 'images'
@@ -385,7 +422,7 @@ export function getFieldMappingPrompt(
         : (keepFixedValue || field === 'currency') && FIXED_VALUE_FIELDS.has(field)
           ? FIXED_VALUE_FIELD_VALUE
           : REQUIRED_FIELDS.includes(field)
-            ? (columnNames[0] ?? UNMAPPED_FIELD_VALUE)
+            ? requiredFallback
             : UNMAPPED_FIELD_VALUE,
   };
 }
@@ -1248,9 +1285,7 @@ export async function runWizard(): Promise<void> {
   if (missingRequiredMappings.length > 0) {
     await db.destroy();
     // A failed setup must exit non-zero, not look like a finished one with no files.
-    throw new Error(
-      `Cannot save configuration: map ${missingRequiredMappings.join(' and ')} before continuing.`,
-    );
+    throw new Error(formatMissingRequiredMappingsError(missingRequiredMappings));
   }
 
   // Step 3a: Listing URL
