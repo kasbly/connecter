@@ -369,6 +369,9 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     ignoredFilters.push('sortBy');
   }
   const sortDirection = requestedSortDirection === 'asc' ? ('asc' as const) : defaultSort.direction;
+  // The mapped price may be a text column, which PostgreSQL orders lexicographically
+  // ('100' before '9') ahead of the page limit; the response serves it as a number.
+  const sortsByPrice = canonicalSortColumn !== undefined && requestedSortBy === 'price';
 
   // Search across searchable columns
   // Split search into individual terms — each term must match at least one searchable column (AND between terms, OR between columns per term)
@@ -495,7 +498,10 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   return {
     conditions,
     pagination: { page, pageSize },
-    sort: withIdTiebreaker({ column: sortBy, direction: sortDirection }, config),
+    sort: withIdTiebreaker(
+      { column: sortBy, direction: sortDirection, ...(sortsByPrice ? { numeric: true } : {}) },
+      config,
+    ),
     ignoredFilters,
   };
 }

@@ -19,6 +19,7 @@ import {
   backupPrivateFile,
   derivePublishedRelationName,
   EMPTY_RELATION_FK_HINT,
+  extraLabeledApiKeys,
   formatInventoryDiff,
   formatMissingRequiredMappingsError,
   getFieldMappingPrompt,
@@ -40,6 +41,7 @@ import {
   STATUS_VALUE_SCAN_LIMIT,
   toConfigLiteral,
   validateCaCertificatePath,
+  validatePostgresSchemaName,
   writePrivateFile,
   verifyUniqueListingIdColumn,
 } from '../wizard.js';
@@ -51,6 +53,7 @@ import {
 } from '../suggest.js';
 import { getUpdatedAtEpochPrompt, sampleUpdatedAtValue } from '../updated-at-epoch.js';
 import { runWizard } from '../wizard.js';
+import { findMatchingKey } from '../../auth/api-key.guard.js';
 import { loadConfig } from '../../config/config.loader.js';
 import { buildQuery } from '../../mapping/query-builder.js';
 import { mapRowToInventoryItem } from '../../mapping/field-mapper.js';
@@ -106,6 +109,7 @@ function mockWizardProbeFailureSetup(
   port = '5432',
   epoch?: 's' | 'ms',
   compositeKey = false,
+  schema = 'merchant_data',
 ) {
   const db = Object.assign(vi.fn(), {
     destroy: vi.fn().mockResolvedValue(undefined),
@@ -146,7 +150,7 @@ function mockWizardProbeFailureSetup(
     port,
     'catalog',
     'reader',
-    'merchant_data',
+    schema,
     'connector.merchant.example',
   ]) {
     promptMocks.input.mockImplementationOnce(() => Promise.resolve(answer));
@@ -225,6 +229,12 @@ describe('mergeUnpromptedStatusValues', () => {
       SOLD: ['for_sale', 'sold'],
       ACTIVE: ['available'],
     });
+  });
+
+  it('drops a saved spelling of a code the run just answered under another case', () => {
+    expect(
+      mergeUnpromptedStatusValues({ SOLD: ['r'] }, ['r'], { ACTIVE: ['R'], SOLD: ['sold'] }),
+    ).toEqual({ SOLD: ['r', 'sold'] });
   });
 
   it('returns the prompted mapping unchanged when nothing was saved', () => {
@@ -946,6 +956,20 @@ describe('validateCaCertificatePath', () => {
   });
 });
 
+describe('validatePostgresSchemaName', () => {
+  it('accepts a hyphenated schema as one identifier and rejects empty, NUL, and schema.table', () => {
+    expect(validatePostgresSchemaName('shop-west')).toBe(true);
+    expect(validatePostgresSchemaName('  shop-west  ')).toBe(true);
+    expect(validatePostgresSchemaName('public')).toBe(true);
+    expect(validatePostgresSchemaName('')).not.toBe(true);
+    expect(validatePostgresSchemaName('   ')).not.toBe(true);
+    expect(validatePostgresSchemaName('invalid\0name')).not.toBe(true);
+    expect(validatePostgresSchemaName('catalog.products')).toBe(
+      'Schema must be a single identifier, not schema.table.',
+    );
+  });
+});
+
 describe('loadExistingSetupConfig', () => {
   it('loads local .env values and preserves existing trusted proxy configuration', () => {
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
@@ -1017,6 +1041,33 @@ describe('serializeEnvValue', () => {
       );
     },
   );
+});
+
+describe('extraLabeledApiKeys', () => {
+  it('keeps independently labeled keys and drops wizard-managed current and pending entries', () => {
+    expect(
+      extraLabeledApiKeys(
+        [
+          { key: '${CONNECTOR_API_KEY}', label: 'kasbly-production' },
+          { key: '${CONNECTOR_API_KEY_PENDING}', label: 'kasbly-pending' },
+          { key: 'kc_reporting', label: 'reporting' },
+          { key: '${REPORTING_API_KEY}', label: 'bi-export' },
+          { key: 'kc_existing', label: 'duplicate-current' },
+        ],
+        ['kc_existing', 'kc_pending'],
+      ),
+    ).toEqual([
+      { key: 'kc_reporting', label: 'reporting' },
+      { key: '${REPORTING_API_KEY}', label: 'bi-export' },
+    ]);
+  });
+
+  it('returns an empty list when every key is wizard-managed or missing', () => {
+    expect(extraLabeledApiKeys(undefined, ['kc_existing'])).toEqual([]);
+    expect(
+      extraLabeledApiKeys([{ key: '${CONNECTOR_API_KEY}', label: 'kasbly-current' }], []),
+    ).toEqual([]);
+  });
 });
 
 describe('runWizard', () => {
@@ -5410,6 +5461,36 @@ describe('runWizard', () => {
     }
   });
 
+  it('accepts shop-west at the schema prompt as one identifier and saves the selected table', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+    const previousDirectory = process.cwd();
+    const db = mockWizardProbeFailureSetup('products', '5432', undefined, false, 'shop-west');
+    try {
+      process.chdir(directory);
+      await runWizard();
+      const config = loadExistingSetupConfig(
+        join(directory, 'connector.config.yml'),
+        join(directory, '.env'),
+      );
+      expect(config.resources.inventory.schema).toBe('shop-west');
+      expect(config.resources.inventory.table).toBe('products');
+      expect(db.destroy).toHaveBeenCalledOnce();
+      expect(introspectionMocks.introspectDatabase).toHaveBeenCalledWith(
+        expect.objectContaining({ schema: 'shop-west' }),
+      );
+      const prompt = promptMocks.input.mock.calls.find(
+        ([options]) => options.message === 'PostgreSQL schema:',
+      )![0];
+      expect(prompt.validate('shop-west')).toBe(true);
+      expect(prompt.validate('')).not.toBe(true);
+      expect(prompt.validate('invalid\0name')).not.toBe(true);
+      expect(prompt.validate('catalog.products')).not.toBe(true);
+    } finally {
+      process.chdir(previousDirectory);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it.each(['s', 'ms'] as const)(
     'saves numeric last-updated units %s through YAML reload',
     async (epoch) => {
@@ -6667,6 +6748,10 @@ describe('runWizard', () => {
   async function rerunStatusMappingSetup(options: {
     sampleValues: unknown[];
     statusAnswers?: Record<string, string>;
+    /** Answer to "How should X and Y be mapped?" when two spellings disagree. */
+    conflictResolution?: 'same' | 'both';
+    /** Status chosen for both spellings when `conflictResolution` is `both`. */
+    sharedStatus?: string;
     statusColumn?: string;
     extraColumns?: Array<{
       name: string;
@@ -6730,6 +6815,12 @@ describe('runWizard', () => {
         return Promise.resolve(prompt.default ?? 'DRAFT');
       }
       if (message.startsWith('Which reverse proxy')) return Promise.resolve('none');
+      if (/^How should .+ and .+ be mapped\?$/.test(message)) {
+        return Promise.resolve(options.conflictResolution ?? 'same');
+      }
+      if (message.startsWith('Which Kasbly status matches both')) {
+        return Promise.resolve(options.sharedStatus ?? UNMAPPED_FIELD_VALUE);
+      }
       const statusMatch = /^Which Kasbly status matches (?:"(.+)"|blank)\?$/.exec(message);
       if (statusMatch) {
         const token = message.includes('blank') ? '' : statusMatch[1]!;
@@ -6861,6 +6952,40 @@ describe('runWizard', () => {
     expect(buildQuery({ 'filter.status': 'ACTIVE' }, inventory).conditions).toEqual([
       { column: '"status"', operator: 'IN', value: ['available'] },
     ]);
+  });
+
+  it('keeps two spellings of one source code on a single status when setup answers disagree', async () => {
+    const inventory = await rerunStatusMappingSetup({
+      sampleValues: ['R', 'r'],
+      statusAnswers: { R: 'ACTIVE', r: 'SOLD' },
+      conflictResolution: 'same',
+    });
+
+    expect(inventory.statusValues).toEqual({
+      ACTIVE: ['R', 'r', 'for_sale', 'available'],
+      SOLD: ['sold'],
+    });
+    expect(listingStatus(inventory, 'R')).toBe('ACTIVE');
+    expect(listingStatus(inventory, 'r')).toBe('ACTIVE');
+    expect(buildQuery({ 'filter.status': 'SOLD' }, inventory).conditions).toEqual([
+      { column: '"status"', operator: 'IN', value: ['sold'] },
+    ]);
+  });
+
+  it('lets the owner remap both spellings of a conflicting source code', async () => {
+    const inventory = await rerunStatusMappingSetup({
+      sampleValues: ['R', 'r'],
+      statusAnswers: { R: 'ACTIVE', r: 'SOLD' },
+      conflictResolution: 'both',
+      sharedStatus: 'SOLD',
+    });
+
+    expect(inventory.statusValues).toEqual({
+      SOLD: ['R', 'r', 'sold'],
+      ACTIVE: ['for_sale', 'available'],
+    });
+    expect(listingStatus(inventory, 'R')).toBe('SOLD');
+    expect(listingStatus(inventory, 'r')).toBe('SOLD');
   });
 
   it('does not carry saved status mappings when the status column changed', async () => {
@@ -7290,6 +7415,87 @@ describe('runWizard', () => {
         rmSync(directory, { recursive: true, force: true });
       }
     });
+
+    it.each([
+      {
+        change: 'mapping-only' as const,
+        expected: [
+          { key: '${CONNECTOR_API_KEY}', label: 'kasbly-current' },
+          { key: '${REPORTING_API_KEY}', label: 'reporting' },
+        ],
+      },
+      {
+        change: 'stage key' as const,
+        expected: [
+          { key: '${CONNECTOR_API_KEY}', label: 'kasbly-current' },
+          { key: '${CONNECTOR_API_KEY_PENDING}', label: 'kasbly-pending' },
+          { key: '${REPORTING_API_KEY}', label: 'reporting' },
+        ],
+      },
+      {
+        change: 'retire key' as const,
+        expected: [
+          { key: '${CONNECTOR_API_KEY}', label: 'kasbly-current' },
+          { key: '${REPORTING_API_KEY}', label: 'reporting' },
+        ],
+      },
+    ])(
+      'keeps a separately labeled reporting key across a $change rerun (#38640)',
+      async ({ change, expected }) => {
+        const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+        const previousDirectory = process.cwd();
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        vi.clearAllMocks();
+        mockMinimalRunPrompts('none');
+
+        try {
+          process.chdir(directory);
+          await runWizard();
+          const envPath = join(directory, '.env');
+          const configPath = join(directory, 'connector.config.yml');
+          const generated = yaml.load(readFileSync(configPath, 'utf-8')) as {
+            auth: { apiKeys: Array<{ key: string; label: string }> };
+          };
+          generated.auth.apiKeys.push({ key: '${REPORTING_API_KEY}', label: 'reporting' });
+          writeFileSync(configPath, yaml.dump(generated, { lineWidth: 120, quoteStyle: 'double' }));
+          writeFileSync(
+            envPath,
+            `${readFileSync(envPath, 'utf-8')}REPORTING_API_KEY=kc_reporting\n${
+              change === 'retire key' ? 'CONNECTOR_API_KEY_PENDING=kc_pending\n' : ''
+            }`,
+          );
+
+          mockMinimalRunPrompts('none');
+          promptMocks.confirm.mockImplementation(({ message }: { message: string }) => {
+            if (message.startsWith('Does this database require TLS')) return Promise.resolve(false);
+            if (message.startsWith('Generate and stage'))
+              return Promise.resolve(change === 'stage key');
+            if (message.startsWith('Retire the previous'))
+              return Promise.resolve(change === 'retire key');
+            return Promise.resolve(true);
+          });
+          if (change === 'mapping-only') {
+            promptMocks.checkbox.mockImplementation(({ message }) =>
+              Promise.resolve(
+                message.startsWith('Which columns should be searchable') ? ['title'] : [],
+              ),
+            );
+          }
+          await runWizard();
+
+          const rewritten = yaml.load(readFileSync(configPath, 'utf-8')) as {
+            auth: { apiKeys: Array<{ key: string; label: string }> };
+          };
+          expect(rewritten.auth.apiKeys).toEqual(expected);
+          const loaded = loadExistingSetupConfig(configPath, envPath);
+          expect(findMatchingKey('kc_reporting', loaded.auth.apiKeys)?.label).toBe('reporting');
+        } finally {
+          consoleLog.mockRestore();
+          process.chdir(previousDirectory);
+          rmSync(directory, { recursive: true, force: true });
+        }
+      },
+    );
 
     describe('rerun defaults for TLS and the proxy topology', () => {
       const PEM = '-----BEGIN CERTIFICATE-----\nmerchant-ca\n-----END CERTIFICATE-----';

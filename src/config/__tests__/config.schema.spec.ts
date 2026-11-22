@@ -25,6 +25,24 @@ function createConfigInput(databaseOverrides: Record<string, unknown> = {}) {
   };
 }
 
+describe('connectorConfigSchema auth.apiKeys', () => {
+  it('accepts independently labeled keys alongside the current key', () => {
+    const config = connectorConfigSchema.parse({
+      ...createConfigInput(),
+      auth: {
+        apiKeys: [
+          { key: 'kc_current', label: 'kasbly-current' },
+          { key: 'kc_reporting', label: 'reporting' },
+        ],
+      },
+    });
+    expect(config.auth.apiKeys).toEqual([
+      { key: 'kc_current', label: 'kasbly-current' },
+      { key: 'kc_reporting', label: 'reporting' },
+    ]);
+  });
+});
+
 describe('connectorConfigSchema database TLS options', () => {
   it('defaults certificate verification to enabled', () => {
     const config = connectorConfigSchema.parse(createConfigInput({ ssl: true }));
@@ -123,35 +141,55 @@ describe('connectorConfigSchema inventory fields', () => {
     );
   });
 
-  it.each(['car-listings', 'Inventory Items', 'prodüct', 'المنتجات', 'a"b', '1catalog'])(
-    'accepts quoted PostgreSQL schema and table names: %s',
-    (name) => {
-      const config = connectorConfigSchema.parse({
-        ...createConfigInput(),
-        resources: {
-          inventory: {
-            ...createConfigInput().resources.inventory,
-            schema: name,
-            table: name,
-            relations: {
-              features: {
-                schema: name,
-                table: name,
-                foreignKey: 'product_id',
-                referenceKey: 'id',
-                fields: { name: 'name' },
-              },
+  it.each([
+    'shop-west',
+    'car-listings',
+    'Inventory Items',
+    'prodüct',
+    'المنتجات',
+    'a"b',
+    '1catalog',
+  ])('accepts quoted PostgreSQL schema and table names: %s', (name) => {
+    const config = connectorConfigSchema.parse({
+      ...createConfigInput(),
+      resources: {
+        inventory: {
+          ...createConfigInput().resources.inventory,
+          schema: name,
+          table: name,
+          relations: {
+            features: {
+              schema: name,
+              table: name,
+              foreignKey: 'product_id',
+              referenceKey: 'id',
+              fields: { name: 'name' },
             },
           },
         },
-      });
-      expect(config.resources.inventory).toMatchObject({
-        schema: name,
-        table: name,
-        relations: { features: { schema: name, table: name } },
-      });
-    },
-  );
+      },
+    });
+    expect(config.resources.inventory).toMatchObject({
+      schema: name,
+      table: name,
+      relations: { features: { schema: name, table: name } },
+    });
+  });
+
+  it('stores a dotted name as one identifier rather than schema.table', () => {
+    const config = connectorConfigSchema.parse({
+      ...createConfigInput(),
+      resources: {
+        inventory: {
+          ...createConfigInput().resources.inventory,
+          schema: 'catalog.products',
+          table: 'listings',
+        },
+      },
+    });
+    expect(config.resources.inventory.schema).toBe('catalog.products');
+    expect(config.resources.inventory.table).toBe('listings');
+  });
 
   it.each(['', 'invalid\0name'])('rejects an invalid PostgreSQL identifier: %j', (name) => {
     for (const field of ['schema', 'table']) {
@@ -195,6 +233,24 @@ describe('connectorConfigSchema inventory fields', () => {
       column: 'position',
       direction: 'asc',
     });
+  });
+
+  it('rejects one source code listed under two statuses once case and spacing are ignored', () => {
+    const parseWith = (statusValues: Record<string, string[]>) =>
+      connectorConfigSchema.safeParse({
+        ...createConfigInput(),
+        resources: {
+          inventory: { ...createConfigInput().resources.inventory, statusValues },
+        },
+      });
+
+    const conflict = parseWith({ ACTIVE: ['R'], SOLD: ['r'] });
+    expect(conflict.success).toBe(false);
+    expect(conflict.error?.issues[0]?.message).toContain('same status code');
+    expect(parseWith({ ACTIVE: ['R'], SOLD: [' r '] }).success).toBe(false);
+    expect(parseWith({ ACTIVE: ['', 'x'], SOLD: ['  '] }).success).toBe(false);
+    // The same code spelled twice under one status is harmless.
+    expect(parseWith({ ACTIVE: ['R', 'r'], SOLD: ['sold'] }).success).toBe(true);
   });
 
   it('defaults and accepts source values for the closed inventory status vocabulary', () => {

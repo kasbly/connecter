@@ -372,6 +372,42 @@ describe('introspectDatabase', () => {
     });
   });
 
+  it('binds a hyphenated schema name as a single identifier', async () => {
+    const schema = 'shop-west';
+    const db = {
+      raw: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ rows: [{ name: 'products', kind: 'table' }] })
+        .mockResolvedValueOnce({
+          rows: [
+            { column_name: 'id', data_type: 'uuid', udt_name: 'uuid', is_nullable: 'NO' },
+            { column_name: 'title', data_type: 'text', udt_name: 'text', is_nullable: 'NO' },
+          ],
+        })
+        .mockResolvedValueOnce({ rows: [{ column_name: 'id' }] })
+        .mockResolvedValueOnce({ rows: [{ estimate: '3' }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    knexMock.mockReturnValueOnce(db);
+
+    const { result } = await introspectDatabase({ ...connection, schema });
+
+    expect(knexMock).toHaveBeenCalledWith(expect.objectContaining({ searchPath: [schema] }));
+    expect(db.raw).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('FROM information_schema.tables'),
+      [schema, schema],
+    );
+    expect(db.raw).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('WHERE table_name = ? AND table_schema = ?'),
+      ['products', schema],
+    );
+    expect(result.tables.map((table) => table.name)).toEqual(['products']);
+  });
+
   it('returns a view when it is the schema’s only inventory object', async () => {
     const db = {
       raw: vi

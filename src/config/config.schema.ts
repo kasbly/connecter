@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { findStatusValueConflicts } from '../mapping/field-mapper.js';
 
 const defaultStatusValues = {
   ACTIVE: ['ACTIVE', 'active'],
@@ -75,10 +76,13 @@ const filterableColumnSchema = z.object({
 // PostgreSQL identifiers are passed to Knex as identifiers rather than SQL fragments.
 // Keep schemas and tables as separate values so a qualified name can never be treated as
 // one table identifier (for example, `catalog.products`).
+export function isPostgresIdentifier(name: string): boolean {
+  return name.length > 0 && !name.includes('\0');
+}
+
 const postgresIdentifierSchema = z
   .string()
-  .min(1)
-  .refine((name) => !name.includes('\0'), 'must not contain a NUL byte');
+  .refine(isPostgresIdentifier, 'must be a nonempty PostgreSQL identifier without a NUL byte');
 
 const relationSchema = z.object({
   schema: postgresIdentifierSchema.optional(),
@@ -147,7 +151,18 @@ const inventoryResourceSchema = z.object({
       SOLD: z.array(z.string()).min(1).optional(),
       EXPIRED: z.array(z.string()).min(1).optional(),
     })
-    .default(defaultStatusValues),
+    .default(defaultStatusValues)
+    // The connector compares source values trimmed and case-insensitively, so two
+    // spellings of one code under different statuses cannot both be honoured.
+    .superRefine((statusValues, ctx) => {
+      for (const conflict of findStatusValueConflicts(statusValues)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [conflict.status],
+          message: `"${conflict.value}" (${conflict.status}) and "${conflict.otherValue}" (${conflict.otherStatus}) are the same status code: source values are compared without case or surrounding whitespace. List the code under one status only.`,
+        });
+      }
+    }),
   // New source-system values must never become sellable without an explicit
   // mapping. DRAFT is the conservative default for existing configurations.
   unknownStatusPolicy: z.enum(['DRAFT', 'RESERVED', 'SOLD', 'EXPIRED']).default('DRAFT'),

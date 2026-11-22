@@ -11,8 +11,10 @@ import { dirname, resolve } from 'node:path';
 import { input, select, confirm, checkbox, password } from '@inquirer/prompts';
 import { parse } from 'dotenv';
 import * as yaml from 'js-yaml';
+import { isPostgresIdentifier } from '../config/config.schema.js';
 import { loadConfig, parseConnectorConfig } from '../config/config.loader.js';
 import type {
+  AuthKeyConfig,
   ConnectorConfig,
   RelationConfig,
   UnknownStatusPolicy,
@@ -57,7 +59,11 @@ import {
   type FilterableColumnSuggestion,
   type RelationSuggestion,
 } from './suggest.js';
-import { toStatusValueToken, UNMAPPED_STATUS_FALLBACK } from '../mapping/field-mapper.js';
+import {
+  normalizeStatusValue,
+  toStatusValueToken,
+  UNMAPPED_STATUS_FALLBACK,
+} from '../mapping/field-mapper.js';
 import { createDatabaseAdapter } from '../db/adapter.factory.js';
 import {
   formatUnknownStatusWarning,
@@ -212,9 +218,14 @@ export function mergeUnpromptedStatusValues(
 ): StatusValuesConfig {
   if (!existingStatusValues) return prompted;
   const presented = new Set(presentedValues);
+  // A carried spelling that compares equal to a prompted one (`R` carried, `r` just
+  // answered) is the same code; the fresh answer wins instead of saving a conflict.
+  const promptedKeys = new Set(presentedValues.map(normalizeStatusValue));
   const merged: StatusValuesConfig = { ...prompted };
   for (const status of INVENTORY_STATUSES) {
-    const carried = (existingStatusValues[status] ?? []).filter((value) => !presented.has(value));
+    const carried = (existingStatusValues[status] ?? []).filter(
+      (value) => !presented.has(value) && !promptedKeys.has(normalizeStatusValue(value)),
+    );
     if (carried.length === 0) continue;
     merged[status] = [...(merged[status] ?? []), ...carried];
   }
@@ -273,11 +284,14 @@ async function collectStatusValues(
     );
   }
   const statusValues: StatusValuesConfig = {};
-
-  for (const value of presentedValues) {
-    const status = await select<InventoryStatus | typeof UNMAPPED_FIELD_VALUE>({
-      message: `Which Kasbly status matches ${value === '' ? 'blank' : `"${value}"`}?`,
-      default: getStatusValueDefault(value, existingStatusValues),
+  // The connector compares source values trimmed and case-insensitively, so `R` and
+  // `r` are one code. Remember each answered spelling to catch a second spelling that
+  // is sent to a different status before the mapping is saved.
+  const answered = new Map<string, { value: string; status: InventoryStatus }>();
+  const askStatus = (message: string, fallback: InventoryStatus | typeof UNMAPPED_FIELD_VALUE) =>
+    select<InventoryStatus | typeof UNMAPPED_FIELD_VALUE>({
+      message,
+      default: fallback,
       choices: [
         ...INVENTORY_STATUSES.map((inventoryStatus) => ({
           name: inventoryStatus,
@@ -289,8 +303,55 @@ async function collectStatusValues(
         },
       ],
     });
+  const label = (value: string) => (value === '' ? 'blank' : `"${value}"`);
+
+  for (const value of presentedValues) {
+    let status = await askStatus(
+      `Which Kasbly status matches ${label(value)}?`,
+      getStatusValueDefault(value, existingStatusValues),
+    );
     if (status === UNMAPPED_FIELD_VALUE) continue;
+
+    const key = normalizeStatusValue(value);
+    const earlier = answered.get(key);
+    if (earlier && earlier.status !== status) {
+      console.log(
+        `\n${label(value)} and ${label(earlier.value)} are the same status code: the connector compares source values without case or surrounding whitespace, so they cannot map to different statuses (${earlier.status} vs ${status}).`,
+      );
+      const resolution = await select<'same' | 'both'>({
+        message: `How should ${label(value)} and ${label(earlier.value)} be mapped?`,
+        default: 'same',
+        choices: [
+          { name: `Both ${earlier.status} (keep the earlier answer)`, value: 'same' },
+          { name: 'Both a different status (change the earlier answer too)', value: 'both' },
+        ],
+      });
+      if (resolution === 'same') {
+        status = earlier.status;
+      } else {
+        const corrected = await askStatus(
+          `Which Kasbly status matches both ${label(earlier.value)} and ${label(value)}?`,
+          status,
+        );
+        // Move every earlier spelling of this code, not just the first one.
+        const spellings = (statusValues[earlier.status] ?? []).filter(
+          (candidate) => normalizeStatusValue(candidate) === key,
+        );
+        const remaining = (statusValues[earlier.status] ?? []).filter(
+          (candidate) => !spellings.includes(candidate),
+        );
+        if (remaining.length > 0) statusValues[earlier.status] = remaining;
+        else delete statusValues[earlier.status];
+        if (corrected === UNMAPPED_FIELD_VALUE) {
+          answered.delete(key);
+          continue;
+        }
+        (statusValues[corrected] ??= []).push(...spellings);
+        status = corrected;
+      }
+    }
     (statusValues[status] ??= []).push(value);
+    answered.set(key, { value: earlier?.value ?? value, status });
   }
 
   return mergeUnpromptedStatusValues(statusValues, presentedValues, existingStatusValues);
@@ -508,6 +569,18 @@ export function getUpdatedAtColumnPrompt(
 
 export function toConfigLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+/** Runtime identifier rules, plus a single-identifier guard so `schema.table` is not a schema. */
+export function validatePostgresSchemaName(value: string): true | string {
+  const name = value.trim();
+  if (!isPostgresIdentifier(name)) {
+    return 'Schema must be a nonempty PostgreSQL identifier without a NUL byte.';
+  }
+  if (name.includes('.')) {
+    return 'Schema must be a single identifier, not schema.table.';
+  }
+  return true;
 }
 
 const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '::1'];
@@ -1059,9 +1132,7 @@ export async function runWizard(): Promise<void> {
   const dbSchema = await input({
     message: 'PostgreSQL schema:',
     default: existingConfig?.resources.inventory.schema ?? 'public',
-    validate: (value) =>
-      /^[A-Za-z_][A-Za-z0-9_]*$/.test(value.trim()) ||
-      'Schema must be a PostgreSQL identifier (letters, numbers, and underscores).',
+    validate: validatePostgresSchemaName,
   });
   const selectedSchema = dbSchema?.trim() || 'public';
 
@@ -2021,11 +2092,18 @@ export async function runWizard(): Promise<void> {
       ...(trustedProxies ? { trustedProxies } : {}),
     },
     auth: {
+      // Wizard-managed current/pending keys follow the rotation answers.
+      // Independently labeled extras (for example a reporting key) are not
+      // prompted, so a mapping-only rerun must keep them (#38640).
       apiKeys: [
         { key: '${CONNECTOR_API_KEY}', label: 'kasbly-current' },
         ...(pendingApiKey
           ? [{ key: '${CONNECTOR_API_KEY_PENDING}', label: 'kasbly-pending' }]
           : []),
+        ...extraLabeledApiKeys(
+          readExistingApiKeyEntries(configPath) ?? existingConfig?.auth.apiKeys,
+          [existingApiKey, existingPendingApiKey, currentApiKey, pendingApiKey],
+        ),
       ],
     },
     database: {
@@ -2363,6 +2441,44 @@ function validateProspectiveConfig(yamlContent: string, envContent: string): voi
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
+  }
+}
+
+const WIZARD_MANAGED_API_KEY_REFS = new Set([
+  '${CONNECTOR_API_KEY}',
+  '${CONNECTOR_API_KEY_PENDING}',
+]);
+
+/**
+ * Keys the wizard does not stage or retire: independently labeled extras such
+ * as a reporting credential. Wizard-managed current/pending env keys are
+ * excluded so rotation still owns those two slots.
+ */
+export function extraLabeledApiKeys(
+  existingKeys: readonly AuthKeyConfig[] | undefined,
+  managedKeyValues: readonly (string | undefined)[],
+): AuthKeyConfig[] {
+  const managed = new Set(WIZARD_MANAGED_API_KEY_REFS);
+  for (const value of managedKeyValues) {
+    if (value) managed.add(value);
+  }
+  const extras: AuthKeyConfig[] = [];
+  for (const entry of existingKeys ?? []) {
+    if (!entry.key || !entry.label || managed.has(entry.key)) continue;
+    extras.push({ key: entry.key, label: entry.label });
+  }
+  return extras;
+}
+
+/** Uninterpolated `auth.apiKeys` so extra entries keep their original key expressions. */
+function readExistingApiKeyEntries(configPath: string): AuthKeyConfig[] | undefined {
+  try {
+    const parsed = yaml.load(readFileSync(configPath, 'utf-8')) as {
+      auth?: { apiKeys?: AuthKeyConfig[] };
+    };
+    return parsed?.auth?.apiKeys?.filter((entry) => entry?.key && entry?.label);
+  } catch {
+    return undefined;
   }
 }
 

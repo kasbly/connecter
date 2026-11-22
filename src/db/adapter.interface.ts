@@ -35,6 +35,13 @@ export interface SortOptions {
   column: string;
   direction: 'asc' | 'desc';
   /**
+   * Order by the column's numeric value instead of its native type. Mapped
+   * prices are often `text`/`varchar`, which sort lexicographically (`'100'`
+   * before `'9'`) while the response serves them as numbers. Values that are
+   * not numeric sort last, like NULL.
+   */
+  numeric?: boolean;
+  /**
    * Unique column appended as a final `DESC` sort key so a page is taken from a
    * totally ordered result set. Without it, rows sharing the `column` value have
    * no defined order between two `LIMIT`/`OFFSET` requests, so page 2 can repeat

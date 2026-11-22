@@ -10,6 +10,7 @@ import {
 } from '../postgres.adapter.js';
 import type { QueryCondition, SortOptions } from '../adapter.interface.js';
 import { buildQuery } from '../../mapping/query-builder.js';
+import { safeNumericRangeExpression } from '../../mapping/numeric-range.js';
 import {
   getMappedImageValues,
   mapRowToInventoryItem,
@@ -587,6 +588,27 @@ describe('isSafeOrderByColumn', () => {
 });
 
 describe('buildOrderByClause', () => {
+  it('orders a numeric sort by the validated numeric value, keeping the tiebreaker', () => {
+    const clause = buildOrderByClause({
+      column: 'price',
+      direction: 'asc',
+      numeric: true,
+      tiebreaker: 'id',
+    });
+    expect(clause).toBe(`${safeNumericRangeExpression('price')} ASC NULLS LAST, id DESC`);
+    expect(clause).toContain('::numeric');
+  });
+
+  it('still refuses an unsafe column on a numeric sort', () => {
+    expect(() =>
+      buildOrderByClause({
+        column: 'price; DROP TABLE "Car"; --',
+        direction: 'asc',
+        numeric: true,
+      }),
+    ).toThrow(/unsafe column expression/);
+  });
+
   it('builds an ORDER BY fragment for a safe ascending column', () => {
     const sort: SortOptions = { column: 'price', direction: 'asc' };
     expect(buildOrderByClause(sort)).toBe('price ASC NULLS LAST');

@@ -300,6 +300,51 @@ export function toStatusValueToken(value: unknown): string {
  */
 export const UNMAPPED_STATUS_FALLBACK: InventoryStatus = 'ACTIVE';
 
+/** The comparison key `resolveInventoryStatus` and the status filter use for one source value. */
+export function normalizeStatusValue(value: unknown): string {
+  return trimStatusValue(toStatusValueToken(value)).toLowerCase();
+}
+
+export interface StatusValueConflict {
+  /** Spelling listed under {@link status}. */
+  value: string;
+  status: InventoryStatus;
+  /** An earlier spelling that compares equal to `value` but sits under another status. */
+  otherValue: string;
+  otherStatus: InventoryStatus;
+}
+
+/**
+ * Source values the connector reads as one code (trimmed, case-insensitive) that a
+ * `statusValues` block files under different Kasbly statuses. `R` -> ACTIVE with
+ * `r` -> SOLD cannot both hold: list/detail resolve the first match and the SOLD
+ * filter matches both spellings, so a retired row would be published as ACTIVE.
+ */
+export function findStatusValueConflicts(
+  statusValues: StatusValuesConfig | undefined,
+): StatusValueConflict[] {
+  if (!statusValues) return [];
+  const seen = new Map<string, { value: string; status: InventoryStatus }>();
+  const conflicts: StatusValueConflict[] = [];
+  for (const status of INVENTORY_STATUSES) {
+    for (const value of statusValues[status] ?? []) {
+      const key = normalizeStatusValue(value);
+      const earlier = seen.get(key);
+      if (!earlier) {
+        seen.set(key, { value, status });
+      } else if (earlier.status !== status) {
+        conflicts.push({
+          value,
+          status,
+          otherValue: earlier.value,
+          otherStatus: earlier.status,
+        });
+      }
+    }
+  }
+  return conflicts;
+}
+
 /** Resolve a source-system status to Kasbly's closed inventory-status vocabulary. */
 export function resolveInventoryStatus(
   value: unknown,
@@ -308,7 +353,7 @@ export function resolveInventoryStatus(
   // Blank is a real token (`''`). It matches only when a list contains it —
   // `IN ('')` cannot see SQL NULL, and the defaults do not list blank, so an
   // unmapped NULL stays unknown instead of becoming ACTIVE.
-  const normalizedValue = trimStatusValue(toStatusValueToken(value)).toLowerCase();
+  const normalizedValue = normalizeStatusValue(value);
 
   // A `statusValues` block that is present is read literally, matching the
   // filter direction below and the README: a key the merchant left out of the

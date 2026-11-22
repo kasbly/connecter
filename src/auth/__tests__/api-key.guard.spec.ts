@@ -32,6 +32,14 @@ describe('findMatchingKey', () => {
     const result = findMatchingKey('test-key', keys);
     expect(result).toBeUndefined();
   });
+
+  it('records the original label of a separately configured reporting key', () => {
+    const result = findMatchingKey('kc_reporting', [
+      { key: 'kc_current', label: 'kasbly-current' },
+      { key: 'kc_reporting', label: 'reporting' },
+    ]);
+    expect(result).toEqual({ key: 'kc_reporting', label: 'reporting' });
+  });
 });
 
 describe('createApiKeyGuard', () => {

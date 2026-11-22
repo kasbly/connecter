@@ -63,7 +63,9 @@ export function buildOrderByClause(sort: SortOptions): string {
     throw new Error(`Refusing to sort by unsafe column expression: ${JSON.stringify(sort.column)}`);
   }
   const direction = sort.direction === 'asc' ? 'ASC' : 'DESC';
-  const clause = `${escapeRawFragmentPlaceholders(sort.column)} ${direction} NULLS LAST`;
+  // The column was validated above; the numeric wrapper only adds a fixed CASE.
+  const orderExpression = sort.numeric ? safeNumericRangeExpression(sort.column) : sort.column;
+  const clause = `${escapeRawFragmentPlaceholders(orderExpression)} ${direction} NULLS LAST`;
 
   if (sort.tiebreaker === undefined || sort.tiebreaker === sort.column) {
     return clause;

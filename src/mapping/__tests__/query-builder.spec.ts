@@ -777,7 +777,12 @@ describe('buildQuery', () => {
 
   it('uses custom sort', () => {
     const result = buildQuery({ sortBy: 'price', sortDirection: 'asc' }, baseConfig);
-    expect(result.sort).toEqual({ column: 'price', direction: 'asc', tiebreaker: 'id' });
+    expect(result.sort).toEqual({
+      column: 'price',
+      direction: 'asc',
+      numeric: true,
+      tiebreaker: 'id',
+    });
   });
 
   describe('sortBy allowlisting (#14461)', () => {
@@ -811,7 +816,12 @@ describe('buildQuery', () => {
 
       const result = buildQuery({ sortBy: 'price', sortDirection: 'asc' }, wizardGeneratedConfig);
 
-      expect(result.sort).toEqual({ column: '"price"', direction: 'asc', tiebreaker: '"id"' });
+      expect(result.sort).toEqual({
+        column: '"price"',
+        direction: 'asc',
+        numeric: true,
+        tiebreaker: '"id"',
+      });
     });
 
     describe('canonical Kasbly sort fields (#35913)', () => {
@@ -821,7 +831,12 @@ describe('buildQuery', () => {
           fields: { title: 'title', price: '"salePrice"' },
         };
         const result = buildQuery({ sortBy: 'price', sortDirection: 'asc' }, config);
-        expect(result.sort).toEqual({ column: '"salePrice"', direction: 'asc', tiebreaker: 'id' });
+        expect(result.sort).toEqual({
+          column: '"salePrice"',
+          direction: 'asc',
+          numeric: true,
+          tiebreaker: 'id',
+        });
         expect(result.ignoredFilters).toEqual([]);
       });
 
@@ -832,6 +847,13 @@ describe('buildQuery', () => {
         };
         expect(buildQuery({ sortBy: 'price' }, config).sort.column).toBe('sale_price');
         expect(buildQuery({ sortBy: 'title' }, config).sort.column).toBe('name');
+      });
+
+      it('sorts price numerically but leaves other canonical sorts native', () => {
+        expect(buildQuery({ sortBy: 'price' }, baseConfig).sort.numeric).toBe(true);
+        expect(buildQuery({ sortBy: 'title' }, baseConfig).sort.numeric).toBeUndefined();
+        expect(buildQuery({ sortBy: 'updatedAt' }, baseConfig).sort.numeric).toBeUndefined();
+        expect(buildQuery({}, baseConfig).sort.numeric).toBeUndefined();
       });
 
       it('resolves sortBy=updatedAt to updatedAtColumn', () => {
