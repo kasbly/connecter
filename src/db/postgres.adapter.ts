@@ -17,6 +17,7 @@ import {
   STATUS_VALUE_BTRIM_CHARS_SQL,
   trimStatusValue,
 } from '../mapping/field-mapper.js';
+import { isoTextInstantExpression, isTextColumnExpression } from '../mapping/instant-text.js';
 import { safeNumericRangeExpression } from '../mapping/numeric-range.js';
 
 /**
@@ -65,7 +66,13 @@ export function buildOrderByClause(sort: SortOptions): string {
   const direction = sort.direction === 'asc' ? 'ASC' : 'DESC';
   // The column was validated above; the numeric wrapper only adds a fixed CASE.
   const orderExpression = sort.numeric ? safeNumericRangeExpression(sort.column) : sort.column;
-  const clause = `${escapeRawFragmentPlaceholders(orderExpression)} ${direction} NULLS LAST`;
+  let clause = `${escapeRawFragmentPlaceholders(orderExpression)} ${direction} NULLS LAST`;
+  if (sort.isoTextInstant && !sort.numeric) {
+    // Instant first (NULL unless the column is ISO text), native order second.
+    clause =
+      `${escapeRawFragmentPlaceholders(isoTextInstantExpression(sort.column))} ${direction} NULLS LAST, ` +
+      clause;
+  }
 
   if (sort.tiebreaker === undefined || sort.tiebreaker === sort.column) {
     return clause;
@@ -293,10 +300,25 @@ export class PostgresAdapter implements DatabaseAdapter {
       // Integer-epoch `updatedSince` stays on the numeric `>=` path below.
       if (condition.operator === '>=' && typeof condition.value === 'string') {
         const column = escapeRawFragmentPlaceholders(condition.column);
+        // A text column of ISO timestamps compares by instant (#39099); a value
+        // that is not supported ISO text keeps the native comparison.
         queryBuilder = queryBuilder.whereRaw(
-          `(CASE WHEN pg_typeof(${column}) = 'date'::regtype THEN (${column}::timestamp AT TIME ZONE 'UTC') >= ?::timestamptz ELSE ${column} >= ? END)`,
-          [condition.value, condition.value],
+          `(CASE WHEN pg_typeof(${column}) = 'date'::regtype THEN (${column}::timestamp AT TIME ZONE 'UTC') >= ?::timestamptz ` +
+            `WHEN ${isTextColumnExpression(column)} THEN COALESCE(${isoTextInstantExpression(column)} >= ?::timestamptz, ${column} >= ?) ` +
+            `ELSE ${column} >= ? END)`,
+          [condition.value, condition.value, condition.value, condition.value],
         );
+        continue;
+      }
+      // A fractional Unix-second bound must be numeric so bigint epoch columns
+      // do not 22P02 while decimal/numeric columns stay inclusive at .500.
+      if (
+        condition.operator === '>=' &&
+        typeof condition.value === 'number' &&
+        !Number.isInteger(condition.value)
+      ) {
+        const column = escapeRawFragmentPlaceholders(condition.column);
+        queryBuilder = queryBuilder.whereRaw(`${column} >= ?::numeric`, [condition.value]);
         continue;
       }
       queryBuilder = queryBuilder.where(

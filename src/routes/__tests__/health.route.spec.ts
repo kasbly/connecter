@@ -531,7 +531,7 @@ describe('health route', () => {
       column: 'availability',
       limit: UNKNOWN_STATUS_VALUE_LIMIT,
       scanLimit: UNKNOWN_STATUS_SCAN_LIMIT,
-      orderBy: { column: 'updated_at', direction: 'desc', tiebreaker: 'id' },
+      orderBy: { column: 'updated_at', direction: 'desc', tiebreaker: 'id', isoTextInstant: true },
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
@@ -568,7 +568,12 @@ describe('health route', () => {
     const listSort = buildQuery({ page: '1', pageSize: '1' }, resource).sort;
     // Includes the id tiebreaker (#24914): the probe must read the same
     // deterministic first page GET /inventory serves.
-    expect(listSort).toEqual({ column: 'updated_at', direction: 'desc', tiebreaker: 'id' });
+    expect(listSort).toEqual({
+      column: 'updated_at',
+      direction: 'desc',
+      tiebreaker: 'id',
+      isoTextInstant: true,
+    });
     expect(dbAdapter.query).toHaveBeenCalledWith(
       'inventory',
       [],

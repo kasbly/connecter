@@ -7,8 +7,10 @@ services:
     # that needs the connector reachable from the network, so `npm run setup`
     # writes CONNECTOR_BIND=0.0.0.0 to .env when that topology is chosen (see
     # wizard.ts) — this default only applies when CONNECTOR_BIND is unset.
+    # CONNECTOR_PORT must match server.port (the process listen port). Setup
+    # writes it from the preserved config; the default is 4000.
     ports:
-      - '${CONNECTOR_BIND:-127.0.0.1}:4000:4000'
+      - '${CONNECTOR_BIND:-127.0.0.1}:${CONNECTOR_PORT:-4000}:${CONNECTOR_PORT:-4000}'
     volumes:
       - ./connector.config.yml:/app/connector.config.yml:ro
       - ./logs:/app/logs
@@ -27,7 +29,8 @@ services:
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     healthcheck:
-      test: ['CMD-SHELL', 'wget -q --spider http://localhost:4000/health || exit 1']
+      test:
+        ['CMD-SHELL', 'wget -q --spider http://localhost:${CONNECTOR_PORT:-4000}/health || exit 1']
       interval: 30s
       timeout: 10s
       retries: 3
@@ -47,6 +50,9 @@ services:
       # selecting one, so `docker compose up -d connector` on those topologies would
       # otherwise abort demanding a public DNS name this service is the only consumer of.
       CONNECTOR_DOMAIN: ${CONNECTOR_DOMAIN}
+      # Caddyfile substitutes {$CONNECTOR_PORT}; keep this in lockstep with the
+      # connector listen port and the published mapping above.
+      CONNECTOR_PORT: ${CONNECTOR_PORT:-4000}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

@@ -607,6 +607,9 @@ export function shouldDefaultToTls(host: string): boolean {
  */
 const BUNDLED_PROXY_ADDRESS = '172.30.0.2';
 
+/** Default `server.port` / Compose health-check and Caddy upstream port. */
+const DEFAULT_LISTEN_PORT = 4000;
+
 /**
  * The sample values `.env.example` ships, which `cp .env.example .env` copies
  * into a merchant's real `.env`. They are public (the example file is mirrored),
@@ -1977,12 +1980,13 @@ export async function runWizard(): Promise<void> {
 
   // The reverse-proxy topology decides whether the wizard's final "next
   // steps" run the bundled Compose deployment (`docker compose up -d`) or
-  // tell the operator to bind :4000 themselves, so it has to be known before
-  // asking for a public DNS name. Only the bundled Caddy proxy needs one —
-  // `docker compose up -d` refuses to resolve without CONNECTOR_DOMAIN, and
-  // without trustedProxies every request behind it is attributed to Caddy's
-  // internal address — so `custom`/`none` skip the prompt entirely rather
-  // than demanding a domain the printed instructions never use.
+  // tell the operator to bind the configured listen port themselves, so it
+  // has to be known before asking for a public DNS name. Only the bundled
+  // Caddy proxy needs one: `docker compose up -d` refuses to resolve without
+  // CONNECTOR_DOMAIN, and without trustedProxies every request behind it is
+  // attributed to Caddy's internal address — so `custom`/`none` skip the
+  // prompt entirely rather than demanding a domain the printed instructions
+  // never use.
   const { topology: proxyTopology, trustedProxies } = await collectTrustedProxies(
     existingConfig?.server.trustedProxies,
     existingEnv['CONNECTOR_BIND']?.trim(),
@@ -2099,7 +2103,7 @@ export async function runWizard(): Promise<void> {
     ...existingConfig,
     version: existingConfig?.version ?? 1,
     server: {
-      port: existingConfig?.server.port ?? 4000,
+      port: existingConfig?.server.port ?? DEFAULT_LISTEN_PORT,
       host: existingConfig?.server.host ?? '0.0.0.0',
       // Rebuilt rather than passed through, so choosing "None" this run also
       // drops a trustedProxies value a previous run wrote.
@@ -2272,6 +2276,10 @@ export async function runWizard(): Promise<void> {
     // (Caddy, or the operator's own), so they drop back to the loopback
     // default rather than writing a value (#27785).
     CONNECTOR_BIND: proxyTopology === 'none' ? '0.0.0.0' : null,
+    // Compose interpolates this into the published mapping, healthcheck, and
+    // Caddy upstream. Keep it in lockstep with server.port so a custom listen
+    // port is reachable instead of probing the default 4000.
+    CONNECTOR_PORT: String(config.server.port),
     // docker-compose.yml applies this only inside the connector container;
     // retain DB_HOST for host-side setup and validation commands.
     CONNECTOR_CONTAINER_DB_HOST: dockerLoopbackDbTrap ? 'host.docker.internal' : null,
@@ -2335,9 +2343,13 @@ export async function runWizard(): Promise<void> {
     ...new Set([...Object.keys(existingEnv), ...Object.keys(nextEnv)]),
   ].some((key) => existingEnv[key] !== nextEnv[key]);
   const domainChanged = existingEnv['CONNECTOR_DOMAIN'] !== nextEnv['CONNECTOR_DOMAIN'];
+  const listenPortChanged = existingEnv['CONNECTOR_PORT'] !== nextEnv['CONNECTOR_PORT'];
   const dockerReloadCommand = environmentChanged
-    ? `docker compose up -d --force-recreate connector${proxyTopology === 'bundled' && domainChanged ? ' caddy' : ''}`
+    ? `docker compose up -d --force-recreate connector${
+        proxyTopology === 'bundled' && (domainChanged || listenPortChanged) ? ' caddy' : ''
+      }`
     : 'docker compose restart connector';
+  const listenPort = config.server.port;
   if (proxyTopology === 'bundled') {
     console.log(
       hasExistingConfig || hasExistingEnv
@@ -2349,12 +2361,12 @@ export async function runWizard(): Promise<void> {
   } else if (proxyTopology === 'custom') {
     console.log(
       (hasExistingConfig || hasExistingEnv
-        ? '\n   Restart your npm start process (binds :4000; the bundled '
-        : '\n   Start the connector: npm run build && npm start (binds :4000; the bundled ') +
+        ? `\n   Restart your npm start process (binds :${listenPort}; the bundled `
+        : `\n   Start the connector: npm run build && npm start (binds :${listenPort}; the bundled `) +
         'Caddy service is not started)',
     );
-    console.log('   Put your own reverse proxy in front of this host on port 4000.');
-    console.log('   Verify locally: curl -fsS http://localhost:4000/health');
+    console.log(`   Put your own reverse proxy in front of this host on port ${listenPort}.`);
+    console.log(`   Verify locally: curl -fsS http://localhost:${listenPort}/health`);
     console.log('   Give Kasbly the public HTTPS URL your reverse proxy exposes.');
   } else {
     console.log(
@@ -2363,8 +2375,10 @@ export async function runWizard(): Promise<void> {
         : '\n   Start the connector: npm run build && npm start (or `docker compose up -d` ') +
         'after removing the caddy service from docker-compose.yml)',
     );
-    console.log('   Verify locally: curl -fsS http://localhost:4000/health');
-    console.log('   Give Kasbly this URL: http://<this-host>:4000 (no public DNS name needed)');
+    console.log(`   Verify locally: curl -fsS http://localhost:${listenPort}/health`);
+    console.log(
+      `   Give Kasbly this URL: http://<this-host>:${listenPort} (no public DNS name needed)`,
+    );
   }
   if (dockerLoopbackDbTrap) {
     console.log(

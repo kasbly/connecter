@@ -140,7 +140,9 @@ Numeric Unix last-updated values are emitted as ISO timestamps (seconds below
 `1e12` in absolute value, otherwise milliseconds). For an integer epoch column,
 set `resources.inventory.updatedAtEpoch` to `s` or `ms` alongside
 `updatedAtColumn`; setup asks for these units when a numeric column is selected.
-This also converts `updatedSince` into an integer bound in the source units.
+This also converts `updatedSince` into a bound in the source units, keeping
+fractional Unix seconds so a decimal/numeric column stays inclusive at a
+sub-second checkpoint. Whole-second and millisecond cutoffs stay integers.
 Omit `updatedAtEpoch` for PostgreSQL timestamp/date columns.
 
 | Parameter       | Type            | Description                                                                                                                                                         |
@@ -422,19 +424,20 @@ rather than comparing the Kasbly token against your status column.
 
 ## Environment Variables
 
-| Variable                      | Required | Description                                                                                                                                |
-| ----------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `DB_HOST`                     | Yes      | Database hostname                                                                                                                          |
-| `CONNECTOR_CONTAINER_DB_HOST` | No       | Hostname used only inside the Docker connector container; setup writes `host.docker.internal` for bundled or none with a loopback database |
-| `DB_NAME`                     | Yes      | Database name                                                                                                                              |
-| `DB_USER`                     | Yes      | Database username                                                                                                                          |
-| `DB_PASSWORD`                 | Yes      | Database password                                                                                                                          |
-| `DB_SSL_CA`                   | No       | PEM CA bundle referenced by `database.sslCa` for a private CA                                                                              |
-| `CONNECTOR_API_KEY`           | Yes      | API key shared with Kasbly                                                                                                                 |
-| `CONNECTOR_API_KEY_PENDING`   | No       | Staged replacement key during rotation; setup writes and removes it (see "Rotating the API key")                                           |
-| `CONNECTOR_DOMAIN`            | Docker   | Public DNS name used by the bundled HTTPS proxy                                                                                            |
-| `CONNECTOR_BIND`              | No       | Host interface Docker publishes port 4000 on (default `127.0.0.1`; `npm run setup` writes `0.0.0.0` for the "None" reverse-proxy topology) |
-| `CONFIG_PATH`                 | No       | Config file path (default: `./connector.config.yml`)                                                                                       |
+| Variable                      | Required | Description                                                                                                                                                  |
+| ----------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DB_HOST`                     | Yes      | Database hostname                                                                                                                                            |
+| `CONNECTOR_CONTAINER_DB_HOST` | No       | Hostname used only inside the Docker connector container; setup writes `host.docker.internal` for bundled or none with a loopback database                   |
+| `DB_NAME`                     | Yes      | Database name                                                                                                                                                |
+| `DB_USER`                     | Yes      | Database username                                                                                                                                            |
+| `DB_PASSWORD`                 | Yes      | Database password                                                                                                                                            |
+| `DB_SSL_CA`                   | No       | PEM CA bundle referenced by `database.sslCa` for a private CA                                                                                                |
+| `CONNECTOR_API_KEY`           | Yes      | API key shared with Kasbly                                                                                                                                   |
+| `CONNECTOR_API_KEY_PENDING`   | No       | Staged replacement key during rotation; setup writes and removes it (see "Rotating the API key")                                                             |
+| `CONNECTOR_DOMAIN`            | Docker   | Public DNS name used by the bundled HTTPS proxy                                                                                                              |
+| `CONNECTOR_BIND`              | No       | Host interface Docker publishes `CONNECTOR_PORT` on (default `127.0.0.1`; `npm run setup` writes `0.0.0.0` for the "None" reverse-proxy topology)            |
+| `CONNECTOR_PORT`              | No       | TCP port Docker publishes, health-checks, and Caddy proxies to; must match `server.port` (default `4000`; `npm run setup` writes the configured listen port) |
+| `CONFIG_PATH`                 | No       | Config file path (default: `./connector.config.yml`)                                                                                                         |
 
 ## Rotating the API key
 

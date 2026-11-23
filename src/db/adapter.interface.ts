@@ -42,6 +42,13 @@ export interface SortOptions {
    */
   numeric?: boolean;
   /**
+   * Order a `text`/`varchar` column of ISO-8601 timestamps by the instant it
+   * represents instead of its characters (`13:00+03:00` is 10:00 UTC, before
+   * `11:30Z`). Rows that are not supported ISO text sort after those that are,
+   * in native order. Native date/time columns are unaffected (#39099).
+   */
+  isoTextInstant?: boolean;
+  /**
    * Unique column appended as a final `DESC` sort key so a page is taken from a
    * totally ordered result set. Without it, rows sharing the `column` value have
    * no defined order between two `LIMIT`/`OFFSET` requests, so page 2 can repeat

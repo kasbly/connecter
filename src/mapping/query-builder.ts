@@ -199,6 +199,20 @@ function resolveCanonicalSortColumn(
   return column;
 }
 
+/**
+ * Whether sorting this column must compare ISO text timestamps by instant. The
+ * adapter only applies it to character columns, so a native timestamp column
+ * (or an integer epoch, which `updatedAtEpoch` declares) keeps its own order
+ * (#39099).
+ */
+function sortsByIsoTextInstant(column: string, config: InventoryResourceConfig): boolean {
+  return (
+    config.updatedAtColumn !== undefined &&
+    !config.updatedAtEpoch &&
+    normalizeSortColumn(column) === normalizeSortColumn(config.updatedAtColumn)
+  );
+}
+
 function isFixedActiveStatus(config: InventoryResourceConfig): boolean {
   const statusField = config.fields.status;
   return statusField === undefined || /^'ACTIVE'$/i.test(statusField.trim());
@@ -275,13 +289,26 @@ function withIdTiebreaker(sort: SortOptions, config: InventoryResourceConfig): S
  * they inspect the listing Kasbly's Test connection reads (#23588).
  */
 export function getDefaultSort(config: InventoryResourceConfig): SortOptions {
+  const column = config.updatedAtColumn ?? config.idColumn;
   return withIdTiebreaker(
     {
-      column: config.updatedAtColumn ?? config.idColumn,
+      column,
       direction: 'desc',
+      ...(sortsByIsoTextInstant(column, config) ? { isoTextInstant: true } : {}),
     },
     config,
   );
+}
+
+/**
+ * Source-unit bound for `updatedSince`. Fractional Unix seconds stay fractional
+ * so a decimal/numeric column is inclusive at a sub-second checkpoint. Whole
+ * seconds and milliseconds stay integers so bigint columns still get an integer
+ * parameter.
+ */
+function toEpochUpdatedSinceBound(updatedSince: string, units: 's' | 'ms'): number {
+  const millis = Date.parse(updatedSince);
+  return units === 's' ? millis / 1000 : millis;
 }
 
 export function buildQuery(params: RawQueryParams, config: InventoryResourceConfig): ParsedQuery {
@@ -404,13 +431,13 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     conditions.push({
       column: config.updatedAtColumn,
       operator: '>=',
-      // Round up for integer epochs so a fractional cutoff never returns an
-      // older row or sends a decimal parameter to a PostgreSQL bigint column.
       // DATE columns keep this ISO string (time included): the adapter promotes
       // DATE to midnight UTC so PostgreSQL does not drop the cutoff's time
-      // (#38180). Timestamp / timestamptz keep the same ISO bind.
+      // (#38180). Timestamp / timestamptz keep the same ISO bind. Epoch columns
+      // keep fractional Unix seconds; the adapter casts a non-integer bound to
+      // numeric so bigint columns do not reject the parameter.
       value: config.updatedAtEpoch
-        ? Math.ceil(Date.parse(updatedSince) / (config.updatedAtEpoch === 's' ? 1000 : 1))
+        ? toEpochUpdatedSinceBound(updatedSince, config.updatedAtEpoch)
         : new Date(updatedSince).toISOString(),
     });
   }
@@ -499,7 +526,12 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     conditions,
     pagination: { page, pageSize },
     sort: withIdTiebreaker(
-      { column: sortBy, direction: sortDirection, ...(sortsByPrice ? { numeric: true } : {}) },
+      {
+        column: sortBy,
+        direction: sortDirection,
+        ...(sortsByPrice ? { numeric: true } : {}),
+        ...(sortsByIsoTextInstant(sortBy, config) ? { isoTextInstant: true } : {}),
+      },
       config,
     ),
     ignoredFilters,

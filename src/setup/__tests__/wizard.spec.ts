@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as yaml from 'js-yaml';
 import {
   FIELD_MAPPING_TARGETS,
@@ -6198,14 +6199,20 @@ describe('runWizard', () => {
       const generated = yaml.load(
         readFileSync(join(directory, 'connector.config.yml'), 'utf-8'),
       ) as {
-        server: { trustedProxies?: string };
+        server: { port?: number; trustedProxies?: string };
         resources: { inventory: Record<string, unknown> };
       };
       const inventory = generated.resources.inventory;
       expect(
         loadExistingSetupConfig(join(directory, 'connector.config.yml'), join(directory, '.env')),
       ).toMatchObject({ resources: { inventory: { fields: { title: '"title"' } } } });
+      expect(generated.server.port).toBe(4100);
       expect(generated.server.trustedProxies).toBe('10.0.0.0/8');
+      expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_PORT']).toBe('4100');
+      expect(consoleLog).toHaveBeenCalledWith(
+        expect.stringContaining('curl -fsS http://localhost:4100/health'),
+      );
+      expect(consoleLog).toHaveBeenCalledWith(expect.stringContaining('on port 4100'));
       // A rerun offers what the operator already deployed with, rather than
       // resetting the connector to the bundled-Caddy defaults.
       expect(promptMocks.select).toHaveBeenCalledWith(
@@ -6741,7 +6748,7 @@ describe('runWizard', () => {
         table: vi.fn(() => ({ first: vi.fn().mockResolvedValue(null) })),
       })),
       raw: vi.fn((sql: string) => {
-        const isSortedByRecency = /ORDER BY "updated_at" DESC NULLS LAST, "id" DESC LIMIT/.test(
+        const isSortedByRecency = /ORDER BY .*"updated_at" DESC NULLS LAST, "id" DESC LIMIT/.test(
           sql,
         );
         const includesBlank = !sql.includes('IS NOT NULL');
@@ -7391,6 +7398,19 @@ describe('runWizard', () => {
       });
     }
 
+    it('publishes, health-checks, and proxies CONNECTOR_PORT rather than a hardcoded 4000', () => {
+      const connectorRoot = fileURLToPath(new URL('../../..', import.meta.url));
+      const compose = readFileSync(join(connectorRoot, 'docker-compose.yml'), 'utf-8');
+      expect(compose).toContain('${CONNECTOR_PORT:-4000}');
+      expect(compose).toContain('http://localhost:${CONNECTOR_PORT:-4000}/health');
+      expect(compose).toContain('CONNECTOR_PORT: ${CONNECTOR_PORT:-4000}');
+      expect(compose).not.toContain(':4000:4000');
+      expect(compose).not.toContain('localhost:4000/health');
+      const caddyfile = readFileSync(join(connectorRoot, 'Caddyfile'), 'utf-8');
+      expect(caddyfile).toContain('{$CONNECTOR_PORT:4000}');
+      expect(caddyfile).not.toContain('connector:4000');
+    });
+
     it.each([
       ['mapping-only', 'bundled', 'docker compose restart connector'],
       ['stage key', 'bundled', 'docker compose up -d --force-recreate connector'],
@@ -7399,6 +7419,7 @@ describe('runWizard', () => {
       ['database password', 'bundled', 'docker compose up -d --force-recreate connector'],
       ['TLS CA', 'bundled', 'docker compose up -d --force-recreate connector'],
       ['domain', 'bundled', 'docker compose up -d --force-recreate connector caddy'],
+      ['listen port', 'bundled', 'docker compose up -d --force-recreate connector caddy'],
       ['stage key', 'none', 'docker compose up -d --force-recreate connector'],
     ] as const)('reloads a %s rerun with %s using %s', async (change, topology, command) => {
       const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
@@ -7424,6 +7445,13 @@ describe('runWizard', () => {
             database: { password: string };
           };
           config.database.password = 'new-database-password';
+          writeFileSync(configPath, yaml.dump(config));
+        }
+        if (change === 'listen port') {
+          const config = yaml.load(readFileSync(configPath, 'utf-8')) as {
+            server: { port: number };
+          };
+          config.server.port = 4107;
           writeFileSync(configPath, yaml.dump(config));
         }
         const originalEnv = parse(readFileSync(envPath, 'utf-8'));
@@ -7482,7 +7510,7 @@ describe('runWizard', () => {
           expect(consoleLog).not.toHaveBeenCalledWith(
             expect.stringContaining('docker compose restart connector'),
           );
-          if (change !== 'domain')
+          if (change !== 'domain' && change !== 'listen port')
             expect(consoleLog).not.toHaveBeenCalledWith(expect.stringContaining('connector caddy'));
         }
         const env = parse(readFileSync(envPath, 'utf-8'));
@@ -7503,6 +7531,10 @@ describe('runWizard', () => {
           expect(env['DB_PASSWORD']).toBe('new-database-password');
         if (change === 'TLS CA') expect(env['DB_SSL_CA']).toContain('merchant-ca');
         if (change === 'domain') expect(env['CONNECTOR_DOMAIN']).toBe('new.merchant.example');
+        if (change === 'listen port') {
+          expect(env['CONNECTOR_PORT']).toBe('4107');
+          expect(loadExistingSetupConfig(configPath, envPath).server.port).toBe(4107);
+        }
       } finally {
         consoleLog.mockRestore();
         process.chdir(previousDirectory);
@@ -7733,6 +7765,9 @@ describe('runWizard', () => {
         expect(
           parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_BIND'],
         ).toBeUndefined();
+        expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_PORT']).toBe(
+          '4000',
+        );
       } finally {
         consoleLog.mockRestore();
         process.chdir(previousDirectory);
@@ -7811,6 +7846,9 @@ describe('runWizard', () => {
         expect(
           parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_BIND'],
         ).toBeUndefined();
+        expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_PORT']).toBe(
+          '4000',
+        );
       } finally {
         consoleLog.mockRestore();
         process.chdir(previousDirectory);
@@ -7863,6 +7901,9 @@ describe('runWizard', () => {
         expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_BIND']).toBe(
           '0.0.0.0',
         );
+        expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_PORT']).toBe(
+          '4000',
+        );
         // Remote DB_HOST is reachable from the container as-is; do not rewrite it.
         expect(
           parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_CONTAINER_DB_HOST'],
@@ -7873,6 +7914,59 @@ describe('runWizard', () => {
         rmSync(directory, { recursive: true, force: true });
       }
     });
+
+    it.each(['custom', 'none'] as const)(
+      'prints verification for a preserved listen port on %s',
+      async (topology) => {
+        const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+        const previousDirectory = process.cwd();
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        vi.clearAllMocks();
+        mockMinimalRunPrompts(topology);
+
+        try {
+          process.chdir(directory);
+          await runWizard();
+          const configPath = join(directory, 'connector.config.yml');
+          const config = yaml.load(readFileSync(configPath, 'utf-8')) as {
+            server: { port: number };
+          };
+          config.server.port = 4107;
+          writeFileSync(configPath, yaml.dump(config));
+          consoleLog.mockClear();
+          mockMinimalRunPrompts(topology);
+          promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
+            Promise.resolve(
+              message.startsWith('Existing connector configuration') ||
+                !message.startsWith('Does this database require TLS'),
+            ),
+          );
+          await runWizard();
+
+          expect(parse(readFileSync(join(directory, '.env'), 'utf-8'))['CONNECTOR_PORT']).toBe(
+            '4107',
+          );
+          expect(loadExistingSetupConfig(configPath, join(directory, '.env')).server.port).toBe(
+            4107,
+          );
+          expect(consoleLog).toHaveBeenCalledWith(
+            expect.stringContaining('curl -fsS http://localhost:4107/health'),
+          );
+          expect(consoleLog).toHaveBeenCalledWith(
+            expect.stringContaining(
+              topology === 'custom' ? 'on port 4107' : 'http://<this-host>:4107',
+            ),
+          );
+          expect(consoleLog).not.toHaveBeenCalledWith(
+            expect.stringContaining('localhost:4000/health'),
+          );
+        } finally {
+          consoleLog.mockRestore();
+          process.chdir(previousDirectory);
+          rmSync(directory, { recursive: true, force: true });
+        }
+      },
+    );
   });
 
   describe('CONFIG_PATH target (#37165)', () => {

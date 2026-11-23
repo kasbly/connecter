@@ -31,6 +31,7 @@ describe('getDefaultSort', () => {
       column: 'updatedAt',
       direction: 'desc',
       tiebreaker: 'id',
+      isoTextInstant: true,
     });
   });
 
@@ -54,6 +55,15 @@ describe('getDefaultSort', () => {
     expect(getDefaultSort({ ...baseConfig, idColumn: 'CAST(id AS text)' })).toEqual({
       column: 'updatedAt',
       direction: 'desc',
+      isoTextInstant: true,
+    });
+  });
+
+  it('leaves an integer-epoch updatedAt on its native order (#39099)', () => {
+    expect(getDefaultSort({ ...baseConfig, updatedAtEpoch: 's' })).toEqual({
+      column: 'updatedAt',
+      direction: 'desc',
+      tiebreaker: 'id',
     });
   });
 });
@@ -62,7 +72,12 @@ describe('buildQuery', () => {
   it('returns default pagination and sort', () => {
     const result = buildQuery({}, baseConfig);
     expect(result.pagination).toEqual({ page: 1, pageSize: 20 });
-    expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc', tiebreaker: 'id' });
+    expect(result.sort).toEqual({
+      column: 'updatedAt',
+      direction: 'desc',
+      tiebreaker: 'id',
+      isoTextInstant: true,
+    });
     expect(result.sort).toEqual(getDefaultSort(baseConfig));
     expect(result.conditions).toEqual([]);
   });
@@ -742,13 +757,15 @@ describe('buildQuery', () => {
   });
 
   it.each([
-    ['s', 1710000001],
-    ['ms', 1710000000123],
-  ] as const)('binds an integer %s epoch for updatedSince', (updatedAtEpoch, expected) => {
-    const result = buildQuery(
-      { updatedSince: '2024-03-09T16:00:00.123Z' },
-      { ...baseConfig, updatedAtEpoch },
-    );
+    ['s', '2024-03-09T16:00:00.000Z', 1710000000],
+    ['s', '2024-03-09T16:00:00.123Z', 1710000000.123],
+    ['s', '2024-03-09T16:00:00.250Z', 1710000000.25],
+    ['s', '2024-03-09T16:00:00.500Z', 1710000000.5],
+    ['s', '2024-03-09T16:00:00.750Z', 1710000000.75],
+    ['ms', '2024-03-09T16:00:00.123Z', 1710000000123],
+    ['ms', '2024-03-09T16:00:00.500Z', 1710000000500],
+  ] as const)('binds a %s epoch for updatedSince %s', (updatedAtEpoch, updatedSince, expected) => {
+    const result = buildQuery({ updatedSince }, { ...baseConfig, updatedAtEpoch });
     expect(result.conditions).toContainEqual({
       column: 'updatedAt',
       operator: '>=',
@@ -863,8 +880,18 @@ describe('buildQuery', () => {
           column: '"modified_at"',
           direction: 'asc',
           tiebreaker: 'id',
+          isoTextInstant: true,
         });
         expect(result.ignoredFilters).toEqual([]);
+      });
+
+      it('compares ISO text timestamps by instant only for the updatedAt sort (#39099)', () => {
+        expect(buildQuery({ sortBy: 'updatedAt' }, baseConfig).sort.isoTextInstant).toBe(true);
+        expect(buildQuery({ sortBy: 'price' }, baseConfig).sort.isoTextInstant).toBeUndefined();
+        expect(
+          buildQuery({ sortBy: 'updatedAt' }, { ...baseConfig, updatedAtEpoch: 'ms' }).sort
+            .isoTextInstant,
+        ).toBeUndefined();
       });
 
       it('reports sortBy as ignored when price is a literal', () => {
@@ -873,7 +900,12 @@ describe('buildQuery', () => {
           fields: { title: 'title', price: "'0'" },
         };
         const result = buildQuery({ sortBy: 'price' }, config);
-        expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc', tiebreaker: 'id' });
+        expect(result.sort).toEqual({
+          column: 'updatedAt',
+          direction: 'desc',
+          tiebreaker: 'id',
+          isoTextInstant: true,
+        });
         expect(result.ignoredFilters).toEqual(['sortBy']);
       });
 
@@ -905,12 +937,22 @@ describe('buildQuery', () => {
 
     it('falls back to the default sort column when sortBy is not a known column', () => {
       const result = buildQuery({ sortBy: 'nonexistentColumn' }, baseConfig);
-      expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc', tiebreaker: 'id' });
+      expect(result.sort).toEqual({
+        column: 'updatedAt',
+        direction: 'desc',
+        tiebreaker: 'id',
+        isoTextInstant: true,
+      });
     });
 
     it('falls back to the default sort column when sortBy is empty', () => {
       const result = buildQuery({ sortBy: '' }, baseConfig);
-      expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc', tiebreaker: 'id' });
+      expect(result.sort).toEqual({
+        column: 'updatedAt',
+        direction: 'desc',
+        tiebreaker: 'id',
+        isoTextInstant: true,
+      });
     });
 
     it.each([
@@ -925,7 +967,12 @@ describe('buildQuery', () => {
       'falls back to the default sort column instead of forwarding the SQL injection payload %j',
       (payload) => {
         const result = buildQuery({ sortBy: payload }, baseConfig);
-        expect(result.sort).toEqual({ column: 'updatedAt', direction: 'desc', tiebreaker: 'id' });
+        expect(result.sort).toEqual({
+          column: 'updatedAt',
+          direction: 'desc',
+          tiebreaker: 'id',
+          isoTextInstant: true,
+        });
       },
     );
 

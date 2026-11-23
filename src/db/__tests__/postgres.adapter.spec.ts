@@ -10,6 +10,7 @@ import {
 } from '../postgres.adapter.js';
 import type { QueryCondition, SortOptions } from '../adapter.interface.js';
 import { buildQuery } from '../../mapping/query-builder.js';
+import { isoTextInstantExpression, isTextColumnExpression } from '../../mapping/instant-text.js';
 import { safeNumericRangeExpression } from '../../mapping/numeric-range.js';
 import {
   getMappedImageValues,
@@ -597,6 +598,26 @@ describe('buildOrderByClause', () => {
     });
     expect(clause).toBe(`${safeNumericRangeExpression('price')} ASC NULLS LAST, id DESC`);
     expect(clause).toContain('::numeric');
+  });
+
+  it('orders an ISO text timestamp column by instant before its native order (#39099)', () => {
+    const clause = buildOrderByClause({
+      column: '"updated_at"',
+      direction: 'desc',
+      isoTextInstant: true,
+      tiebreaker: 'id',
+    });
+    expect(clause).toBe(
+      `${isoTextInstantExpression('"updated_at"')} DESC NULLS LAST, "updated_at" DESC NULLS LAST, id DESC`,
+    );
+    expect(clause).toContain('::timestamptz');
+    expect(clause).not.toContain('?');
+  });
+
+  it('still refuses an unsafe column on an ISO text instant sort', () => {
+    expect(() =>
+      buildOrderByClause({ column: 'x; DROP TABLE t', direction: 'desc', isoTextInstant: true }),
+    ).toThrow(/unsafe column expression/);
   });
 
   it('still refuses an unsafe column on a numeric sort', () => {
@@ -1250,7 +1271,9 @@ describe('PostgresAdapter list count (#17420)', () => {
   });
 
   const dateAwareUpdatedSince = (column: string) =>
-    `(CASE WHEN pg_typeof(${column}) = 'date'::regtype THEN (${column}::timestamp AT TIME ZONE 'UTC') >= ?::timestamptz ELSE ${column} >= ? END)`;
+    `(CASE WHEN pg_typeof(${column}) = 'date'::regtype THEN (${column}::timestamp AT TIME ZONE 'UTC') >= ?::timestamptz ` +
+    `WHEN ${isTextColumnExpression(column)} THEN COALESCE(${isoTextInstantExpression(column)} >= ?::timestamptz, ${column} >= ?) ` +
+    `ELSE ${column} >= ? END)`;
 
   it("promotes DATE updatedAt to midnight UTC so a noon cutoff excludes that day's listing (#38180)", async () => {
     const { conditions } = buildQuery(
@@ -1268,11 +1291,8 @@ describe('PostgresAdapter list count (#17420)', () => {
     const comparison = dateAwareUpdatedSince('updatedAt');
     expect(dataQuery.sql).toContain(comparison);
     expect(countQuery.sql).toContain(comparison);
-    expect(dataQuery.bindings.slice(0, 2)).toEqual([
-      '2026-10-03T12:00:00.000Z',
-      '2026-10-03T12:00:00.000Z',
-    ]);
-    expect(countQuery.bindings.slice(0, 2)).toEqual(dataQuery.bindings.slice(0, 2));
+    expect(dataQuery.bindings.slice(0, 4)).toEqual(Array(4).fill('2026-10-03T12:00:00.000Z'));
+    expect(countQuery.bindings.slice(0, 4)).toEqual(dataQuery.bindings.slice(0, 4));
   });
 
   it("keeps an exact-midnight updatedSince bound so that day's DATE listing is included (#38180)", async () => {
@@ -1289,16 +1309,13 @@ describe('PostgresAdapter list count (#17420)', () => {
     const { countQuery, dataQuery } = await runListQuery({ count: 1, conditions });
 
     expect(dataQuery.sql).toContain(dateAwareUpdatedSince('updatedAt'));
-    expect(dataQuery.bindings.slice(0, 2)).toEqual([
-      '2026-10-03T00:00:00.000Z',
-      '2026-10-03T00:00:00.000Z',
-    ]);
-    expect(countQuery.bindings.slice(0, 2)).toEqual(dataQuery.bindings.slice(0, 2));
+    expect(dataQuery.bindings.slice(0, 4)).toEqual(Array(4).fill('2026-10-03T00:00:00.000Z'));
+    expect(countQuery.bindings.slice(0, 4)).toEqual(dataQuery.bindings.slice(0, 4));
   });
 
   it('leaves integer-epoch updatedSince on the numeric comparison (#38180)', async () => {
     const { conditions } = buildQuery(
-      { updatedSince: '2024-03-09T16:00:00.123Z' },
+      { updatedSince: '2024-03-09T16:00:00.000Z' },
       {
         table: 'Car',
         idColumn: 'id',
@@ -1312,9 +1329,31 @@ describe('PostgresAdapter list count (#17420)', () => {
 
     expect(dataQuery.sql).toContain('updatedAt >= ?');
     expect(dataQuery.sql).not.toContain('pg_typeof');
+    expect(dataQuery.sql).not.toContain('?::numeric');
     expect(countQuery.sql).not.toContain('pg_typeof');
-    expect(dataQuery.bindings[0]).toBe(1710000001);
-    expect(countQuery.bindings[0]).toBe(1710000001);
+    expect(dataQuery.bindings[0]).toBe(1710000000);
+    expect(countQuery.bindings[0]).toBe(1710000000);
+  });
+
+  it('keeps a fractional Unix-second checkpoint inclusive without DATE promotion', async () => {
+    const { conditions } = buildQuery(
+      { updatedSince: '2024-03-09T16:00:00.500Z' },
+      {
+        table: 'Car',
+        idColumn: 'id',
+        updatedAtColumn: 'updatedAt',
+        updatedAtEpoch: 's',
+        fields: { title: 'title', price: 'price' },
+      },
+    );
+
+    const { countQuery, dataQuery } = await runListQuery({ count: 1, conditions });
+
+    expect(dataQuery.sql).toContain('updatedAt >= ?::numeric');
+    expect(dataQuery.sql).not.toContain('pg_typeof');
+    expect(countQuery.sql).toContain('updatedAt >= ?::numeric');
+    expect(dataQuery.bindings[0]).toBe(1710000000.5);
+    expect(countQuery.bindings[0]).toBe(1710000000.5);
   });
 
   it('escapes `?` in a DATE-aware updatedSince comparison (#38180)', async () => {
@@ -1324,10 +1363,7 @@ describe('PostgresAdapter list count (#17420)', () => {
     });
 
     expect(dataQuery.sql).toContain(dateAwareUpdatedSince('"Updated\\?"'));
-    expect(dataQuery.bindings.slice(0, 2)).toEqual([
-      '2026-10-03T12:00:00.000Z',
-      '2026-10-03T12:00:00.000Z',
-    ]);
+    expect(dataQuery.bindings.slice(0, 4)).toEqual(Array(4).fill('2026-10-03T12:00:00.000Z'));
   });
 
   it('applies IN filters with their bindings to both data and bounded count queries', async () => {
