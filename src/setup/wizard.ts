@@ -1658,8 +1658,22 @@ export async function runWizard(): Promise<void> {
     // `url`) has no entry there and would otherwise publish under its own raw
     // column name instead of the canonical `attributes.url` key that
     // `resolvePublicListingUrl` reads (#28246).
-    const target =
+    let target =
       suggestedAttributes.get(attrName) ?? (isListingUrlColumn(attrName) ? 'url' : attrName);
+    // The merchant already picked the listing page in Step 3a, so
+    // `attributes.url` is reserved for it. A prechecked supplier/other URL
+    // column must not overwrite that choice (#39098): it keeps its own column
+    // name, or is skipped when that name is `url` itself.
+    if (target === 'url' && listingUrlColumn) {
+      if (attrName === 'url') {
+        console.log(
+          `Note: column "${attrName}" was not published as an attribute because ` +
+            `attributes.url is reserved for the listing page you selected ("${listingUrlColumn}").`,
+        );
+        continue;
+      }
+      target = attrName;
+    }
     attributes[target] = quoteIfNeeded(attrName);
   }
 

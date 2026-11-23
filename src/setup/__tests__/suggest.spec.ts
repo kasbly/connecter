@@ -61,6 +61,31 @@ describe('suggestFieldMappings', () => {
     );
   });
 
+  it('prefers the selling price over an earlier acquisition cost column (#39097)', () => {
+    const suggestions = suggestFieldMappings([
+      col('id', 'integer', true),
+      col('title', 'text'),
+      col('cost', 'numeric'),
+      col('price', 'numeric'),
+    ]);
+
+    const priceMappings = suggestions.filter((s) => s.suggestedMapping === 'price');
+    expect(priceMappings).toHaveLength(1);
+    expect(priceMappings[0]?.columnName).toBe('price');
+  });
+
+  it('still falls back to cost when no selling-price column exists', () => {
+    const suggestions = suggestFieldMappings([
+      col('id', 'integer', true),
+      col('title', 'text'),
+      col('cost', 'numeric'),
+    ]);
+
+    expect(suggestions).toContainEqual(
+      expect.objectContaining({ columnName: 'cost', suggestedMapping: 'price' }),
+    );
+  });
+
   it.each(['price', 'cost', 'amount', 'sale_price', 'saleprice', 'salePrice'])(
     'recognizes %s as a price column name',
     (columnName) => {
@@ -140,6 +165,32 @@ describe('suggestFieldMappings', () => {
       expect.objectContaining({ columnName: 'engineSize', suggestedMapping: 'enginePower' }),
     ]);
   });
+
+  it.each(['powerWatts', 'power_watts', 'powerVolts', 'power_amps', 'powerBtu'])(
+    'leaves the non-automotive power column %s unmapped instead of renaming it to enginePower (#39100)',
+    (columnName) => {
+      const suggestions = suggestFieldMappings([
+        col('id', 'integer', true),
+        col(columnName, 'numeric'),
+      ]);
+
+      expect(suggestions.some((s) => s.columnName === columnName)).toBe(false);
+    },
+  );
+
+  it.each(['power', 'enginePower', 'engine_size', 'horsepower', 'hp', 'power_kw'])(
+    'still maps the automotive column %s onto enginePower (#39100)',
+    (columnName) => {
+      const suggestions = suggestFieldMappings([
+        col('id', 'integer', true),
+        col(columnName, 'numeric'),
+      ]);
+
+      expect(suggestions).toContainEqual(
+        expect.objectContaining({ columnName, suggestedMapping: 'enginePower' }),
+      );
+    },
+  );
 
   it('maps a `model_year` column to the `year` attribute and a plain `model` column to `model`, instead of `model` claiming both (#28985)', () => {
     // Regression test: `model` used to be checked before `year` in

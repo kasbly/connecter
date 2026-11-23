@@ -34,7 +34,12 @@ const FIELD_PATTERNS: {
   },
   {
     target: 'price',
-    patterns: [/^price$/i, /^cost$/i, /^amount$/i, /^sale_?price$/i],
+    patterns: [/^price$/i, /^amount$/i, /^sale_?price$/i],
+    // `cost` is usually the merchant's acquisition cost, not the selling price,
+    // so it only applies when no selling-price column exists, whatever the
+    // physical column order (a `cost` declared before `price` published the
+    // 40 SAR cost instead of the 95 SAR price, #39097).
+    fallbackPatterns: [/^cost$/i],
     type: 'field',
   },
   { target: 'currency', patterns: [/^currency$/i, /^currency_?code$/i], type: 'field' },
@@ -72,7 +77,16 @@ const ATTRIBUTE_PATTERNS: { target: string; patterns: RegExp[] }[] = [
   { target: 'kilometers', patterns: [/^mileage$/i, /^kilometers$/i, /^km$/i, /^odometer$/i] },
   { target: 'fuelType', patterns: [/fuel/i] },
   { target: 'transmission', patterns: [/transmission/i, /gearbox/i] },
-  { target: 'enginePower', patterns: [/engine/i, /power/i, /horsepower/i, /hp$/i] },
+  // A bare `power` is ambiguous: an appliance's `powerWatts` / `power_volts` /
+  // `powerAmps` / `powerBtu` column is an electrical rating, not engine output.
+  // Claiming it renamed the attribute to `enginePower`, so the dashboard's
+  // `powerWattsMin` filter no longer matched any schema field and was reported
+  // as ignored (#39100). Unambiguous automotive names (`engine`, `horsepower`,
+  // `hp`) still map; the generic `power` match skips clearly electrical units.
+  {
+    target: 'enginePower',
+    patterns: [/engine/i, /^(?!.*(?:watt|volt|btu|ampere|amps?(?![a-z]))).*power/i, /hp$/i],
+  },
   { target: 'drivetrain', patterns: [/drivetrain/i, /drive_?type/i, /^4wd$/i, /^awd$/i] },
   // A per-row customer-facing listing page. Written to `attributes.url`
   // (see wizard.ts's `suggestedAttributes` lookup), which
@@ -114,7 +128,8 @@ export function isListingUrlColumn(columnName: string): boolean {
 
 /** True for a column name the wizard already suggests as `fields.price`. */
 export function isPriceColumnName(columnName: string): boolean {
-  const pricePatterns = FIELD_PATTERNS.find((entry) => entry.target === 'price')?.patterns ?? [];
+  const entry = FIELD_PATTERNS.find((candidate) => candidate.target === 'price');
+  const pricePatterns = [...(entry?.patterns ?? []), ...(entry?.fallbackPatterns ?? [])];
   return pricePatterns.some((pattern) => pattern.test(columnName));
 }
 
