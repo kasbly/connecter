@@ -924,14 +924,18 @@ async function collectConfiguredRelation(options: {
               ...presentedValues.map((value) => ({
                 name: value,
                 value,
-                checked: existingRelation?.filter
-                  ? existingRelation.filter.includes(toConfigLiteral(value))
+                checked: existingRelation
+                  ? existingRelation.filter !== undefined &&
+                    existingRelation.filter.includes(toConfigLiteral(value))
                   : /gallery|featured|photo|primary|main|hero/i.test(value),
               })),
               {
                 name: 'Include every type (including thumbnails, icons, invoices, and values not shown)',
                 value: '\0all-image-types',
-                checked: false,
+                // A saved relation without a filter is the earlier Include
+                // every type choice; defaulting it off would silently narrow
+                // the photos on an unrelated setup rerun.
+                checked: existingRelation !== undefined && existingRelation.filter === undefined,
               },
             ],
           });

@@ -1,7 +1,11 @@
 import type { InventoryResourceConfig, RelationOrderByConfig } from '../config/config.types.js';
 import type { QueryCondition, PaginationOptions, SortOptions } from '../db/adapter.interface.js';
 import { isSafeOrderByColumn, RELATION_ROWS_PER_PARENT_LIMIT } from '../db/postgres.adapter.js';
-import { getRequiredColumns, getStatusFilterPredicate } from './field-mapper.js';
+import {
+  getFixedInventoryStatus,
+  getRequiredColumns,
+  getStatusFilterPredicate,
+} from './field-mapper.js';
 import { safeNumericRangeExpression } from './numeric-range.js';
 
 const MAX_PAGE_SIZE = 100;
@@ -213,11 +217,6 @@ function sortsByIsoTextInstant(column: string, config: InventoryResourceConfig):
   );
 }
 
-function isFixedActiveStatus(config: InventoryResourceConfig): boolean {
-  const statusField = config.fields.status;
-  return statusField === undefined || /^'ACTIVE'$/i.test(statusField.trim());
-}
-
 /**
  * The filterable columns a request is checked against.
  *
@@ -321,14 +320,14 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
   const requestedSortDirection = getSingleQueryValue(params, 'sortDirection');
   const statusFilter = getSingleQueryValue(params, 'filter.status');
   const searchableColumns = getSearchableColumns(config);
-  const fixedActiveStatus = isFixedActiveStatus(config);
+  const fixedStatus = getFixedInventoryStatus(config);
   const filterableColumns = getEffectiveFilterableColumns(config);
 
   const configuredFilterKeys = new Set(Object.keys(filterableColumns));
-  // An unmapped (or literal ACTIVE) status declares that every row is ACTIVE.
-  // It therefore enforces ACTIVE without a source column, rather than ignoring
-  // the customer-facing filter.
-  if (fixedActiveStatus && statusFilter) configuredFilterKeys.add('status');
+  // An unmapped status, or a literal one ('ACTIVE', 'SOLD'), declares that every
+  // row carries that single status. The filter is therefore enforced against it
+  // without a source column, rather than ignored (#24344, #39569).
+  if (fixedStatus && statusFilter) configuredFilterKeys.add('status');
   const ignoredFilters = Object.keys(params)
     .filter(
       (key) => key.startsWith('filter.') && !configuredFilterKeys.has(key.slice('filter.'.length)),
@@ -442,9 +441,9 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     });
   }
 
-  if (fixedActiveStatus && statusFilter) {
-    if (statusFilter !== 'ACTIVE') {
-      // A fixed-active catalogue has no rows in any other status. Use a
+  if (fixedStatus && statusFilter) {
+    if (statusFilter !== fixedStatus) {
+      // A fixed-status catalogue has no rows in any other status. Use a
       // constant false predicate so both the page and total query stay empty.
       conditions.push({ column: '1', operator: '=', value: 0 });
     }
@@ -456,6 +455,8 @@ export function buildQuery(params: RawQueryParams, config: InventoryResourceConf
     const paramKey = `filter.${filterKey}`;
     const paramValue = getSingleQueryValue(params, paramKey);
     if (paramValue === undefined || paramValue === '') continue;
+    // A literal status was answered above; it has no column to compare.
+    if (filterKey === 'status' && fixedStatus && config.fields['status'] !== undefined) continue;
 
     switch (filterConfig.type) {
       case 'string':

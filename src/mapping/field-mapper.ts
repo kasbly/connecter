@@ -373,6 +373,29 @@ export function resolveInventoryStatus(
   );
 }
 
+/** The status a listing is published with for one raw value of a mapped status field. */
+function resolveEmittedStatus(value: unknown, config: InventoryResourceConfig): InventoryStatus {
+  return (
+    resolveInventoryStatus(value, config.statusValues) ?? config.unknownStatusPolicy ?? 'DRAFT'
+  );
+}
+
+/**
+ * The one status every listing carries when `fields.status` is not a source
+ * column: unmapped (every listing is ACTIVE) or a fixed literal such as
+ * `'SOLD'` ("Use a fixed value for every row"). It is the status
+ * {@link mapRowToInventoryItem} emits, so `filter.status` can be answered
+ * without a column. `undefined` when the status comes from a column.
+ */
+export function getFixedInventoryStatus(
+  config: InventoryResourceConfig,
+): InventoryStatus | undefined {
+  const statusField = config.fields['status'];
+  if (statusField === undefined) return UNMAPPED_STATUS_FALLBACK;
+  if (!/^'.+'$/.test(statusField.trim())) return undefined;
+  return resolveEmittedStatus(resolveColumnValue({}, statusField), config);
+}
+
 /**
  * Return source-system values that correspond to a Kasbly status filter.
  *
@@ -545,9 +568,7 @@ export function mapRowToInventoryItem(
     // introduced source value stays non-sellable until the merchant maps it in
     // statusValues.
     status: config.fields['status']
-      ? (resolveInventoryStatus(fields['status'], config.statusValues) ??
-        config.unknownStatusPolicy ??
-        'DRAFT')
+      ? resolveEmittedStatus(fields['status'], config)
       : UNMAPPED_STATUS_FALLBACK,
     images,
     attributes,

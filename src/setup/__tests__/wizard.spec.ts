@@ -1761,6 +1761,24 @@ describe('runWizard', () => {
       expectedFilter: undefined,
       firstRunUnchecked: false,
     },
+    {
+      scenario: 'accepting the defaults on a rerun after including every type',
+      answers: [['\0all-image-types'], 'defaults'],
+      expectedFilter: undefined,
+      firstRunUnchecked: false,
+    },
+    {
+      scenario: 'accepting the defaults on a rerun after selecting photo types',
+      answers: [['featured', 'gallery'], 'defaults'],
+      expectedFilter: `"type" = 'featured' OR "type" = 'gallery'`,
+      firstRunUnchecked: false,
+    },
+    {
+      scenario: 'accepting the defaults on a rerun after clearing every type',
+      answers: [[], [], 'defaults'],
+      expectedFilter: 'FALSE',
+      firstRunUnchecked: false,
+    },
   ])('saves $scenario in image relations', async (testCase) => {
     const { answers, expectedFilter, firstRunUnchecked } = testCase;
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
@@ -1768,7 +1786,7 @@ describe('runWizard', () => {
     const distinctImageTypes = firstRunUnchecked
       ? ['مصغرة', 'thumb', 'swatch', 'document']
       : ["Men's", 'featured', 'gallery', 'icon', 'invoice', 'thumbnail'];
-    let includedTypes = answers[0]!;
+    let includedTypes: string[] | 'defaults' = answers[0] as string[];
     const db = Object.assign(vi.fn(), {
       destroy: vi.fn().mockResolvedValue(undefined),
       withSchema: vi.fn(() => ({
@@ -1809,19 +1827,32 @@ describe('runWizard', () => {
     promptMocks.confirm.mockImplementation(({ message }: { message: string }) =>
       Promise.resolve(!message.startsWith('Does this database require TLS')),
     );
-    promptMocks.checkbox.mockImplementation(({ message }: { message: string }) => {
-      if (message.startsWith('Select additional')) return Promise.resolve([]);
-      if (message.startsWith('Which columns should be searchable')) {
-        return Promise.resolve(['title']);
-      }
-      if (message.startsWith('Which filters should be available')) return Promise.resolve([]);
-      if (message.startsWith('Select columns from Image')) return Promise.resolve(['url']);
-      if (message.startsWith('Select columns from CarFeatures')) return Promise.resolve(['name']);
-      if (message.startsWith('Which "type" values on Image')) {
-        return Promise.resolve(includedTypes);
-      }
-      return Promise.resolve([]);
-    });
+    promptMocks.checkbox.mockImplementation(
+      ({
+        message,
+        choices,
+      }: {
+        message: string;
+        choices?: Array<{ value: string; checked: boolean }>;
+      }) => {
+        if (message.startsWith('Select additional')) return Promise.resolve([]);
+        if (message.startsWith('Which columns should be searchable')) {
+          return Promise.resolve(['title']);
+        }
+        if (message.startsWith('Which filters should be available')) return Promise.resolve([]);
+        if (message.startsWith('Select columns from Image')) return Promise.resolve(['url']);
+        if (message.startsWith('Select columns from CarFeatures')) return Promise.resolve(['name']);
+        if (message.startsWith('Which "type" values on Image')) {
+          // 'defaults' is a merchant pressing Enter on the prompt as presented.
+          return Promise.resolve(
+            includedTypes === 'defaults'
+              ? (choices ?? []).filter((choice) => choice.checked).map((choice) => choice.value)
+              : includedTypes,
+          );
+        }
+        return Promise.resolve([]);
+      },
+    );
     vi.mocked(introspectDatabase).mockResolvedValue({
       db: db as never,
       result: {
@@ -1886,7 +1917,7 @@ describe('runWizard', () => {
     try {
       process.chdir(directory);
       for (const answer of answers) {
-        includedTypes = answer;
+        includedTypes = answer as string[] | 'defaults';
         await runWizard();
       }
 
@@ -1909,16 +1940,20 @@ describe('runWizard', () => {
         arg.message.startsWith('Which "type" values on Image'),
       );
       const choices = imageTypePrompts.at(-1)?.[0].choices;
+      // The all-types box starts checked only when the saved relation has no
+      // filter, i.e. the merchant already chose Include every type.
+      const savedEveryType =
+        answers.length > 1 && (answers.at(-2) as string[]).includes('\0all-image-types');
       expect(choices).toContainEqual({
         name: expect.stringContaining('Include every type'),
         value: '\0all-image-types',
-        checked: false,
+        checked: savedEveryType,
       });
       if (firstRunUnchecked || answers.length > 1) {
         const checkedTypes = choices
           .filter((choice: { checked: boolean }) => choice.checked)
           .map((choice: { value: string }) => choice.value);
-        expect(checkedTypes).toEqual(answers.length > 1 ? answers[0] : []);
+        expect(checkedTypes).toEqual(answers.length > 1 ? answers.at(-2) : []);
       }
 
       // The features relation's map key is still the disambiguated internal

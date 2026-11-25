@@ -350,7 +350,7 @@ describe('PostgresAdapter searchable-column probe', () => {
     });
 
     expect(rawMock).toHaveBeenCalledWith(
-      'SELECT 1 FROM "public"."cars" WHERE FALSE AND (CASE WHEN btrim(model_year::text) ~ \'^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$\' THEN btrim(model_year::text)::numeric END IS NOT NULL)',
+      `SELECT 1 FROM "public"."cars" WHERE FALSE AND (CASE WHEN btrim(model_year::text, ${STATUS_BTRIM_CHARS_SQL}) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(model_year::text, ${STATUS_BTRIM_CHARS_SQL})::numeric END IS NOT NULL)`,
       [],
     );
   });
@@ -1262,8 +1262,7 @@ describe('PostgresAdapter list count (#17420)', () => {
       ],
     });
 
-    const guardedYear =
-      "CASE WHEN btrim(model_year::text) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(model_year::text)::numeric END";
+    const guardedYear = `CASE WHEN btrim(model_year::text, ${STATUS_BTRIM_CHARS_SQL}) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(model_year::text, ${STATUS_BTRIM_CHARS_SQL})::numeric END`;
     expect(dataQuery.sql).toContain(`${guardedYear} >= ?`);
     expect(dataQuery.sql).toContain(`${guardedYear} <= ?`);
     expect(countQuery.sql).toContain(`${guardedYear} >= ?`);
@@ -1450,6 +1449,16 @@ describe('PostgresAdapter list count (#17420)', () => {
     expect(STATUS_VALUE_BTRIM_CHARS_SQL).not.toMatch(/chr\(\d/);
     expect(STATUS_VALUE_BTRIM_CHARS_SQL).toContain(
       "chr(CASE WHEN getdatabaseencoding() = 'UTF8' THEN 65279 ELSE 32 END)",
+    );
+  });
+
+  it('trims the same whitespace as the JS price read path before the guarded numeric cast (#39568)', () => {
+    // A tab-padded `9` publishes as 9 SAR via `Number()`; one-arg btrim left the tab
+    // behind, failed the regex and made the row vanish from range filters and sorts.
+    const expression = safeNumericRangeExpression('price');
+    const trimmed = `btrim(price::text, ${STATUS_BTRIM_CHARS_SQL})`;
+    expect(expression).toBe(
+      `CASE WHEN ${trimmed} ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN ${trimmed}::numeric END`,
     );
   });
 
@@ -1828,7 +1837,7 @@ describe('PostgresAdapter `?` in a mapped column name (#36834)', () => {
     expect(wire.count).toBe(2);
     expect(wire.sql).toContain('"Notes?" ILIKE $1');
     expect(wire.sql).toContain('"In Stock?"::text ILIKE $2');
-    expect(wire.sql).toContain('btrim("Power?"::text)');
+    expect(wire.sql).toContain('btrim("Power?"::text, ');
   });
 
   it('escapes the column in the distinct-value scan', async () => {

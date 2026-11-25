@@ -7,6 +7,7 @@ import {
   getUnsearchableRelationNames,
   splitConditions,
 } from '../query-builder.js';
+import { STATUS_VALUE_BTRIM_CHARS_SQL as BTRIM_CHARS } from '../field-mapper.js';
 import type { InventoryResourceConfig } from '../../config/config.types.js';
 
 const baseConfig: InventoryResourceConfig = {
@@ -603,6 +604,53 @@ describe('buildQuery', () => {
     expect(result.ignoredFilters).not.toContain('status');
   });
 
+  it.each(['ACTIVE', 'SOLD', 'RESERVED', 'DRAFT', 'EXPIRED'] as const)(
+    'enforces a literal %s status against the status the listing emits (#39569)',
+    (fixed) => {
+      const config = { ...baseConfig, fields: { ...baseConfig.fields, status: `'${fixed}'` } };
+
+      const matching = buildQuery({ 'filter.status': fixed }, config);
+      expect(matching.conditions).toEqual([]);
+      expect(matching.ignoredFilters).not.toContain('status');
+
+      const other = buildQuery({ 'filter.status': fixed === 'SOLD' ? 'ACTIVE' : 'SOLD' }, config);
+      expect(other.conditions).toContainEqual({ column: '1', operator: '=', value: 0 });
+      expect(other.ignoredFilters).not.toContain('status');
+    },
+  );
+
+  it('reads a literal status through statusValues like the listing mapper (#39569)', () => {
+    const config = {
+      ...baseConfig,
+      fields: { ...baseConfig.fields, status: "'closed'" },
+      statusValues: { SOLD: ['sold', 'closed'] },
+    };
+
+    expect(buildQuery({ 'filter.status': 'SOLD' }, config).conditions).toEqual([]);
+    expect(buildQuery({ 'filter.status': 'ACTIVE' }, config).conditions).toContainEqual({
+      column: '1',
+      operator: '=',
+      value: 0,
+    });
+  });
+
+  it('answers a literal status without comparing against its literal column (#39569)', () => {
+    const result = buildQuery(
+      { 'filter.status': 'SOLD' },
+      {
+        ...baseConfig,
+        fields: { ...baseConfig.fields, status: "'SOLD'" },
+        filterableColumns: {
+          ...baseConfig.filterableColumns,
+          status: { column: "'SOLD'", type: 'string' },
+        },
+      },
+    );
+
+    expect(result.conditions).toEqual([]);
+    expect(result.ignoredFilters).not.toContain('status');
+  });
+
   it('generates filter conditions for number type', () => {
     const result = buildQuery({ 'filter.year': '2024' }, baseConfig);
     expect(result.conditions).toContainEqual({
@@ -618,14 +666,12 @@ describe('buildQuery', () => {
       baseConfig,
     );
     expect(result.conditions).toContainEqual({
-      column:
-        "CASE WHEN btrim(price::text) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(price::text)::numeric END",
+      column: `CASE WHEN btrim(price::text, ${BTRIM_CHARS}) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(price::text, ${BTRIM_CHARS})::numeric END`,
       operator: '>=',
       value: 10000,
     });
     expect(result.conditions).toContainEqual({
-      column:
-        "CASE WHEN btrim(price::text) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(price::text)::numeric END",
+      column: `CASE WHEN btrim(price::text, ${BTRIM_CHARS}) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(price::text, ${BTRIM_CHARS})::numeric END`,
       operator: '<=',
       value: 50000,
     });
@@ -634,14 +680,12 @@ describe('buildQuery', () => {
   it('generates guarded year range conditions (#29552)', () => {
     const result = buildQuery({ 'filter.minYear': '2020', 'filter.maxYear': '2022' }, baseConfig);
     expect(result.conditions).toContainEqual({
-      column:
-        "CASE WHEN btrim(year::text) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(year::text)::numeric END",
+      column: `CASE WHEN btrim(year::text, ${BTRIM_CHARS}) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(year::text, ${BTRIM_CHARS})::numeric END`,
       operator: '>=',
       value: 2020,
     });
     expect(result.conditions).toContainEqual({
-      column:
-        "CASE WHEN btrim(year::text) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(year::text)::numeric END",
+      column: `CASE WHEN btrim(year::text, ${BTRIM_CHARS}) ~ '^[+-]{0,1}([0-9]+(\\.[0-9]*){0,1}|\\.[0-9]+)([eE][+-]{0,1}[0-9]+){0,1}$' THEN btrim(year::text, ${BTRIM_CHARS})::numeric END`,
       operator: '<=',
       value: 2022,
     });

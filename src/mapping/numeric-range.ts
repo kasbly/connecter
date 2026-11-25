@@ -1,3 +1,5 @@
+import { STATUS_VALUE_BTRIM_CHARS_SQL } from './field-mapper.js';
+
 /**
  * PostgreSQL evaluates `AND` terms in an order of its choosing, so a regex
  * predicate beside an unconditional `::numeric` cast cannot protect dirty text
@@ -14,6 +16,8 @@ const NUMERIC_TEXT_PATTERN =
  * as `N/A` instead of aborting the whole inventory query with SQLSTATE 22P02.
  */
 export function safeNumericRangeExpression(column: string): string {
-  const textValue = `btrim(${column}::text)`;
+  // One-argument `btrim` only strips spaces; JavaScript's `Number()` (used when
+  // publishing) also ignores tabs, CR/LF, NBSP and BOM, so trim the same set.
+  const textValue = `btrim(${column}::text, ${STATUS_VALUE_BTRIM_CHARS_SQL})`;
   return `CASE WHEN ${textValue} ~ '${NUMERIC_TEXT_PATTERN}' THEN ${textValue}::numeric END`;
 }
