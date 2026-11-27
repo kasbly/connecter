@@ -1951,9 +1951,6 @@ export async function runWizard(): Promise<void> {
     currentApiKey = retirePreviousKey ? existingPendingApiKey : existingApiKey;
     if (retirePreviousKey) {
       pendingApiKey = undefined;
-      console.log(
-        '✓ Retired the previous API key. The connector will accept only the current key.',
-      );
     } else {
       console.log(
         '✓ Rotation remains staged. The connector accepts both current and pending keys.',
@@ -2292,6 +2289,7 @@ export async function runWizard(): Promise<void> {
   // parses auth with the entered secret. Refuse to write if loadConfig would
   // reject the interpolated result (for example CONNECTOR_API_KEY='').
   try {
+    assertApiKeySlots(envContent, currentApiKey, pendingApiKey);
     validateProspectiveConfig(yamlContent, envContent);
   } catch (error) {
     console.error(
@@ -2317,6 +2315,9 @@ export async function runWizard(): Promise<void> {
   );
   writePrivateFile(envPath, envContent);
   console.log(`✅ Environment saved to ${envPath}`);
+  if (retirePreviousKey) {
+    console.log('✓ Retired the previous API key. The connector will accept only the current key.');
+  }
 
   // Reveal secrets only after the probe has accepted the mapping and both
   // files are on disk. Printing a freshly minted key and then aborting left
@@ -2431,31 +2432,65 @@ export function backupPrivateFile(path: string, timestamp: Date = new Date()): s
   return backupPath;
 }
 
-/** Update wizard-owned env vars without dropping unrelated operator configuration. */
+/**
+ * dotenv's own line pattern, with group 1 ending at the value: the trailing `\s*(?:#.*)?` it also
+ * consumes can reach into the comment lines that follow.
+ */
+const DOTENV_ASSIGNMENT =
+  /^(\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(?:\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?)\s*(?:#.*)?$/gm;
+
+/** First and last line index of every assignment dotenv reads for `name`. */
+function findEnvAssignmentLines(content: string, name: string): [number, number][] {
+  const normalized = content.replace(/\r\n?/g, '\n');
+  const lineAt = (offset: number) => normalized.slice(0, offset).split('\n').length - 1;
+  return [...normalized.matchAll(DOTENV_ASSIGNMENT)]
+    .filter((match) => match[2] === name)
+    .map((match) => {
+      const assignment = match[1]!;
+      const start = match.index + assignment.length - assignment.trimStart().length;
+      return [lineAt(start), lineAt(match.index + assignment.trimEnd().length)];
+    });
+}
+
+/**
+ * Update wizard-owned env vars without dropping unrelated operator configuration. Every earlier
+ * assignment of an updated or cleared name goes: dotenv lets the last one win, so a leftover
+ * duplicate would keep a retired API key active (#39828).
+ */
 export function mergeEnvironmentFile(
   existing: string,
   values: Record<string, string | null>,
 ): string {
   let result = existing;
   for (const [name, value] of Object.entries(values)) {
-    // A PEM CA bundle spans several lines, so a single-line `.*` pattern replaced
-    // only the first line of an existing DB_SSL_CA and left the remainder of the
-    // old certificate behind as bare lines that Compose's `env_file` parser
-    // rejects. Match the whole entry: a quoted value may run across newlines.
-    const pattern = new RegExp(
-      `^[ \\t]*${name}=(?:'[^']*'|"[^"]*"|\`[^\`]*\`|[^\\r\\n]*)[ \\t]*\\r?\\n?`,
-      'm',
-    );
-    if (value === null) {
-      result = result.replace(pattern, '');
+    const entry = value === null ? '' : `${name}=${serializeEnvValue(value)}\n`;
+    // Whole lines, each keeping its own terminator. A PEM CA bundle or other quoted
+    // value spans several of them, and all of those belong to the one assignment.
+    const lines = result.split(/(?<=\n|\r(?!\n))/);
+    const assignments = findEnvAssignmentLines(result, name);
+    if (assignments.length === 0) {
+      if (entry) result = `${result}${result.endsWith('\n') || !result ? '' : '\n'}${entry}`;
       continue;
     }
-    const line = `${name}=${serializeEnvValue(value)}`;
-    result = pattern.test(result)
-      ? result.replace(pattern, () => `${line}\n`)
-      : `${result}${result.endsWith('\n') || !result ? '' : '\n'}${line}\n`;
+    // Back to front so earlier line indexes stay valid; the first keeps the new entry.
+    for (const [index, [first, last]] of [...assignments.entries()].reverse()) {
+      lines.splice(first, last - first + 1, index === 0 ? entry : '');
+    }
+    result = lines.join('');
   }
   return result.endsWith('\n') ? result : `${result}\n`;
+}
+
+/** Refuse to save `.env` unless dotenv reads back exactly the chosen rotation. */
+function assertApiKeySlots(envContent: string, current: string, pending: string | undefined): void {
+  const saved = parse(envContent);
+  if (saved['CONNECTOR_API_KEY'] !== current || saved['CONNECTOR_API_KEY_PENDING'] !== pending) {
+    // Names only: the values are secrets.
+    throw new Error(
+      '.env would not read back the chosen API keys. Fix the CONNECTOR_API_KEY and ' +
+        'CONNECTOR_API_KEY_PENDING lines (and any unclosed quote) in .env, then rerun setup.',
+    );
+  }
 }
 
 /** Parse generated YAML with the prospective .env values, without changing the process environment. */

@@ -434,7 +434,7 @@ describe('introspectDatabase', () => {
       expect.stringContaining("table_type IN ('BASE TABLE', 'VIEW')"),
       ['catalog', 'catalog'],
     );
-    expect(db.raw).toHaveBeenNthCalledWith(2, expect.stringContaining('FROM pg_matviews'), [
+    expect(db.raw).toHaveBeenNthCalledWith(2, expect.stringContaining("c.relkind = 'm'"), [
       'catalog',
       'catalog',
     ]);
@@ -577,6 +577,55 @@ describe('introspectDatabase', () => {
     for (const column of result.result.tables[0]!.columns) {
       expect(column.type).not.toMatch(/\(/);
     }
+  });
+
+  it('offers a materialized view only when the role can SELECT from it', async () => {
+    const materializedViews = [
+      { name: 'aaa_private_summary', readable: false },
+      { name: 'published_inventory', readable: true },
+    ];
+    // Stands in for the catalog: the unreadable view is dropped only when the
+    // materialized-view branch asks about SELECT on each relation's OID.
+    const db = {
+      raw: vi.fn(async (sql: string, _bindings?: string[]) => {
+        if (sql.includes('FROM information_schema.tables')) {
+          const checksSelect =
+            /WHERE c\.relkind = 'm' AND n\.nspname = \?\s+AND has_any_column_privilege\(c\.oid, 'SELECT'\)/.test(
+              sql,
+            );
+          return {
+            rows: materializedViews
+              .filter((view) => view.readable || !checksSelect)
+              .map((view) => ({ name: view.name, kind: 'materialized view' })),
+          };
+        }
+        if (sql.includes('FROM pg_attribute a') && sql.includes('format_type')) {
+          return {
+            rows: [{ column_name: 'id', data_type: 'uuid', udt_name: 'uuid', is_nullable: 'NO' }],
+          };
+        }
+        if (sql.includes('c.reltuples::bigint AS estimate')) return { rows: [{ estimate: '-1' }] };
+        return { rows: [] };
+      }),
+    };
+    knexMock.mockReturnValueOnce(db);
+
+    const { result } = await introspectDatabase({ ...connection, schema: 'catalog' });
+
+    // A readable view stays selectable even though its row estimate is unknown.
+    expect(result.tables).toEqual([
+      {
+        name: 'published_inventory',
+        kind: 'materialized view',
+        rowCount: null,
+        columns: [
+          { name: 'id', type: 'uuid', udtName: 'uuid', nullable: false, isPrimaryKey: false },
+        ],
+      },
+    ]);
+    expect(db.raw.mock.calls.flatMap(([, bindings]) => bindings ?? [])).not.toContain(
+      'aaa_private_summary',
+    );
   });
 
   it('excludes child partitions and cloned foreign keys from relation discovery', async () => {

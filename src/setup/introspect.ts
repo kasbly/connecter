@@ -219,6 +219,8 @@ function createDatabaseClient(options: DbConnectOptions): Knex {
 }
 
 async function introspectTables(db: Knex, schema: string): Promise<IntrospectedTable[]> {
+  // information_schema filters by privilege; the catalogs do not, so check
+  // SELECT on each materialized view. A column-level grant counts as readable.
   const tableRows = await db.raw<{
     rows: { name: string; kind: IntrospectedTable['kind'] }[];
   }>(
@@ -237,9 +239,11 @@ async function introspectTables(db: Knex, schema: string): Promise<IntrospectedT
            AND c.relispartition
        )
      UNION ALL
-     SELECT matviewname AS name, 'materialized view' AS kind
-     FROM pg_matviews
-     WHERE schemaname = ?
+     SELECT c.relname AS name, 'materialized view' AS kind
+     FROM pg_class c
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.relkind = 'm' AND n.nspname = ?
+       AND has_any_column_privilege(c.oid, 'SELECT')
      ORDER BY name`,
     [schema, schema],
   );

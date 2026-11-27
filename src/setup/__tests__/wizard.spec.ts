@@ -907,6 +907,59 @@ describe('mergeEnvironmentFile', () => {
     });
   });
 
+  it.each([
+    ['a plain assignment', 'CONNECTOR_API_KEY=kc_old'],
+    ['an export prefix', 'export CONNECTOR_API_KEY=kc_old'],
+    ['leading whitespace', ' \t CONNECTOR_API_KEY=kc_old'],
+    ['spaces around the equals sign', 'CONNECTOR_API_KEY = kc_old'],
+    ['a colon separator', 'CONNECTOR_API_KEY: kc_old'],
+    ['an inline comment', "CONNECTOR_API_KEY='kc_old' # manual override"],
+    ['a quoted multi-line value', 'CONNECTOR_API_KEY="kc_old\nkc_old_tail"'],
+    ['a value on the following line', "CONNECTOR_API_KEY=\n'kc_old'"],
+    ['an export prefix on its own line', 'export\nCONNECTOR_API_KEY=kc_old'],
+  ])('collapses duplicates written with %s into one assignment (#39828)', (_form, old) => {
+    const existing = `A=1\n${old}\n\n# CONNECTOR_API_KEY=kc_commented\nB=2\n${old}\nC=3\n${old}`;
+    const rest = '\n# CONNECTOR_API_KEY=kc_commented\nB=2\nC=3\n';
+
+    const updated = mergeEnvironmentFile(existing, { CONNECTOR_API_KEY: 'kc_new' });
+    expect(updated).toBe(`A=1\nCONNECTOR_API_KEY='kc_new'\n${rest}`);
+    expect(parse(updated)).toEqual({ A: '1', B: '2', C: '3', CONNECTOR_API_KEY: 'kc_new' });
+
+    expect(mergeEnvironmentFile(existing, { CONNECTOR_API_KEY: null })).toBe(`A=1\n${rest}`);
+  });
+
+  it.each(['\r\n', '\r'])('keeps unrelated %j line endings while collapsing duplicates', (eol) => {
+    const lines = [
+      'A=1',
+      'CONNECTOR_API_KEY=kc_old',
+      'B=2',
+      'CONNECTOR_API_KEY="kc',
+      'old"',
+      'C=3',
+    ];
+
+    expect(mergeEnvironmentFile(`${lines.join(eol)}\n`, { CONNECTOR_API_KEY: 'kc_new' })).toBe(
+      `A=1${eol}CONNECTOR_API_KEY='kc_new'\nB=2${eol}C=3\n`,
+    );
+  });
+
+  it('leaves comments, look-alike names and text inside other values untouched', () => {
+    const untouched = [
+      "NOTE='rotation notes",
+      "CONNECTOR_API_KEY=kc_inside_note'",
+      '  # export CONNECTOR_API_KEY=kc_commented',
+      'OLD_CONNECTOR_API_KEY=kc_other',
+      'CONNECTOR_API_KEY_PENDING=kc_pending',
+      '',
+    ].join('\n');
+    // dotenv's match for an empty value also consumes the comment that follows it.
+    const existing = `${untouched}CONNECTOR_API_KEY=\n# keep me\n`;
+
+    expect(mergeEnvironmentFile(existing, { CONNECTOR_API_KEY: null })).toBe(
+      `${untouched}# keep me\n`,
+    );
+  });
+
   it.each(['pa$&ss', 'pa$1ss', 'pa$`ss', 'pa$$ss'])(
     'rewrites value %j as a literal rather than a String.replace pattern',
     (value) => {
@@ -7657,6 +7710,80 @@ describe('runWizard', () => {
         }
       },
     );
+
+    /** First run, then `editEnv` rewrites `.env` and a rerun chooses to retire the old key. */
+    async function retireOverEnv(
+      editEnv: (env: string) => string,
+      verify: (run: {
+        rerun: Promise<void>;
+        directory: string;
+        edited: string;
+        consoleLog: ReturnType<typeof vi.spyOn>;
+      }) => Promise<void>,
+    ): Promise<void> {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      vi.clearAllMocks();
+      mockMinimalRunPrompts('none');
+      try {
+        process.chdir(directory);
+        await runWizard();
+        const envPath = join(directory, '.env');
+        const edited = editEnv(readFileSync(envPath, 'utf-8'));
+        writeFileSync(envPath, edited);
+        consoleLog.mockClear();
+        mockMinimalRunPrompts('none');
+        await verify({ rerun: runWizard(), directory, edited, consoleLog });
+      } finally {
+        consoleLog.mockRestore();
+        consoleError.mockRestore();
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+
+    const RETIRED = expect.stringContaining('Retired the previous API key');
+
+    it('accepts only the promoted key after retiring over duplicate assignments (#39828)', async () => {
+      await retireOverEnv(
+        (env) =>
+          `${env}CONNECTOR_API_KEY_PENDING=kc_stale_pending\n` +
+          'export CONNECTOR_API_KEY=kc_previous\nCONNECTOR_API_KEY_PENDING = kc_promoted\n',
+        async ({ rerun, directory, consoleLog }) => {
+          await rerun;
+
+          const envPath = join(directory, '.env');
+          const { apiKeys } = loadExistingSetupConfig(
+            join(directory, 'connector.config.yml'),
+            envPath,
+          ).auth;
+          expect(apiKeys).toEqual([{ key: 'kc_promoted', label: 'kasbly-current' }]);
+          expect(findMatchingKey('kc_previous', apiKeys)).toBeUndefined();
+          expect(readFileSync(envPath, 'utf-8')).not.toMatch(
+            /kc_previous|CONNECTOR_API_KEY_PENDING/,
+          );
+          expect(consoleLog).toHaveBeenCalledWith(RETIRED);
+        },
+      );
+    });
+
+    it('saves and announces nothing when .env would not read back the promoted key', async () => {
+      // The trailing backslash lets dotenv read past the closing quote to the comment's apostrophe.
+      await retireOverEnv(
+        (env) =>
+          `${env.replace(/^CONNECTOR_API_KEY=.*$/m, "$&\n# the operators'")}` +
+          'CONNECTOR_API_KEY_PENDING=kc_promoted\\\n',
+        async ({ rerun, directory, edited, consoleLog }) => {
+          await expect(rerun).rejects.toThrow('would not read back the chosen API keys');
+
+          expect(readFileSync(join(directory, '.env'), 'utf-8')).toBe(edited);
+          expect(readdirSync(directory).filter((name) => name.endsWith('.bak'))).toEqual([]);
+          expect(consoleLog).not.toHaveBeenCalledWith(RETIRED);
+        },
+      );
+    });
 
     describe('rerun defaults for TLS and the proxy topology', () => {
       const PEM = '-----BEGIN CERTIFICATE-----\nmerchant-ca\n-----END CERTIFICATE-----';
