@@ -48,7 +48,8 @@ npm run dev
 # Before starting: set CONNECTOR_DOMAIN in .env and point that DNS name at this host.
 docker compose up -d
 
-# After rerunning `npm run setup` to change mappings
+# After rerunning `npm run setup` to change mappings (with CONFIG_PATH set, use
+# `docker compose up -d --force-recreate connector` instead)
 docker compose restart connector
 
 # Verify the public, TLS-protected endpoint
@@ -437,7 +438,7 @@ rather than comparing the Kasbly token against your status column.
 | `CONNECTOR_DOMAIN`            | Docker   | Public DNS name used by the bundled HTTPS proxy                                                                                                              |
 | `CONNECTOR_BIND`              | No       | Host interface Docker publishes `CONNECTOR_PORT` on (default `127.0.0.1`; `npm run setup` writes `0.0.0.0` for the "None" reverse-proxy topology)            |
 | `CONNECTOR_PORT`              | No       | TCP port Docker publishes, health-checks, and Caddy proxies to; must match `server.port` (default `4000`; `npm run setup` writes the configured listen port) |
-| `CONFIG_PATH`                 | No       | Config file path (default: `./connector.config.yml`)                                                                                                         |
+| `CONFIG_PATH`                 | No       | Config file path (default: `./connector.config.yml`); under Docker Compose, the host file to mount (see "Docker HTTPS Deployment")                           |
 
 ## Rotating the API key
 
@@ -500,6 +501,14 @@ The response must report a healthy connector before using the URL in Kasbly. Cad
 certificate state in named Docker volumes, so renewal survives container replacement. The
 `docker-compose.yml` mounts `connector.config.yml` as read-only and persists audit logs in a
 volume; its internal health check hits `GET /health` every 30 seconds.
+
+To keep the configuration in another file, set `CONFIG_PATH` in `.env` to a path relative to the
+connector directory (for example `./live.config.yml`) or an absolute path. Compose mounts that
+host file at `/app/connector.config.yml` and points the connector there, so do not set it to a path
+inside the container. A `CONFIG_PATH` exported in the shell that runs `docker compose` takes
+precedence over `.env`. The file must exist before the container is created. After setting,
+changing or removing `CONFIG_PATH`, run `docker compose up -d --force-recreate connector`: a plain
+restart keeps the previous mount.
 
 ## Updating the connector
 

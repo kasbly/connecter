@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -7509,6 +7510,7 @@ describe('runWizard', () => {
       ['domain', 'bundled', 'docker compose up -d --force-recreate connector caddy'],
       ['listen port', 'bundled', 'docker compose up -d --force-recreate connector caddy'],
       ['stage key', 'none', 'docker compose up -d --force-recreate connector'],
+      ['CONFIG_PATH move', 'bundled', 'docker compose up -d --force-recreate connector'],
     ] as const)('reloads a %s rerun with %s using %s', async (change, topology, command) => {
       const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
       const previousDirectory = process.cwd();
@@ -7541,6 +7543,14 @@ describe('runWizard', () => {
           };
           config.server.port = 4107;
           writeFileSync(configPath, yaml.dump(config));
+        }
+        if (change === 'CONFIG_PATH move') {
+          // The existing container still mounts connector.config.yml (#39830).
+          renameSync(configPath, join(directory, 'live.config.yml'));
+          writeFileSync(
+            envPath,
+            `${readFileSync(envPath, 'utf-8')}CONFIG_PATH=./live.config.yml\n`,
+          );
         }
         const originalEnv = parse(readFileSync(envPath, 'utf-8'));
         consoleLog.mockClear();
@@ -7608,6 +7618,7 @@ describe('runWizard', () => {
             loadExistingSetupConfig(configPath, envPath).resources.inventory.searchableColumns,
           ).toEqual(['"title"']);
         }
+        if (change === 'CONFIG_PATH move') expect(env).toEqual(originalEnv);
         if (change === 'stage key') expect(env['CONNECTOR_API_KEY_PENDING']).toMatch(/^kc_/);
         if (change === 'retire key') {
           expect(env['CONNECTOR_API_KEY']).toBe('kc_pending');
@@ -8309,6 +8320,29 @@ describe('runWizard', () => {
           expect(existsSync(join(directory, 'from-dotenv.yml'))).toBe(false);
         },
       );
+    });
+
+    it('has bundled Compose mount the CONFIG_PATH host file and point the container at it (#39830)', () => {
+      const compose = yaml.load(
+        readFileSync(
+          join(fileURLToPath(new URL('../../..', import.meta.url)), 'docker-compose.yml'),
+          'utf-8',
+        ),
+      ) as {
+        services: { connector: { volumes: unknown[]; environment: Record<string, string> } };
+      };
+      const { volumes, environment } = compose.services.connector;
+      // Long syntax: the short form reads `live.config.yml` as a named volume,
+      // and creates a directory in place of a missing file.
+      expect(volumes[0]).toEqual({
+        type: 'bind',
+        source: '${CONFIG_PATH:-./connector.config.yml}',
+        target: '/app/connector.config.yml',
+        read_only: true,
+        bind: { create_host_path: false },
+      });
+      // Overrides the host-side value that env_file forwards from .env.
+      expect(environment['CONFIG_PATH']).toBe('/app/connector.config.yml');
     });
 
     it('still writes connector.config.yml when CONFIG_PATH is not set', async () => {

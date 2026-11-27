@@ -2342,14 +2342,17 @@ export async function runWizard(): Promise<void> {
   // Caddy anyway would put an untrusted hop in front of the connector.
   // Compose reads env_file and interpolated service settings only when creating
   // containers. Compare parsed values so quoting/comment-only rewrites still
-  // use the lightweight restart that reloads the bind-mounted mapping.
+  // use the lightweight restart that reloads the bind-mounted mapping. With
+  // CONFIG_PATH set, that mount may have moved since the container was created,
+  // and `restart` would keep reading the previous file (#39830).
   const nextEnv = parse(envContent);
   const environmentChanged = [
     ...new Set([...Object.keys(existingEnv), ...Object.keys(nextEnv)]),
   ].some((key) => existingEnv[key] !== nextEnv[key]);
   const domainChanged = existingEnv['CONNECTOR_DOMAIN'] !== nextEnv['CONNECTOR_DOMAIN'];
   const listenPortChanged = existingEnv['CONNECTOR_PORT'] !== nextEnv['CONNECTOR_PORT'];
-  const dockerReloadCommand = environmentChanged
+  const needsRecreate = environmentChanged || hasCustomConfigPath;
+  const dockerReloadCommand = needsRecreate
     ? `docker compose up -d --force-recreate connector${
         proxyTopology === 'bundled' && (domainChanged || listenPortChanged) ? ' caddy' : ''
       }`
@@ -2358,7 +2361,7 @@ export async function runWizard(): Promise<void> {
   if (proxyTopology === 'bundled') {
     console.log(
       hasExistingConfig || hasExistingEnv
-        ? `\n   ${environmentChanged ? 'Recreate' : 'Restart'} the connector: ${dockerReloadCommand}`
+        ? `\n   ${needsRecreate ? 'Recreate' : 'Restart'} the connector: ${dockerReloadCommand}`
         : '\n   Start the connector: docker compose up -d',
     );
     console.log(`   Verify the public endpoint: curl -fsS https://${connectorDomain}/health`);

@@ -12,11 +12,24 @@ services:
     ports:
       - '${CONNECTOR_BIND:-127.0.0.1}:${CONNECTOR_PORT:-4000}:${CONNECTOR_PORT:-4000}'
     volumes:
-      - ./connector.config.yml:/app/connector.config.yml:ro
+      # The host file `npm run setup` writes and `npm run validate` reads:
+      # CONFIG_PATH from the shell or .env (relative to this directory, or
+      # absolute), else connector.config.yml. Long syntax because the short form
+      # reads a bare name such as `live.config.yml` as a named volume. A missing
+      # file stops `up` instead of being created as a directory.
+      - type: bind
+        source: ${CONFIG_PATH:-./connector.config.yml}
+        target: /app/connector.config.yml
+        read_only: true
+        bind:
+          create_host_path: false
       - ./logs:/app/logs
     env_file:
       - .env
     environment:
+      # CONFIG_PATH in .env names the host file mounted above. Inside the
+      # container the connector has to read the mount destination instead.
+      CONFIG_PATH: /app/connector.config.yml
       # The wizard runs on the host, where a loopback DB_HOST is correct. Keep
       # that host-side address in .env and only replace it inside this
       # container, where localhost would point back at the connector itself.
