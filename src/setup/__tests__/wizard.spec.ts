@@ -59,7 +59,7 @@ import { findMatchingKey } from '../../auth/api-key.guard.js';
 import { loadConfig } from '../../config/config.loader.js';
 import { buildQuery } from '../../mapping/query-builder.js';
 import { mapRowToInventoryItem } from '../../mapping/field-mapper.js';
-import { introspectDatabase } from '../introspect.js';
+import { introspectDatabase, type IntrospectedColumn } from '../introspect.js';
 import { createDatabaseAdapter } from '../../db/adapter.factory.js';
 import { probeInventoryResource } from '../../routes/health.route.js';
 import type { InventoryResourceConfig, RelationConfig } from '../../config/config.types.js';
@@ -1833,13 +1833,28 @@ describe('runWizard', () => {
       expectedFilter: 'FALSE',
       firstRunUnchecked: false,
     },
+    {
+      scenario: 'deferring an empty typed relation and selecting photos after import',
+      answers: [[], ['gallery']],
+      expectedFilter: `"type" = 'gallery'`,
+      firstRunUnchecked: false,
+      initialEmptyFilter: 'FALSE',
+    },
+    {
+      scenario: 'explicitly including every type before photos are imported',
+      answers: [['\0all-image-types'], 'defaults'],
+      expectedFilter: undefined,
+      firstRunUnchecked: false,
+      initialEmptyFilter: undefined,
+    },
   ])('saves $scenario in image relations', async (testCase) => {
     const { answers, expectedFilter, firstRunUnchecked } = testCase;
     const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
     const previousDirectory = process.cwd();
-    const distinctImageTypes = firstRunUnchecked
+    const importedImageTypes = firstRunUnchecked
       ? ['مصغرة', 'thumb', 'swatch', 'document']
       : ["Men's", 'featured', 'gallery', 'icon', 'invoice', 'thumbnail'];
+    let distinctImageTypes = 'initialEmptyFilter' in testCase ? [] : importedImageTypes;
     let includedTypes: string[] | 'defaults' = answers[0] as string[];
     const db = Object.assign(vi.fn(), {
       destroy: vi.fn().mockResolvedValue(undefined),
@@ -1896,7 +1911,10 @@ describe('runWizard', () => {
         if (message.startsWith('Which filters should be available')) return Promise.resolve([]);
         if (message.startsWith('Select columns from Image')) return Promise.resolve(['url']);
         if (message.startsWith('Select columns from CarFeatures')) return Promise.resolve(['name']);
-        if (message.startsWith('Which "type" values on Image')) {
+        if (
+          message.startsWith('Which "type" values on Image') ||
+          message.startsWith('No "type" values found on Image')
+        ) {
           // 'defaults' is a merchant pressing Enter on the prompt as presented.
           return Promise.resolve(
             includedTypes === 'defaults'
@@ -1929,7 +1947,9 @@ describe('runWizard', () => {
             // in with gallery/featured photos.
             name: 'Image',
             kind: 'table',
-            rowCount: 500,
+            get rowCount() {
+              return distinctImageTypes.length === 0 ? 0 : 500;
+            },
             columns: [
               { name: 'id', type: 'uuid', nullable: false, isPrimaryKey: true },
               { name: 'carId', type: 'uuid', nullable: false, isPrimaryKey: false },
@@ -1970,15 +1990,30 @@ describe('runWizard', () => {
 
     try {
       process.chdir(directory);
+      const readConfig = () =>
+        loadExistingSetupConfig(join(directory, 'connector.config.yml'), join(directory, '.env'));
       for (const answer of answers) {
         includedTypes = answer as string[] | 'defaults';
         await runWizard();
+        if (distinctImageTypes.length === 0) {
+          const relation = readConfig().resources.inventory.relations?.['Image__carId'];
+          expect(relation).toMatchObject({ table: 'Image', imageUrlField: 'url' });
+          expect(relation?.filter).toBe(testCase.initialEmptyFilter);
+          expect(promptMocks.checkbox).toHaveBeenCalledWith({
+            message: expect.stringMatching(/No "type" values found on Image.*defer/),
+            choices: [
+              {
+                name: expect.stringContaining('Include every type'),
+                value: '\0all-image-types',
+                checked: false,
+              },
+            ],
+          });
+          distinctImageTypes = importedImageTypes;
+        }
       }
 
-      const config = loadExistingSetupConfig(
-        join(directory, 'connector.config.yml'),
-        join(directory, '.env'),
-      );
+      const config = readConfig();
       const relations = config.resources.inventory.relations ?? {};
 
       expect(config.resources.inventory.imageUrlPrefix).toBe('https://shop.example.com');
@@ -6352,7 +6387,7 @@ describe('runWizard', () => {
           ]),
         }),
       );
-      expect(inventory).not.toHaveProperty('searchableColumns');
+      expect(inventory.searchableColumns).toEqual([]);
       expect(inventory).not.toHaveProperty('filterableColumns');
       expect(inventory).not.toHaveProperty('relations');
       expect(consoleLog).toHaveBeenCalledWith(
@@ -7435,7 +7470,10 @@ describe('runWizard', () => {
   // the audit log. These three cases pin the topology-specific next steps.
   describe('topology-specific "next steps" (#27229)', () => {
     /** Minimal happy-path prompt wiring shared by the three topology cases below. */
-    function mockMinimalRunPrompts(topology: 'bundled' | 'custom' | 'none'): void {
+    function mockMinimalRunPrompts(
+      topology: 'bundled' | 'custom' | 'none',
+      extraColumns: IntrospectedColumn[] = [],
+    ): void {
       promptMocks.select.mockImplementation(({ message }: { message: string }) => {
         if (message.startsWith('Database type')) return Promise.resolve('postgres');
         if (message.startsWith('Which table contains')) return Promise.resolve('products');
@@ -7478,6 +7516,7 @@ describe('runWizard', () => {
                 { name: 'title', type: 'text', nullable: false, isPrimaryKey: false },
                 { name: 'price', type: 'numeric', nullable: false, isPrimaryKey: false },
                 { name: 'currency', type: 'varchar', nullable: false, isPrimaryKey: false },
+                ...extraColumns,
               ],
             },
           ],
@@ -7498,6 +7537,66 @@ describe('runWizard', () => {
       const caddyfile = readFileSync(join(connectorRoot, 'Caddyfile'), 'utf-8');
       expect(caddyfile).toContain('{$CONNECTOR_PORT:4000}');
       expect(caddyfile).not.toContain('connector:4000');
+    });
+
+    it('keeps free-text search disabled when a rerun accepts the saved empty selection', async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
+      const previousDirectory = process.cwd();
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      vi.clearAllMocks();
+      const sku = { name: 'sku', type: 'text', nullable: false, isPrimaryKey: false };
+      mockMinimalRunPrompts('none', [sku]);
+      const configPath = join(directory, 'connector.config.yml');
+      const envPath = join(directory, '.env');
+
+      try {
+        process.chdir(directory);
+        await runWizard();
+        expect(promptMocks.checkbox).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: expect.stringContaining('Which columns should be searchable'),
+            choices: expect.arrayContaining([
+              expect.objectContaining({ value: 'title', checked: true }),
+              expect.objectContaining({ value: 'sku', checked: true }),
+            ]),
+          }),
+        );
+        const firstInventory = loadExistingSetupConfig(configPath, envPath).resources.inventory;
+
+        mockMinimalRunPrompts('none', [sku]);
+        promptMocks.confirm.mockImplementation(({ message, default: value }) =>
+          Promise.resolve(
+            message.startsWith('Existing connector configuration') || (value ?? true),
+          ),
+        );
+        promptMocks.checkbox.mockImplementation(
+          ({
+            message,
+            choices,
+          }: {
+            message: string;
+            choices: { value: string; checked: boolean }[];
+          }) =>
+            Promise.resolve(
+              message.startsWith('Which columns should be searchable')
+                ? choices.filter((choice) => choice.checked).map((choice) => choice.value)
+                : [],
+            ),
+        );
+        await runWizard();
+
+        expect(firstInventory.searchableColumns).toEqual([]);
+        const inventory = loadExistingSetupConfig(configPath, envPath).resources.inventory;
+        expect(inventory.searchableColumns).toEqual([]);
+        expect(buildQuery({ search: 'lamp' }, inventory)).toMatchObject({
+          ignoredFilters: ['search'],
+          conditions: [],
+        });
+      } finally {
+        consoleLog.mockRestore();
+        process.chdir(previousDirectory);
+        rmSync(directory, { recursive: true, force: true });
+      }
     });
 
     it.each([

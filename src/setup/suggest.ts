@@ -510,11 +510,10 @@ const IDENTIFIER_SEARCHABLE_PATTERNS: RegExp[] = [
 ];
 
 /**
- * Default for a searchable-column checkbox on a wizard rerun. A column already in the
- * existing `searchableColumns` stays checked. An identifier column (sku, barcode, vin,
- * ...) missing from an older file was never asked about, so it is pre-checked rather
- * than treated as an explicit uncheck. Any other column missing from the file keeps the
- * operator's earlier choice (unchecked). With no existing list, `freshDefault` applies.
+ * Default for a searchable-column checkbox on a wizard rerun. An explicit empty
+ * `searchableColumns` list keeps every column unchecked. A column in a saved list
+ * stays checked. Identifier columns (sku, barcode, vin, ...) omitted from an older
+ * non-empty list are pre-checked. With no existing list, `freshDefault` applies.
  * `quotedName` is the column as it appears in the config (`"sku"`).
  */
 export function getSearchableColumnDefault(
@@ -524,6 +523,7 @@ export function getSearchableColumnDefault(
   freshDefault: boolean,
 ): boolean {
   if (!existingSearchableColumns) return freshDefault;
+  if (existingSearchableColumns.length === 0) return false;
   if (existingSearchableColumns.includes(quotedName)) return true;
   return IDENTIFIER_SEARCHABLE_PATTERNS.some((p) => p.test(columnName));
 }

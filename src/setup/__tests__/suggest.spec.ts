@@ -415,6 +415,11 @@ describe('getSearchableColumnDefault', () => {
     expect(getSearchableColumnDefault('notes', '"notes"', undefined, true)).toBe(true);
     expect(getSearchableColumnDefault('notes', '"notes"', undefined, false)).toBe(false);
   });
+
+  it('keeps all columns unchecked when the saved list is empty', () => {
+    expect(getSearchableColumnDefault('title', '"title"', [], true)).toBe(false);
+    expect(getSearchableColumnDefault('sku', '"sku"', [], true)).toBe(false);
+  });
 });
 
 describe('getInStockFilterDefault', () => {

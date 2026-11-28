@@ -895,7 +895,9 @@ async function collectConfiguredRelation(options: {
         typeColumn,
         pkColumn?.name,
       );
-      if (distinctTypeValues.length > 0) {
+      // With no sampled types, preserve a saved policy and let a new mapping
+      // defer photos until a later run can offer the available types.
+      if (distinctTypeValues.length > 0 || existingRelation === undefined) {
         const presentedValues = distinctTypeValues.slice(0, IMAGE_TYPE_VALUE_PROMPT_LIMIT);
         const savedFilter = existingRelation?.filter;
         const savedValues = presentedValues.filter((value) =>
@@ -919,7 +921,10 @@ async function collectConfiguredRelation(options: {
           );
         } else {
           const includedValues = await checkbox({
-            message: `Which "${typeColumn}" values on ${suggestion.table} are customer-facing photos? (unchecked values — e.g. thumbnails, icons, invoices — are left out of images[])`,
+            message:
+              presentedValues.length === 0
+                ? `No "${typeColumn}" values found on ${suggestion.table}. Leave the choice unchecked to defer publishing photos until types are available.`
+                : `Which "${typeColumn}" values on ${suggestion.table} are customer-facing photos? (unchecked values — e.g. thumbnails, icons, invoices — are left out of images[])`,
             choices: [
               ...presentedValues.map((value) => ({
                 name: value,
@@ -2160,7 +2165,8 @@ export async function runWizard(): Promise<void> {
         ...(statusValues ? { statusValues } : {}),
         ...(unknownStatusPolicy ? { unknownStatusPolicy } : {}),
         ...(Object.keys(attributes).length > 0 ? { attributes } : {}),
-        ...(searchableColumns.length > 0
+        ...(allTextColumns.length > 0 ||
+        existingConfig?.resources.inventory.searchableColumns?.length === 0
           ? { searchableColumns: searchableColumns.map(quoteIfNeeded) }
           : {}),
         ...(Object.keys(filterableColumns).length > 0 ? { filterableColumns } : {}),
