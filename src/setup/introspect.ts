@@ -218,7 +218,7 @@ function createDatabaseClient(options: DbConnectOptions): Knex {
   });
 }
 
-async function introspectTables(db: Knex, schema: string): Promise<IntrospectedTable[]> {
+export async function introspectTables(db: Knex, schema: string): Promise<IntrospectedTable[]> {
   // information_schema filters by privilege; the catalogs do not, so check
   // SELECT on each materialized view. A column-level grant counts as readable.
   const tableRows = await db.raw<{

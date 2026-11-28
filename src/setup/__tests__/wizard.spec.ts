@@ -59,7 +59,12 @@ import { findMatchingKey } from '../../auth/api-key.guard.js';
 import { loadConfig } from '../../config/config.loader.js';
 import { buildQuery } from '../../mapping/query-builder.js';
 import { mapRowToInventoryItem } from '../../mapping/field-mapper.js';
-import { introspectDatabase, type IntrospectedColumn } from '../introspect.js';
+import {
+  introspectDatabase,
+  introspectTables,
+  type IntrospectedColumn,
+  type IntrospectedTable,
+} from '../introspect.js';
 import { createDatabaseAdapter } from '../../db/adapter.factory.js';
 import { probeInventoryResource } from '../../routes/health.route.js';
 import type { InventoryResourceConfig, RelationConfig } from '../../config/config.types.js';
@@ -72,7 +77,10 @@ const promptMocks = vi.hoisted(() => ({
   select: vi.fn(),
 }));
 
-const introspectionMocks = vi.hoisted(() => ({ introspectDatabase: vi.fn() }));
+const introspectionMocks = vi.hoisted(() => ({
+  introspectDatabase: vi.fn(),
+  introspectTables: vi.fn(),
+}));
 const resourceProbeMocks = vi.hoisted(() => {
   const adapter = {
     connect: vi.fn().mockResolvedValue(undefined),
@@ -93,7 +101,11 @@ const resourceProbeMocks = vi.hoisted(() => {
 vi.mock('@inquirer/prompts', () => promptMocks);
 vi.mock('../introspect.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../introspect.js')>();
-  return { ...actual, introspectDatabase: introspectionMocks.introspectDatabase };
+  return {
+    ...actual,
+    introspectDatabase: introspectionMocks.introspectDatabase,
+    introspectTables: introspectionMocks.introspectTables,
+  };
 });
 vi.mock('../../db/adapter.factory.js', () => ({
   createDatabaseAdapter: resourceProbeMocks.createDatabaseAdapter,
@@ -4193,6 +4205,7 @@ describe('runWizard', () => {
         relatedTables?: Awaited<ReturnType<typeof introspectDatabase>>['result']['tables'];
         foreignKeys?: Awaited<ReturnType<typeof introspectDatabase>>['result']['foreignKeys'];
         imageTypes?: string[];
+        extraSchemaTables?: Record<string, IntrospectedTable[] | 'inaccessible'>;
       } = {},
     ) => {
       const directory = mkdtempSync(join(tmpdir(), 'kasbly-connector-wizard-'));
@@ -4317,6 +4330,13 @@ describe('runWizard', () => {
           foreignKeys: options.foreignKeys ?? [],
         },
         retriedWithTls: false,
+      });
+      vi.mocked(introspectTables).mockImplementation(async (_db, schema) => {
+        const tables = options.extraSchemaTables?.[schema];
+        if (tables === 'inaccessible') {
+          throw new Error(`permission denied for schema ${schema}`);
+        }
+        return tables ?? [];
       });
 
       try {
@@ -4591,6 +4611,70 @@ describe('runWizard', () => {
         });
         expect(relations ?? {}).not.toHaveProperty('manual');
         expect(logs.join('\n')).toContain('relations.manual');
+      });
+
+      it('keeps a cross-schema photo relation and its schema when accepting defaults', async () => {
+        const photos = {
+          schema: 'extras',
+          table: 'product_images',
+          foreignKey: 'product_id',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+        };
+        const extrasTable: IntrospectedTable = {
+          name: 'product_images',
+          kind: 'table',
+          rowCount: 10,
+          columns: ['product_id', 'url', 'type', 'position', 'is_public'].map((name) => ({
+            name,
+            type: name === 'position' ? 'integer' : 'text',
+            nullable: false,
+            isPrimaryKey: false,
+          })),
+        };
+        const { relations } = await rerunWithBaseFilter('', [], undefined, {
+          extraYaml: relationYaml({ photos }),
+          extraSchemaTables: { extras: [extrasTable] },
+        });
+        expect(relations?.photos).toEqual(photos);
+        expect(relations?.photos?.schema).toBe('extras');
+      });
+
+      it('drops a cross-schema relation when its schema is inaccessible and says so', async () => {
+        const photos = {
+          schema: 'extras',
+          table: 'product_images',
+          foreignKey: 'product_id',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+        };
+        const { relations, logs } = await rerunWithBaseFilter('', [], undefined, {
+          extraYaml: relationYaml({ photos }),
+          extraSchemaTables: { extras: 'inaccessible' },
+        });
+        expect(relations ?? {}).not.toHaveProperty('photos');
+        expect(logs.join('\n')).toContain('relations.photos (schema extras inaccessible)');
+      });
+
+      it('drops a cross-schema relation when the table is missing from its schema and says so', async () => {
+        const photos = {
+          schema: 'extras',
+          table: 'product_images',
+          foreignKey: 'product_id',
+          referenceKey: 'id',
+          fields: { url: 'url' },
+          imageUrlField: 'url',
+        };
+        const { relations, logs } = await rerunWithBaseFilter('', [], undefined, {
+          extraYaml: relationYaml({ photos }),
+          extraSchemaTables: { extras: [] },
+        });
+        expect(relations ?? {}).not.toHaveProperty('photos');
+        expect(logs.join('\n')).toContain(
+          'relations.photos (table product_images not in schema extras)',
+        );
       });
     });
 

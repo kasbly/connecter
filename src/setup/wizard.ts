@@ -23,6 +23,7 @@ import {
   compareSetupTablesByRowCount,
   formatSetupTableChoice,
   introspectDatabase,
+  introspectTables,
   type IntrospectedColumn,
   type IntrospectedTable,
 } from './introspect.js';
@@ -1734,12 +1735,23 @@ export async function runWizard(): Promise<void> {
   const relations: Record<string, RelationConfig> = {};
   const askedRelationNames = new Set<string>();
   const carriedRelations = new Map<string, RelationConfig>();
+  const extraSchemaTables = new Map<string, IntrospectedTable[] | null>();
   for (const [name, relation] of Object.entries(existingInventory?.relations ?? {})) {
-    const relTable = result.tables.find((table) => table.name === relation.table);
-    const sameRelationSchema = (relation.schema ?? selectedSchema) === selectedSchema;
+    const relationSchema = relation.schema ?? selectedSchema;
+    const relTables = await loadRelationTables(
+      db,
+      relationSchema,
+      selectedSchema,
+      result.tables,
+      extraSchemaTables,
+    );
+    if (relTables === null) {
+      droppedStaleMappings.push(`relations.${name} (schema ${relationSchema} inaccessible)`);
+      continue;
+    }
+    const relTable = relTables.find((table) => table.name === relation.table);
     if (
       !relTable ||
-      !sameRelationSchema ||
       !carriedColumnStillApplies(relation.referenceKey, sameTable, selectedTable.columns) ||
       ![
         relation.foreignKey,
@@ -1747,7 +1759,11 @@ export async function runWizard(): Promise<void> {
         ...(relation.orderBy ? [relation.orderBy.column] : []),
       ].every((column) => carriedColumnStillApplies(column, sameTable, relTable.columns))
     ) {
-      droppedStaleMappings.push(`relations.${name}`);
+      droppedStaleMappings.push(
+        relTable
+          ? `relations.${name}`
+          : `relations.${name} (table ${relation.table} not in schema ${relationSchema})`,
+      );
       continue;
     }
     carriedRelations.set(name, relation);
@@ -1920,7 +1936,8 @@ export async function runWizard(): Promise<void> {
 
   // The manual picker is optional: declining to add another relation does not
   // reject saved relations it never asked about. Carry those forward only when
-  // their parent, child, and referenced columns still exist in this schema.
+  // their parent, child, and referenced columns still exist. A child table may
+  // live in another schema; verify it there instead of dropping it (#40049).
   for (const [name, relation] of carriedRelations) {
     if (name in relations || askedRelationNames.has(name)) continue;
     relations[name] = relation;
@@ -2651,6 +2668,35 @@ function unquoteIdentifier(value: string): string {
  * still exist there. Anything else is a SQL expression the wizard cannot
  * check, so it is kept on the same table only (#35653).
  */
+/**
+ * Tables for a saved relation's schema. Inventory-schema relations reuse the
+ * setup introspection; a different schema is inspected on demand so a rerun
+ * can keep working cross-schema mappings (#40049). `null` means the schema
+ * could not be read.
+ */
+async function loadRelationTables(
+  db: Awaited<ReturnType<typeof introspectDatabase>>['db'],
+  schema: string,
+  selectedSchema: string,
+  selectedTables: IntrospectedTable[],
+  cache: Map<string, IntrospectedTable[] | null>,
+): Promise<IntrospectedTable[] | null> {
+  if (schema === selectedSchema) return selectedTables;
+  if (cache.has(schema)) return cache.get(schema) ?? null;
+  try {
+    const tables = await introspectTables(db, schema);
+    if (!Array.isArray(tables)) {
+      cache.set(schema, null);
+      return null;
+    }
+    cache.set(schema, tables);
+    return tables;
+  } catch {
+    cache.set(schema, null);
+    return null;
+  }
+}
+
 function carriedColumnStillApplies(
   expression: string,
   sameTable: boolean,
